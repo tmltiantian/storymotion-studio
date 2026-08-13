@@ -1,0 +1,39 @@
+{
+  "workspace": ".",
+  "sources": {
+    "openMontage": "external/OpenMontage"
+  },
+  "runsDir": "runs",
+  "outputDir": "output",
+  "mode": "dry-run-first",
+  "episodeDefaults": {
+    "targetAspectRatio": "9:16",
+    "targetResolution": "1080x1920",
+    "targetFps": 30,
+    "motionCadenceFps": 12,
+    "targetDurationSeconds": 75,
+    "mainCharacterCount": 2
+  },
+  "qualityUpgrade": {
+    "draftVideoModel": "doubao-seedance-2-0-fast",
+    "productionVideoModels": [
+      "doubao-seedance-2-0"
+    ],
+    "productionStillModels": [
+      "doubao-seedream-4-5"
+    ],
+    "experimentalVideoModels": [
+      "doubao-seedance-1-5-pro"
+    ],
+    "experimentalStillModels": [
+      "gpt-image-2"
+    ],
+    "productionResolution": "1080p",
+    "stillModelSizes": {
+      "doubao-seedream-4-5": "1440x2560",
+      "gpt-image-2": "1024x1536"
+    },
+    "maxPaidCandidatesPerModel": 3,
+    "minimumBakeoffScore": 80
+  }
+}

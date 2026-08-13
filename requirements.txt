@@ -1,0 +1,6 @@
+Pillow==12.2.0
+numpy==2.5.1
+opencv-python-headless==5.0.0.93
+pytest==9.1.1
+requests==2.34.2
+ruff==0.15.6
