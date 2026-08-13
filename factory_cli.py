@@ -4084,7 +4084,9 @@ def pet_sitcom_command(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Novel motion comic factory")
+    parser = argparse.ArgumentParser(
+        description="StoryMotion Studio AI narrative video pipeline"
+    )
     parser.add_argument("--config", default="config/factory.config.json")
     subparsers = parser.add_subparsers(dest="command", required=True)
 

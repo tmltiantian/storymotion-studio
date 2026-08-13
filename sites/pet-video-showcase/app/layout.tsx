@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "宠物短剧项目放映室",
-  description: "《咪要去面试》成片、问题修复与迭代档案",
+  title: "StoryMotion Studio",
+  description: "AI narrative video production, review, and iteration archive",
   icons: {
     icon: "/evidence/poster.jpg",
     shortcut: "/evidence/poster.jpg",

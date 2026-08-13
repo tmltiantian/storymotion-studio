@@ -1,6 +1,6 @@
-# 漫剧工厂
+# StoryMotion Studio
 
-把原创构思、小说文本或参考视频统一转成有声短剧的本地生产系统。
+从构思、小说和参考视频到有声 AI 漫剧的一站式生产系统。
 
 核心流程只有一条：
 
@@ -28,7 +28,7 @@ LumenX 不再是运行依赖。旧版 LumenX handoff 仍可由网关批处理只
 ## 安装
 
 ```bash
-cd /path/to/manju-factory-next
+cd /path/to/storymotion-studio
 scripts/bootstrap_factory.sh
 cp .env.example .env
 ```
