@@ -1,0 +1,16 @@
+external/
+runs/
+output/
+# Legacy local queue history is retained outside source control.
+queue/
+models/
+.venv/
+**/node_modules/
+sites/**/.git/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+.DS_Store
+.env
+.worktrees/
