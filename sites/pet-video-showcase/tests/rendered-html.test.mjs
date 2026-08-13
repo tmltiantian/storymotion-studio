@@ -29,9 +29,9 @@ test("server-renders the pet drama screening room", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>宠物短剧项目放映室<\/title>/i);
+  assert.match(html, /<title>StoryMotion Studio<\/title>/i);
   assert.match(html, /咪要去面试/);
-  assert.match(html, /宠物短剧项目放映室/);
+  assert.match(html, /StoryMotion Studio/);
   assert.match(html, /\/media\/final-master\.mp4/);
   assert.match(html, /成片/);
   assert.match(html, /问题修复/);
@@ -78,7 +78,7 @@ test("keeps project evidence, accessibility, and responsive rules in the shipped
   assert.match(css, /prefers-reduced-motion: reduce/);
   assert.doesNotMatch(css, /linear-gradient|radial-gradient/);
   assert.match(layout, /lang="zh-CN"/);
-  assert.match(layout, /宠物短剧项目放映室/);
+  assert.match(layout, /StoryMotion Studio/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
 });
 

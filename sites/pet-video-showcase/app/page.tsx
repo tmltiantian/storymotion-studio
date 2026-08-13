@@ -335,7 +335,7 @@ export default function ProjectShowcasePage() {
       <header className="topbar">
         <a className="brand" href="#screening" aria-label="返回成片放映区">
           <ScanLine aria-hidden="true" size={19} />
-          <span>宠物短剧项目放映室</span>
+          <span>StoryMotion Studio</span>
         </a>
         <div className="release-state">
           <span className="status-dot" aria-hidden="true" />
@@ -722,7 +722,7 @@ export default function ProjectShowcasePage() {
       </section>
 
       <footer>
-        <span>宠物短剧项目放映室</span>
+        <span>StoryMotion Studio</span>
         <span>FINAL MASTER / V3.1 / 2026</span>
       </footer>
 
