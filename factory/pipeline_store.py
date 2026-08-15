@@ -137,7 +137,15 @@ def update_stage(
     changed_signature = current.input_signature != input_signature
     changed_artifacts = current.artifacts != tuple(map(str, artifacts))
     changed = changed_signature or changed_artifacts
-    reset_review = changed and current.revision is not None and revision is None
+    reset_review = (
+        changed
+        and revision is None
+        and (
+            current.revision is not None
+            or current.review_state
+            in (ReviewState.APPROVED, ReviewState.AUTO_APPROVED)
+        )
+    )
     target_index = PIPELINE_STAGES.index(target)
     records: list[StageRecord] = []
     for index, record in enumerate(package.stages):
