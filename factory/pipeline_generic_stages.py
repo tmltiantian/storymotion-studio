@@ -14,7 +14,7 @@ from .media_assembly import assemble_visual_track, mux_final_audio
 from .novel_planner import plan_episode, read_novel
 from .openmontage_adapter import write_openmontage_package
 from .pipeline_context import StageContext, StageExecution
-from .pipeline_contracts import StageState
+from .pipeline_contracts import StageName, StageState
 from .pipeline_executors import register_executor
 from .pipeline_eval import build_automatic_eval
 from .placeholder_renderer import render_placeholder_video
@@ -298,15 +298,21 @@ def execute_video(context: StageContext) -> StageExecution:
             ),
             generate_audio=False,
             allow_network=True,
+            replace_stale=bool(
+                context.repair_scope.get(StageName.VIDEO.value, ())
+            ),
         )
         if not report.get("success"):
             detail = report.get("errors") or report.get("blocked_reasons")
             raise RuntimeError(f"Cloud video generation failed: {detail}")
         package_payload = _read_json(package)
-        clips = [
-            Path(str(item["expected_assets"]["video_clip"]))
+        clip_by_shot = {
+            str(item["shot_id"]): Path(
+                str(item["expected_assets"]["video_clip"])
+            )
             for item in package_payload["timeline"]
-        ]
+        }
+        clips = [clip_by_shot[shot.id] for shot in episode.shots]
         missing = [str(path) for path in clips if not path.is_file()]
         if missing:
             raise RuntimeError(f"Cloud video clips are missing: {missing}")
@@ -331,6 +337,12 @@ def execute_video(context: StageContext) -> StageExecution:
             "generation_mode": generation_mode,
             "primary_video": str(output.resolve()) if output.is_file() else "",
             "clips": [str(path.resolve()) for path in clips],
+            "clip_by_shot": {
+                shot.id: str(clip_by_shot[shot.id].resolve())
+                for shot in episode.shots
+            }
+            if clips
+            else {},
             "cloud_generation_requested": context.enable_live,
             "lip_sync_policy": (
                 "exact_tts_reference_audio"
@@ -355,7 +367,21 @@ def execute_edit(context: StageContext) -> StageExecution:
     visual = Path(str(video["primary_video"]))
     target_duration = sum(shot.duration_seconds for shot in episode.shots)
     if not visual.is_file():
-        clips = [Path(str(path)) for path in video.get("clips") or ()]
+        raw_clip_by_shot = video.get("clip_by_shot")
+        if isinstance(raw_clip_by_shot, dict) and raw_clip_by_shot:
+            missing_shots = tuple(
+                shot.id for shot in episode.shots if not raw_clip_by_shot.get(shot.id)
+            )
+            if missing_shots:
+                raise ValueError(
+                    "Video stage did not produce clips for: "
+                    + ", ".join(missing_shots)
+                )
+            clips = [
+                Path(str(raw_clip_by_shot[shot.id])) for shot in episode.shots
+            ]
+        else:
+            clips = [Path(str(path)) for path in video.get("clips") or ()]
         if not clips:
             raise ValueError("Video stage did not produce any clips")
         durations = [shot.duration_seconds for shot in episode.shots[: len(clips)]]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,8 +10,16 @@ from factory.media_validation import MediaProbeResult
 from factory import pipeline_generic_stages
 from factory.pipeline_artifacts import load_stage_manifest, manifest_artifact_paths
 from factory.pipeline_contracts import ProjectMode, ProjectSpec, StageName, StageState
+from factory.pipeline_context import StageContext
+from factory.pipeline_modes import get_mode_adapter
 from factory.pipeline_runner import run_pipeline
-from factory.pipeline_store import approve_stage, create_project, load_production_package
+from factory.pipeline_store import (
+    approve_stage,
+    create_project,
+    load_production_package,
+    load_project_spec,
+)
+from factory.schema import Episode, Shot
 
 
 def _project(tmp_path: Path, mode: ProjectMode) -> Path:
@@ -211,3 +220,192 @@ def test_native_media_stages_keep_outputs_isolated_and_stop_at_review_gates(
     assert delivery.stopped_state is StageState.BLOCKED
     assert (root / "stages/deliver/master.mp4").read_bytes() == b"final"
     assert (root / "stages/deliver/delivery_manifest.json").is_file()
+
+
+def test_edit_assembles_preserved_and_repaired_clips_in_storyboard_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _project(tmp_path, ProjectMode.ORIGINAL)
+    clips = {
+        shot_id: root / "stages" / "video" / f"{shot_id}.mp4"
+        for shot_id in ("shot_01", "shot_02", "shot_03")
+    }
+    for path in clips.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(path.name.encode("ascii"))
+    audio = root / "stages" / "audio" / "voice.m4a"
+    subtitles = root / "stages" / "audio" / "subtitles.srt"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"audio")
+    subtitles.write_text("", encoding="utf-8")
+    episode = Episode(
+        project_id="original",
+        title="Test",
+        language="zh-CN",
+        style="comic",
+        target_aspect_ratio="9:16",
+        target_resolution="1080x1920",
+        characters=[],
+        shots=[
+            Shot(
+                id=shot_id,
+                index=index,
+                scene_title="scene",
+                action="action",
+                visual_prompt="prompt",
+                camera="wide",
+                duration_seconds=float(index),
+                audio_mood="quiet",
+            )
+            for index, shot_id in enumerate(clips, start=1)
+        ],
+    )
+    assembled: list[Path] = []
+
+    def fake_assemble(ordered_clips, durations, output, **kwargs):
+        assembled.extend(ordered_clips)
+        Path(output).write_bytes(b"assembled")
+        return Path(output)
+
+    def fake_mux(video, voiceover, output, **kwargs):
+        Path(output).write_bytes(b"final")
+        return Path(output)
+
+    monkeypatch.setattr(pipeline_generic_stages, "_episode", lambda context: episode)
+    monkeypatch.setattr(
+        pipeline_generic_stages,
+        "_video_manifest",
+        lambda context: {
+            "primary_video": "",
+            "clips": [str(path) for path in reversed(tuple(clips.values()))],
+            "clip_by_shot": {
+                shot_id: str(path) for shot_id, path in clips.items()
+            },
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_generic_stages,
+        "_audio_manifest",
+        lambda context: {
+            "voiceover_audio": str(audio),
+            "subtitles": str(subtitles),
+        },
+    )
+    monkeypatch.setattr(pipeline_generic_stages, "assemble_visual_track", fake_assemble)
+    monkeypatch.setattr(pipeline_generic_stages, "mux_final_audio", fake_mux)
+    adapter = get_mode_adapter(ProjectMode.ORIGINAL)
+    context = StageContext(
+        root,
+        load_project_spec(root),
+        StageName.EDIT,
+        adapter.stage_steps[StageName.EDIT],
+        False,
+        repair_scope={StageName.VIDEO.value: ("shot_03",)},
+    )
+
+    pipeline_generic_stages.execute_edit(context)
+
+    assert assembled == [clips["shot_01"], clips["shot_02"], clips["shot_03"]]
+
+
+def test_live_video_repair_enables_signature_reuse_and_registers_every_clip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _project(tmp_path, ProjectMode.ORIGINAL)
+    adapter = get_mode_adapter(ProjectMode.ORIGINAL)
+    context = StageContext(
+        root,
+        load_project_spec(root),
+        StageName.VIDEO,
+        adapter.stage_steps[StageName.VIDEO],
+        True,
+        repair_scope={StageName.VIDEO.value: ("shot_02",)},
+    )
+    episode = SimpleNamespace(
+        shots=[
+            SimpleNamespace(id="shot_01"),
+            SimpleNamespace(id="shot_02"),
+        ]
+    )
+    audio = context.project_dir / "audio.m4a"
+    audio.write_bytes(b"audio")
+    handoff = context.stage_dir / "handoff.json"
+    package = context.stage_dir / "package.json"
+    clips = [context.stage_dir / "shot_01.mp4", context.stage_dir / "shot_02.mp4"]
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(pipeline_generic_stages, "_episode", lambda current: episode)
+    monkeypatch.setattr(
+        pipeline_generic_stages,
+        "_audio_manifest",
+        lambda current: {"voiceover_audio": str(audio)},
+    )
+    monkeypatch.setattr(pipeline_generic_stages, "_assets", lambda current: {})
+    monkeypatch.setattr(pipeline_generic_stages, "_factory_config", lambda current: {})
+    monkeypatch.setattr(
+        pipeline_generic_stages,
+        "resolve_provider_profile",
+        lambda config: SimpleNamespace(
+            video=SimpleNamespace(
+                provider="gateway", model="video-model", ready=True, blockers=()
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline_generic_stages,
+        "write_video_handoff",
+        lambda *args, **kwargs: handoff,
+    )
+    monkeypatch.setattr(
+        pipeline_generic_stages,
+        "write_shot_audio_assets",
+        lambda *args, **kwargs: {},
+    )
+
+    def fake_package(*args, **kwargs):
+        package.parent.mkdir(parents=True, exist_ok=True)
+        package.write_text(
+            json.dumps(
+                {
+                    "timeline": [
+                        {
+                            "shot_id": shot_id,
+                            "expected_assets": {"video_clip": str(clip)},
+                        }
+                        for shot_id, clip in zip(
+                            ("shot_01", "shot_02"), clips, strict=True
+                        )
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return package
+
+    def fake_batch(*args, **kwargs):
+        observed.update(kwargs)
+        for clip in clips:
+            clip.write_bytes(clip.name.encode("ascii"))
+        return {"success": True}
+
+    monkeypatch.setattr(
+        pipeline_generic_stages, "write_openmontage_package", fake_package
+    )
+    monkeypatch.setattr(
+        pipeline_generic_stages, "build_video_client", lambda *args, **kwargs: object()
+    )
+    monkeypatch.setattr(
+        pipeline_generic_stages, "render_gateway_video_batch", fake_batch
+    )
+
+    execution = pipeline_generic_stages.execute_video(context)
+    manifest = json.loads(
+        (context.stage_dir / "video_manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert observed["replace_stale"] is True
+    assert manifest["clip_by_shot"] == {
+        "shot_01": str(clips[0].resolve()),
+        "shot_02": str(clips[1].resolve()),
+    }
+    assert all(str(clip) in execution.artifacts for clip in clips)

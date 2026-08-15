@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -38,6 +39,7 @@ PACKAGE_FILENAME = "production_package.json"
 LEGACY_REVIEW_TRANSACTION_SCHEMA = "motion-comic-factory.review-transaction.v1"
 REVIEW_TRANSACTION_SCHEMA = "motion-comic-factory.review-transaction.v2"
 REVIEW_TRANSACTION_TOMBSTONE_SUFFIX = ".tombstone"
+ACTIVE_REPAIR_SCHEMA = "motion-comic-factory.active-repair.v1"
 
 
 class ApprovalInProgressError(RuntimeError):
@@ -95,6 +97,79 @@ def save_production_package(
     path = root / PACKAGE_FILENAME
     write_json_atomic(path, package.to_dict())
     return path
+
+
+def load_active_repair_state(project_dir: str | Path) -> dict[str, Any]:
+    root = _require_safe_project_dir(project_dir)
+    path = root / "impact_plans" / "active.json"
+    if not path.exists():
+        return {}
+    value = _read_object(path)
+    if value.get("schema_version") != ACTIVE_REPAIR_SCHEMA:
+        raise ValueError(f"Active repair state is invalid: {path}")
+    return value
+
+
+def apply_repair_state(
+    project_dir: str | Path,
+    *,
+    plan_id: str,
+    request_stage: StageName,
+    affected: dict[str, tuple[str, ...]],
+    preserved_artifacts: tuple[str, ...],
+    expected_package_sha256: str,
+) -> ProductionPackage:
+    root = _require_safe_project_dir(project_dir)
+    with _approval_lock(root):
+        _recover_review_transactions_locked(root)
+        package_path = root / PACKAGE_FILENAME
+        current_sha256 = hashlib.sha256(package_path.read_bytes()).hexdigest()
+        if current_sha256 != expected_package_sha256:
+            raise ValueError("Impact plan is stale relative to production package")
+        package = load_production_package(root)
+        target_index = PIPELINE_STAGES.index(StageName(request_stage))
+        records: list[StageRecord] = []
+        for index, record in enumerate(package.stages):
+            if index < target_index or record.state is StageState.PENDING:
+                records.append(record)
+                continue
+            records.append(
+                replace(
+                    record,
+                    state=StageState.STALE,
+                    blocked_reasons=(
+                        (f"Impact plan {plan_id} applied.",)
+                        if index == target_index
+                        else ()
+                    ),
+                    error="",
+                    revision=None,
+                    review_state=ReviewState.NOT_READY,
+                    review_blocks_progress=False,
+                    review_transaction_id="",
+                )
+            )
+        updated = _refresh_output_indexes(package.with_stages(records))
+        state = {
+            "schema_version": ACTIVE_REPAIR_SCHEMA,
+            "plan_id": plan_id,
+            "request_stage": StageName(request_stage).value,
+            "affected": {
+                str(stage): list(map(str, item_ids))
+                for stage, item_ids in affected.items()
+            },
+            "preserved_artifacts": list(map(str, preserved_artifacts)),
+            "source_package_sha256": expected_package_sha256,
+        }
+        active_path = root / "impact_plans" / "active.json"
+        active_path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(active_path, state)
+        try:
+            save_production_package(root, updated)
+        except BaseException:
+            active_path.unlink(missing_ok=True)
+            raise
+        return updated
 
 
 def _refresh_output_indexes(package: ProductionPackage) -> ProductionPackage:
