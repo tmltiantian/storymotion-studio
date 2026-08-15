@@ -37,6 +37,11 @@ SPEC_FILENAME = "project.json"
 PACKAGE_FILENAME = "production_package.json"
 LEGACY_REVIEW_TRANSACTION_SCHEMA = "motion-comic-factory.review-transaction.v1"
 REVIEW_TRANSACTION_SCHEMA = "motion-comic-factory.review-transaction.v2"
+REVIEW_TRANSACTION_TOMBSTONE_SUFFIX = ".tombstone"
+
+
+class ApprovalInProgressError(RuntimeError):
+    pass
 
 
 def _require_safe_project_dir(project_dir: str | Path) -> Path:
@@ -297,7 +302,9 @@ def _approval_lock(root: Path):
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise RuntimeError("Project approval is already in progress") from exc
+            raise ApprovalInProgressError(
+                "Project approval is already in progress"
+            ) from exc
         try:
             yield
         finally:
@@ -400,6 +407,38 @@ def _review_backup_path(transaction: Path, stage: StageName) -> Path:
     return transaction / f"{stage.value}.review.backup.json"
 
 
+def _is_review_transaction_tombstone(path: Path) -> bool:
+    return path.name.startswith(".") and path.name.endswith(
+        REVIEW_TRANSACTION_TOMBSTONE_SUFFIX
+    )
+
+
+def _review_transaction_tombstone_path(transaction: Path) -> Path:
+    return transaction.with_name(
+        f".{transaction.name}{REVIEW_TRANSACTION_TOMBSTONE_SUFFIX}"
+    )
+
+
+def _delete_review_transaction_tombstone(tombstone: Path) -> None:
+    shutil.rmtree(tombstone, ignore_errors=False)
+
+
+def _remove_review_transaction(transaction: Path) -> None:
+    if _is_review_transaction_tombstone(transaction):
+        _delete_review_transaction_tombstone(transaction)
+        return
+    tombstone = _review_transaction_tombstone_path(transaction)
+    if transaction.exists() or transaction.is_symlink():
+        if tombstone.exists() or tombstone.is_symlink():
+            raise RuntimeError(
+                f"Review transaction cleanup is ambiguous: {transaction}"
+            )
+        os.replace(transaction, tombstone)
+    elif not tombstone.exists():
+        return
+    _delete_review_transaction_tombstone(tombstone)
+
+
 def _rollback_review_transaction(
     root: Path, transaction: Path, entries: tuple[dict[str, Any], ...]
 ) -> tuple[str, ...]:
@@ -427,7 +466,7 @@ def _rollback_review_transaction(
         except Exception as exc:
             errors.append(str(exc))
     if not errors:
-        shutil.rmtree(transaction, ignore_errors=False)
+        _remove_review_transaction(transaction)
     return tuple(errors)
 
 
@@ -444,6 +483,23 @@ def _review_transaction_committed(
         and by_stage[StageName(str(entry["stage"]))].revision == int(entry["revision"])
         and by_stage[StageName(str(entry["stage"]))].review_transaction_id
         == transaction_id
+        for entry in entries
+    )
+
+
+def _legacy_review_transaction_committed(
+    root: Path, entries: tuple[dict[str, Any], ...]
+) -> bool:
+    package_path = root / PACKAGE_FILENAME
+    if not package_path.is_file() or package_path.is_symlink():
+        return False
+    package = ProductionPackage.from_dict(_read_object(package_path))
+    by_stage = {record.stage: record for record in package.stages}
+    return all(
+        by_stage[StageName(str(entry["stage"]))].review_state
+        is ReviewState.APPROVED
+        and by_stage[StageName(str(entry["stage"]))].revision
+        == int(entry["revision"])
         for entry in entries
     )
 
@@ -486,7 +542,7 @@ def _finish_committed_review_transaction(
             raise RuntimeError(
                 f"Committed review transaction is missing {stage.value}"
             )
-    shutil.rmtree(transaction, ignore_errors=False)
+    _remove_review_transaction(transaction)
 
 
 def _discard_uncommitted_review_transaction(
@@ -500,7 +556,7 @@ def _discard_uncommitted_review_transaction(
         canonical = _review_record_path(root, stage)
         if _canonical_review_transaction_id(canonical) == transaction_id:
             canonical.unlink()
-    shutil.rmtree(transaction, ignore_errors=False)
+    _remove_review_transaction(transaction)
 
 
 def _recover_review_transactions_locked(root: Path) -> None:
@@ -512,19 +568,16 @@ def _recover_review_transactions_locked(root: Path) -> None:
     for transaction in sorted(transactions.iterdir()):
         if transaction.is_symlink() or not transaction.is_dir():
             raise ValueError(f"Review transaction is invalid: {transaction}")
+        if _is_review_transaction_tombstone(transaction):
+            _remove_review_transaction(transaction)
+            continue
         if transaction.name.startswith(".") and transaction.name.endswith(".tmp"):
             shutil.rmtree(transaction, ignore_errors=False)
             continue
         schema, transaction_id, entries = _read_review_transaction(transaction)
         if schema == LEGACY_REVIEW_TRANSACTION_SCHEMA:
-            if all(
-                ProductionPackage.from_dict(
-                    _read_object(root / PACKAGE_FILENAME)
-                ).stages[PIPELINE_STAGES.index(StageName(str(entry["stage"])))].review_state
-                is ReviewState.APPROVED
-                for entry in entries
-            ):
-                shutil.rmtree(transaction, ignore_errors=False)
+            if _legacy_review_transaction_committed(root, entries):
+                _remove_review_transaction(transaction)
                 continue
             rollback_errors = _rollback_review_transaction(root, transaction, entries)
             if rollback_errors:
@@ -685,6 +738,17 @@ def request_stage_changes(
     reason: str,
 ) -> ProductionPackage:
     root = _require_safe_project_dir(project_dir)
+    with _approval_lock(root):
+        _recover_review_transactions_locked(root)
+        return _request_stage_changes_locked(root, stage, revision, reason)
+
+
+def _request_stage_changes_locked(
+    root: Path,
+    stage: StageName,
+    revision: int,
+    reason: str,
+) -> ProductionPackage:
     package = load_production_package(root)
     target = StageName(stage)
     index = PIPELINE_STAGES.index(target)
@@ -738,6 +802,18 @@ def approve_stage(
     revision: int | None = None,
 ) -> ProductionPackage:
     root = _require_safe_project_dir(project_dir)
+    with _approval_lock(root):
+        _recover_review_transactions_locked(root)
+        return _approve_stage_locked(root, stage, note, evidence, revision)
+
+
+def _approve_stage_locked(
+    root: Path,
+    stage: StageName,
+    note: str,
+    evidence: tuple[str | Path, ...],
+    revision: int | None,
+) -> ProductionPackage:
     spec = load_project_spec(root)
     package = load_production_package(root)
     target = StageName(stage)
@@ -769,7 +845,7 @@ def approve_stage(
             )
         else:
             stages = (target,)
-        return approve_review_bundle(root, stages, note=note, evidence=evidence)
+        return _approve_review_bundle_locked(root, stages, note, evidence)
     if current.state is not StageState.BLOCKED:
         raise ValueError(f"Stage {target.value} is not waiting for approval")
     if not get_mode_adapter(spec.mode).stage_steps[target].manual_gate:

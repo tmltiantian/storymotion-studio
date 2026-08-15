@@ -200,6 +200,38 @@ def test_factory_run_distinguishes_failed_from_blocked(
     assert payload["stopped_at"] == "script"
 
 
+def test_factory_run_exposes_retryable_review_in_progress(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(
+        "factory.pipeline_cli.run_pipeline",
+        lambda *_args, **_kwargs: PipelineRunResult(
+            False,
+            StageName.SCRIPT,
+            (StageName.CONCEPT,),
+            next_stage=StageName.SCRIPT,
+            stopped_state=StageState.PASSED,
+            review_in_progress=True,
+        ),
+    )
+
+    code, payload = _run(
+        monkeypatch,
+        capsys,
+        "--config",
+        str(config),
+        "factory",
+        "run",
+        "cat_episode",
+    )
+
+    assert code == 1
+    assert payload["run_state"] == "review_in_progress"
+    assert payload["review_in_progress"] is True
+    assert payload["required_action"] == "retry_review_validation"
+
+
 def test_factory_status_uses_single_project_location(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

@@ -24,6 +24,7 @@ from .pipeline_modes import ModeStep, get_mode_adapter
 from .pipeline_review import (
     ApprovalPreset,
     ReviewConfig,
+    ReviewValidation,
     resolve_review_config,
     validate_stage_review,
     write_stage_revision,
@@ -46,6 +47,7 @@ class PipelineRunResult:
     completed_stages: tuple[StageName, ...]
     next_stage: StageName | None = None
     stopped_state: StageState | None = None
+    review_in_progress: bool = False
 
 
 StageExecutor = Callable[[StageContext], StageExecution]
@@ -187,17 +189,23 @@ def _group_terminal(stage: StageName, config: ReviewConfig) -> bool:
     )
 
 
-def _review_validation_issue(project_dir: Path, record: StageRecord) -> str:
+def _review_validation(
+    project_dir: Path, record: StageRecord
+) -> ReviewValidation:
     if record.review_state is not ReviewState.APPROVED:
-        return ""
+        return ReviewValidation(True)
     if record.review_policy not in (ReviewPolicy.MANUAL, ReviewPolicy.GROUPED):
-        return ""
+        return ReviewValidation(True)
     validation = validate_stage_review(project_dir, record.stage)
     if not validation.valid:
-        return validation.reason
+        return validation
     if validation.review is None or validation.review.revision != record.revision:
-        return "Review does not match the package revision"
-    return ""
+        return ReviewValidation(
+            False,
+            "Review does not match the package revision",
+            validation.review,
+        )
+    return validation
 
 
 def _review_wait_result(
@@ -209,6 +217,19 @@ def _review_wait_result(
         tuple(completed),
         next_stage=stage,
         stopped_state=StageState.BLOCKED,
+    )
+
+
+def _review_in_progress_result(
+    stage: StageName, completed: list[StageName]
+) -> PipelineRunResult:
+    return PipelineRunResult(
+        False,
+        stage,
+        tuple(completed),
+        next_stage=stage,
+        stopped_state=StageState.PASSED,
+        review_in_progress=True,
     )
 
 
@@ -260,7 +281,12 @@ def run_pipeline(
                     bool(record.artifacts)
                     and record.review_state is ReviewState.NOT_READY
                 )
-                review_issue = _review_validation_issue(root, record)
+                review_validation = _review_validation(root, record)
+                if review_validation.busy:
+                    return _review_in_progress_result(stage, completed)
+                review_issue = (
+                    "" if review_validation.valid else review_validation.reason
+                )
                 if (
                     not missing
                     and not integrity_issue
@@ -424,7 +450,15 @@ def resume_pipeline(
 def pipeline_status(project_dir: str | Path) -> dict[str, object]:
     spec = load_project_spec(project_dir)
     package = load_production_package(project_dir)
-    next_record = next(
+    busy_record = next(
+        (
+            record
+            for record in package.stages
+            if _review_validation(Path(project_dir), record).busy
+        ),
+        None,
+    )
+    next_record = busy_record or next(
         (
             record
             for record in package.stages
@@ -441,7 +475,9 @@ def pipeline_status(project_dir: str | Path) -> dict[str, object]:
         ),
         None,
     )
-    if next_record is None:
+    if busy_record is not None:
+        required_action = "retry_review_validation"
+    elif next_record is None:
         required_action = "none"
     elif next_record.review_state is ReviewState.AWAITING_REVIEW:
         required_action = "approve_review_evidence"
@@ -466,6 +502,7 @@ def pipeline_status(project_dir: str | Path) -> dict[str, object]:
         "review_state": next_record.review_state.value if next_record else None,
         "review_policy": next_record.review_policy.value if next_record else None,
         "current_revision": next_record.revision if next_record else None,
+        "review_in_progress": busy_record is not None,
         "stages": {record.stage.value: record.state.value for record in package.stages},
         "stage_details": {
             record.stage.value: {
@@ -478,6 +515,7 @@ def pipeline_status(project_dir: str | Path) -> dict[str, object]:
                 "review_policy": record.review_policy.value,
                 "current_revision": record.revision,
                 "review_blocks_progress": record.review_blocks_progress,
+                "review_in_progress": record is busy_record,
             }
             for record in package.stages
         },

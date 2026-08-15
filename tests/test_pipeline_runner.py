@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from factory.pipeline_modes import ModeAdapter, ModeStep, get_mode_adapter
 from factory.pipeline_review import ApprovalPreset, ReviewConfig
 from factory.pipeline_store import (
     approve_review_bundle,
+    approve_stage,
     create_project,
     load_production_package,
     request_stage_changes,
@@ -321,6 +323,50 @@ def test_status_exposes_review_progress_fields(tmp_path: Path) -> None:
     assert status["required_action"] == "approve_review_evidence"
     assert status["stage_details"]["script"]["review_state"] == "awaiting_review"
     assert status["stage_details"]["script"]["current_revision"] == 1
+
+
+def test_concurrent_resume_reports_review_in_progress_without_invalidating(
+    tmp_path: Path,
+) -> None:
+    root = _project(tmp_path)
+    run_pipeline(
+        root,
+        through=StageName.CONCEPT,
+        executor=_passing_executor([]),
+        review_config=_review_config(concept=ReviewPolicy.MANUAL),
+    )
+    evidence = tmp_path / "concept-review.json"
+    evidence.write_text('{"approved":true}', encoding="utf-8")
+    approve_stage(
+        root,
+        StageName.CONCEPT,
+        revision=1,
+        note="concept approved",
+        evidence=(evidence,),
+    )
+    before = load_production_package(root)
+    calls: list[StageName] = []
+
+    with (root / ".approval.lock").open("a+", encoding="utf-8") as held_lock:
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        status = pipeline_status(root)
+        result = resume_pipeline(
+            root,
+            through=StageName.CONCEPT,
+            executor=_passing_executor(calls),
+            review_config=_review_config(concept=ReviewPolicy.MANUAL),
+        )
+
+    assert status["next_stage"] == StageName.CONCEPT.value
+    assert status["review_in_progress"] is True
+    assert status["required_action"] == "retry_review_validation"
+    assert status["stage_details"]["concept"]["review_in_progress"] is True
+    assert result.success is False
+    assert result.next_stage is StageName.CONCEPT
+    assert result.stopped_state is StageState.PASSED
+    assert result.review_in_progress is True
+    assert calls == []
+    assert load_production_package(root) == before
 
 
 def test_request_changes_records_current_revision_without_blocking_execution(
