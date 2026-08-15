@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import math
+import threading
+import weakref
+from contextvars import ContextVar
 from types import MethodType
 from typing import Any, Callable
 
@@ -50,44 +54,106 @@ def estimate_video_cost_yuan(
     return estimate
 
 
+_ACTIVE_SUBMISSIONS: ContextVar[
+    tuple[tuple[object, object, int, object | None], ...]
+] = ContextVar(
+    "video_active_submissions",
+    default=(),
+)
+_GATE_LOCK = threading.Lock()
+_GATE_KEYS: weakref.WeakKeyDictionary[GatewayVideoClient, object] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+class _GenerationSubmitPermit:
+    __slots__ = ("_client", "_gate_key", "_lock", "_used")
+
+    def __init__(self, client: GatewayVideoClient, gate_key: object):
+        self._client = weakref.ref(client)
+        self._gate_key = gate_key
+        self._lock = threading.Lock()
+        self._used = False
+
+    def consume(self, client: GatewayVideoClient, gate_key: object) -> bool:
+        with self._lock:
+            if (
+                self._used
+                or self._client() is not client
+                or self._gate_key is not gate_key
+            ):
+                return False
+            self._used = True
+            return True
+
+
+def _execution_identity() -> tuple[int, object | None]:
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    return threading.get_ident(), task
+
+
 def _confirmation_guard(
     raw_method: Callable[..., Any],
+    gate_key: object,
 ) -> Callable[..., Any]:
     def guarded(client: GatewayVideoClient, *args: Any, **kwargs: Any) -> Any:
-        depth = int(getattr(client, "_generation_confirmation_depth", 0))
-        if depth:
+        permit = kwargs.pop("_generation_permit", None)
+        active = _ACTIVE_SUBMISSIONS.get()
+        thread_id, task = _execution_identity()
+        if any(
+            active_client is client
+            and active_key is gate_key
+            and active_thread == thread_id
+            and active_task is task
+            for active_client, active_key, active_thread, active_task in active
+        ):
+            if permit is not None:
+                raise GatewayVideoError("Generation confirmation permit is invalid.")
             return raw_method(*args, **kwargs)
-        permits = int(getattr(client, "_generation_confirmation_permits", 0))
-        if permits <= 0:
+        if not isinstance(permit, _GenerationSubmitPermit) or not permit.consume(
+            client,
+            gate_key,
+        ):
             raise GatewayVideoError(
                 "Paid video submission requires a consumed generation confirmation."
             )
-        client._generation_confirmation_permits = permits - 1
-        client._generation_confirmation_depth = depth + 1
+        context_token = _ACTIVE_SUBMISSIONS.set(
+            (*active, (client, gate_key, thread_id, task))
+        )
         try:
             return raw_method(*args, **kwargs)
         finally:
-            client._generation_confirmation_depth = depth
+            _ACTIVE_SUBMISSIONS.reset(context_token)
 
     return guarded
 
 
 def _install_confirmation_gate(client: GatewayVideoClient) -> None:
-    client._generation_confirmation_permits = 0
-    client._generation_confirmation_depth = 0
+    gate_key = object()
+    with _GATE_LOCK:
+        _GATE_KEYS[client] = gate_key
     for name in ("submit", "submit_prepared", "generate"):
         raw_method = getattr(client, name)
-        setattr(client, name, MethodType(_confirmation_guard(raw_method), client))
+        setattr(
+            client,
+            name,
+            MethodType(_confirmation_guard(raw_method, gate_key), client),
+        )
     client.requires_generation_confirmation = True
 
 
-def _authorize_confirmed_video_submit(client: GatewayVideoClient) -> None:
-    """Grant one fresh-submit entry to a production-built client."""
-    if not getattr(client, "requires_generation_confirmation", False):
-        return
-    client._generation_confirmation_permits = (
-        int(getattr(client, "_generation_confirmation_permits", 0)) + 1
-    )
+def _authorize_confirmed_video_submit(
+    client: GatewayVideoClient,
+) -> _GenerationSubmitPermit | None:
+    """Create one execution-bound permit for a production-built client."""
+    with _GATE_LOCK:
+        gate_key = _GATE_KEYS.get(client)
+    if gate_key is None:
+        return None
+    return _GenerationSubmitPermit(client, gate_key)
 
 
 def build_video_client(

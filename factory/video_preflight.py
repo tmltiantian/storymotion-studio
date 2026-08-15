@@ -24,6 +24,7 @@ from .pipeline_contracts import (
 )
 from .pipeline_review import REVIEW_SCHEMA, REVISIONS_SCHEMA, StageRevision
 from .pipeline_store import ACTIVE_REPAIR_SCHEMA
+from .secure_posix import AnchoredDirectory
 from .video_provider import default_video_resolution, estimate_video_cost_yuan
 
 
@@ -47,122 +48,52 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
-    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
-
-
-def _open_absolute_directory(path: Path, *, create: bool = False) -> int:
+def _read_bytes_secure(
+    path: Path,
+    label: str,
+    *,
+    anchor: AnchoredDirectory | None = None,
+) -> bytes:
+    if anchor is not None:
+        try:
+            return anchor.read_bytes(anchor.relative_path(path))
+        except ValueError as exc:
+            if not str(exc).startswith("Path is outside"):
+                raise
     absolute = path.expanduser().absolute()
-    if not absolute.is_absolute() or absolute.anchor != os.sep:
-        raise ValueError("Video preflight requires an absolute POSIX path")
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    descriptor = os.open(absolute.anchor, flags)
-    try:
-        for component in absolute.parts[1:]:
-            if component in {"", ".", ".."}:
-                raise ValueError("Video preflight path contains an unsafe component")
-            try:
-                next_descriptor = os.open(component, flags, dir_fd=descriptor)
-            except FileNotFoundError:
-                if not create:
-                    raise
-                try:
-                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
-                except FileExistsError:
-                    pass
-                next_descriptor = os.open(component, flags, dir_fd=descriptor)
-            os.close(descriptor)
-            descriptor = next_descriptor
-        return descriptor
-    except Exception:
-        os.close(descriptor)
-        raise
+    with AnchoredDirectory.open(absolute.parent, label=f"{label} directory") as parent:
+        return parent.read_bytes(absolute.name)
 
 
-class _StableDirectory:
-    def __init__(self, path: Path, *, create: bool = False):
-        self.path = path.expanduser().absolute()
-        self.create = create
-        self.descriptor = -1
-        self.identity: os.stat_result | None = None
-
-    def __enter__(self) -> int:
-        try:
-            self.descriptor = _open_absolute_directory(self.path, create=self.create)
-            self.identity = os.fstat(self.descriptor)
-            self._verify()
-            return self.descriptor
-        except FileNotFoundError:
-            if self.descriptor >= 0:
-                os.close(self.descriptor)
-            raise
-        except OSError as exc:
-            if self.descriptor >= 0:
-                os.close(self.descriptor)
-            raise ValueError("Video preflight directory cannot use a symlink") from exc
-
-    def _verify(self) -> None:
-        try:
-            current = os.stat(self.path, follow_symlinks=False)
-        except OSError as exc:
-            raise ValueError("Video preflight directory identity changed") from exc
-        if (
-            self.identity is None
-            or not stat.S_ISDIR(current.st_mode)
-            or not _same_file(self.identity, current)
-        ):
-            raise ValueError("Video preflight directory identity changed")
-
-    def __exit__(self, exc_type, exc, traceback) -> None:
-        try:
-            self._verify()
-        finally:
-            os.close(self.descriptor)
+def _sha256_secure(
+    path: Path,
+    label: str,
+    *,
+    anchor: AnchoredDirectory | None = None,
+) -> str:
+    return hashlib.sha256(_read_bytes_secure(path, label, anchor=anchor)).hexdigest()
 
 
-def _read_bytes_secure(path: Path, label: str) -> bytes:
-    absolute = path.expanduser().absolute()
-    with _StableDirectory(absolute.parent) as directory:
-        try:
-            descriptor = os.open(
-                absolute.name,
-                os.O_RDONLY | os.O_NOFOLLOW,
-                dir_fd=directory,
-            )
-        except OSError as exc:
-            if isinstance(exc, FileNotFoundError):
-                raise FileNotFoundError(absolute) from None
-            raise ValueError(f"{label} cannot be opened safely") from exc
-        try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise ValueError(f"{label} must be a regular file")
-            chunks: list[bytes] = []
-            while chunk := os.read(descriptor, 1024 * 1024):
-                chunks.append(chunk)
-            return b"".join(chunks)
-        finally:
-            os.close(descriptor)
-
-
-def _sha256_secure(path: Path, label: str) -> str:
-    return hashlib.sha256(_read_bytes_secure(path, label)).hexdigest()
-
-
-def _safe_project_root(project_dir: str | Path) -> Path:
-    root = Path(project_dir).expanduser().absolute()
-    with _StableDirectory(root):
-        pass
-    return root
-
-
-def _safe_existing_file(path: Path, label: str) -> Path:
-    _read_bytes_secure(path, label)
+def _safe_existing_file(
+    path: Path,
+    label: str,
+    *,
+    anchor: AnchoredDirectory | None = None,
+) -> Path:
+    _read_bytes_secure(path, label, anchor=anchor)
     return path
 
 
-def _read_object(path: Path, label: str) -> dict[str, Any]:
+def _read_object(
+    path: Path,
+    label: str,
+    *,
+    anchor: AnchoredDirectory | None = None,
+) -> dict[str, Any]:
     try:
-        value = json.loads(_read_bytes_secure(path, label).decode("utf-8"))
+        value = json.loads(
+            _read_bytes_secure(path, label, anchor=anchor).decode("utf-8")
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{label} is invalid") from exc
     if not isinstance(value, dict):
@@ -202,12 +133,17 @@ def _safe_shot_ids(shot_ids: tuple[str, ...] | list[str]) -> tuple[str, ...]:
 
 
 def _latest_revision(
-    root: Path,
+    anchor: AnchoredDirectory,
     stage: StageName,
 ) -> tuple[StageRevision | None, dict[str, Any] | None]:
+    root = anchor.canonical_path
     path = root / "reviews" / f"{stage.value}.revisions.json"
     try:
-        payload = _read_object(path, f"{stage.value} revision record")
+        payload = _read_object(
+            path,
+            f"{stage.value} revision record",
+            anchor=anchor,
+        )
     except FileNotFoundError:
         return None, None
     if (
@@ -224,13 +160,22 @@ def _latest_revision(
 
 
 def _artifact_hashes(
+    anchor: AnchoredDirectory,
     stage: StageName,
     revision: StageRevision,
 ) -> dict[str, str]:
     hashes: dict[str, str] = {}
     for index, artifact in enumerate(revision.artifacts, start=1):
-        path = _safe_existing_file(Path(artifact.path), f"{stage.value} artifact")
-        current = _sha256_secure(path, f"{stage.value} artifact")
+        path = _safe_existing_file(
+            Path(artifact.path),
+            f"{stage.value} artifact",
+            anchor=anchor,
+        )
+        current = _sha256_secure(
+            path,
+            f"{stage.value} artifact",
+            anchor=anchor,
+        )
         if current != artifact.sha256:
             raise ValueError(f"{stage.value} artifact changed")
         hashes[f"{stage.value}:{index}:{path.name}"] = current
@@ -240,7 +185,7 @@ def _artifact_hashes(
 
 
 def _approved_revision_hash(
-    root: Path,
+    anchor: AnchoredDirectory,
     stage: StageName,
     revision: StageRevision,
     review_state: ReviewState,
@@ -255,9 +200,13 @@ def _approved_revision_hash(
         )
     if review_state is not ReviewState.APPROVED:
         return None
-    path = root / "reviews" / f"{stage.value}.review.json"
+    path = anchor.canonical_path / "reviews" / f"{stage.value}.review.json"
     try:
-        payload = _read_object(path, f"{stage.value} review record")
+        payload = _read_object(
+            path,
+            f"{stage.value} review record",
+            anchor=anchor,
+        )
     except FileNotFoundError:
         return None
     if (
@@ -277,18 +226,32 @@ def _approved_revision_hash(
         digest = item.get("sha256")
         if not isinstance(path_value, str) or not isinstance(digest, str):
             return None
-        path = _safe_existing_file(Path(path_value), f"{stage.value} review evidence")
-        if _sha256_secure(path, f"{stage.value} review evidence") != digest:
+        path = _safe_existing_file(
+            Path(path_value),
+            f"{stage.value} review evidence",
+            anchor=anchor,
+        )
+        if (
+            _sha256_secure(
+                path,
+                f"{stage.value} review evidence",
+                anchor=anchor,
+            )
+            != digest
+        ):
             return None
     return _canonical_hash(payload)
 
 
-def _storyboard_rows(revision: StageRevision) -> tuple[dict[str, Any], ...]:
+def _storyboard_rows(
+    anchor: AnchoredDirectory,
+    revision: StageRevision,
+) -> tuple[dict[str, Any], ...]:
     for artifact in revision.artifacts:
         path = Path(artifact.path)
         if path.name != "episode.json":
             continue
-        payload = _read_object(path, "storyboard episode")
+        payload = _read_object(path, "storyboard episode", anchor=anchor)
         rows = payload.get("shots")
         if isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
             return tuple(rows)
@@ -588,24 +551,32 @@ def build_video_preflight(
     project_dir: str | Path,
     shot_ids: tuple[str, ...],
 ) -> VideoPreflight:
-    root = _safe_project_root(project_dir)
-    with _StableDirectory(root):
-        return _build_video_preflight(root, shot_ids)
+    with AnchoredDirectory.open(
+        project_dir,
+        label="Video preflight project directory",
+    ) as anchor:
+        return _build_video_preflight(anchor, shot_ids)
 
 
 def _build_video_preflight(
-    root: Path,
+    anchor: AnchoredDirectory,
     shot_ids: tuple[str, ...],
 ) -> VideoPreflight:
+    root = anchor.canonical_path
     requested = _safe_shot_ids(shot_ids)
-    spec_path = _safe_existing_file(root / "project.json", "project spec")
+    spec_path = _safe_existing_file(
+        root / "project.json",
+        "project spec",
+        anchor=anchor,
+    )
     package_path = _safe_existing_file(
         root / "production_package.json",
         "production package",
+        anchor=anchor,
     )
-    spec = ProjectSpec.from_dict(_read_object(spec_path, "project spec"))
+    spec = ProjectSpec.from_dict(_read_object(spec_path, "project spec", anchor=anchor))
     package = ProductionPackage.from_dict(
-        _read_object(package_path, "production package")
+        _read_object(package_path, "production package", anchor=anchor)
     )
     blockers: list[str] = []
     revision_hashes: dict[str, str] = {}
@@ -615,13 +586,13 @@ def _build_video_preflight(
     for stage in PREFLIGHT_STAGES:
         record = next(item for item in package.stages if item.stage is stage)
         try:
-            revision, raw_revision = _latest_revision(root, stage)
+            revision, raw_revision = _latest_revision(anchor, stage)
             if revision is None or raw_revision is None:
                 blockers.append(f"{stage.value} has no current revision.")
                 continue
             revisions[stage] = revision
             revision_hashes[stage.value] = _canonical_hash(raw_revision)
-            artifact_hashes.update(_artifact_hashes(stage, revision))
+            artifact_hashes.update(_artifact_hashes(anchor, stage, revision))
             if (
                 record.state is not StageState.PASSED
                 or record.revision != revision.number
@@ -629,7 +600,7 @@ def _build_video_preflight(
                 blockers.append(f"{stage.value} package revision is not current.")
             else:
                 approval_hash = _approved_revision_hash(
-                    root,
+                    anchor,
                     stage,
                     revision,
                     record.review_state,
@@ -643,7 +614,7 @@ def _build_video_preflight(
     storyboard = revisions.get(StageName.STORYBOARD)
     if storyboard is None:
         raise ValueError("Video preflight requires a storyboard revision")
-    rows = _storyboard_rows(storyboard)
+    rows = _storyboard_rows(anchor, storyboard)
     row_by_id: dict[str, dict[str, Any]] = {}
     for row in rows:
         shot_id = str(row.get("id") or "").strip()
@@ -692,11 +663,19 @@ def _build_video_preflight(
     repair_path = root / "impact_plans" / "active.json"
     repair_hash = ""
     try:
-        active = _read_object(repair_path, "active repair plan")
+        active = _read_object(
+            repair_path,
+            "active repair plan",
+            anchor=anchor,
+        )
     except FileNotFoundError:
         active = None
     if active is not None:
-        repair_hash = _sha256_secure(repair_path, "active repair plan")
+        repair_hash = _sha256_secure(
+            repair_path,
+            "active repair plan",
+            anchor=anchor,
+        )
         repair_ids = _validate_active_repair(active)
         if any(shot_id not in repair_ids for shot_id in requested):
             blockers.append(
@@ -706,7 +685,11 @@ def _build_video_preflight(
     return VideoPreflight(
         project_id=package.project_id,
         project_sha256=project_binding,
-        package_sha256=_sha256_secure(package_path, "production package"),
+        package_sha256=_sha256_secure(
+            package_path,
+            "production package",
+            anchor=anchor,
+        ),
         revision_hashes=revision_hashes,
         artifact_hashes=artifact_hashes,
         approval_hashes=approval_hashes,
@@ -724,14 +707,20 @@ def _build_video_preflight(
     )
 
 
-def _token_directory(root: Path, *, create: bool) -> Path:
-    directory = root / "runs" / ".workbench" / "tokens"
+def _token_directory(
+    anchor: AnchoredDirectory,
+    *,
+    create: bool,
+) -> tuple[Path, int]:
+    directory = anchor.canonical_path / "runs" / ".workbench" / "tokens"
     try:
-        with _StableDirectory(directory, create=create):
-            pass
-    except ValueError as exc:
+        descriptor = anchor.open_directory(
+            Path("runs") / ".workbench" / "tokens",
+            create=create,
+        )
+    except OSError as exc:
         raise ValueError("Generation token path cannot use a symlink") from exc
-    return directory
+    return directory, descriptor
 
 
 def _write_token_at(
@@ -783,8 +772,11 @@ def _write_token_atomic(
     if directory_fd is not None:
         _write_token_at(directory_fd, path.name, payload)
         return
-    with _StableDirectory(path.parent) as directory:
-        _write_token_at(directory, path.name, payload)
+    with AnchoredDirectory.open(
+        path.parent,
+        label="Generation token directory",
+    ) as directory:
+        _write_token_at(directory.descriptor, path.name, payload)
 
 
 def _read_token_object(directory: int, filename: str) -> dict[str, Any]:
@@ -825,28 +817,39 @@ def issue_generation_token(
     project_dir: str | Path,
     preflight: VideoPreflight,
 ) -> str:
-    root = _safe_project_root(project_dir)
-    current = build_video_preflight(root, preflight.shot_ids)
-    if current != preflight:
-        raise GenerationTokenError("Video preflight changed before token issue")
-    if not preflight.ready:
-        raise GenerationTokenError("Video preflight is not ready")
-    request = VideoGenerationRequest.from_preflight(preflight)
-    token_id = uuid4().hex
-    secret = secrets.token_urlsafe(32)
-    token_dir = _token_directory(root, create=True)
-    _write_token_atomic(
-        token_dir / f"{token_id}.json",
-        {
-            "schema_version": TOKEN_SCHEMA,
-            "token_id": token_id,
-            "request": request.to_dict(),
-            "request_digest": _token_digest(secret, request),
-            "issued_at": _utc_now(),
-            "consumed_at": "",
-        },
-    )
-    return f"{token_id}.{secret}"
+    with AnchoredDirectory.open(
+        project_dir,
+        label="Video preflight project directory",
+    ) as anchor:
+        current = _build_video_preflight(anchor, preflight.shot_ids)
+        if current != preflight:
+            raise GenerationTokenError("Video preflight changed before token issue")
+        if not preflight.ready:
+            raise GenerationTokenError("Video preflight is not ready")
+        request = VideoGenerationRequest.from_preflight(preflight)
+        token_id = uuid4().hex
+        secret = secrets.token_urlsafe(32)
+        token_dir, token_directory = _token_directory(anchor, create=True)
+        try:
+            _write_token_atomic(
+                token_dir / f"{token_id}.json",
+                {
+                    "schema_version": TOKEN_SCHEMA,
+                    "token_id": token_id,
+                    "request": request.to_dict(),
+                    "request_digest": _token_digest(secret, request),
+                    "issued_at": _utc_now(),
+                    "consumed_at": "",
+                },
+                directory_fd=token_directory,
+            )
+            anchor.verify_directory(
+                Path("runs") / ".workbench" / "tokens",
+                token_directory,
+            )
+        finally:
+            os.close(token_directory)
+        return f"{token_id}.{secret}"
 
 
 def _parse_token(token: str) -> tuple[str, str]:
@@ -864,22 +867,17 @@ def consume_generation_token(
     token: str,
     request: VideoGenerationRequest,
 ) -> None:
-    root = _safe_project_root(project_dir)
     token_id, secret = _parse_token(token)
-    try:
-        token_dir = _token_directory(root, create=False)
-    except (FileNotFoundError, ValueError) as exc:
-        raise GenerationTokenError("Generation token storage is invalid") from exc
-    path = token_dir / f"{token_id}.json"
-    lock_path = token_dir / f"{token_id}.lock"
-    del lock_path
-    try:
-        token_context = _StableDirectory(token_dir)
-        token_directory = token_context.__enter__()
-    except ValueError as exc:
-        raise GenerationTokenError("Generation token storage is invalid") from exc
-    descriptor = -1
-    try:
+    with AnchoredDirectory.open(
+        project_dir,
+        label="Video preflight project directory",
+    ) as anchor:
+        try:
+            token_dir, token_directory = _token_directory(anchor, create=False)
+        except (FileNotFoundError, ValueError) as exc:
+            raise GenerationTokenError("Generation token storage is invalid") from exc
+        path = token_dir / f"{token_id}.json"
+        descriptor = -1
         try:
             try:
                 descriptor = os.open(
@@ -923,7 +921,7 @@ def consume_generation_token(
                     "Generation token does not match the request"
                 )
             try:
-                current_preflight = build_video_preflight(root, request.shot_ids)
+                current_preflight = _build_video_preflight(anchor, request.shot_ids)
                 if not current_preflight.ready:
                     raise GenerationTokenError(
                         "Project changed after generation token issue"
@@ -941,15 +939,14 @@ def consume_generation_token(
                 )
             record["consumed_at"] = _utc_now()
             _write_token_atomic(path, record, directory_fd=token_directory)
+            anchor.verify_directory(
+                Path("runs") / ".workbench" / "tokens",
+                token_directory,
+            )
         finally:
             if descriptor >= 0:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        try:
-            token_context.__exit__(None, None, None)
-        except ValueError as exc:
-            raise GenerationTokenError(
-                "Generation token storage identity changed"
-            ) from exc
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(descriptor)
+            os.close(token_directory)
