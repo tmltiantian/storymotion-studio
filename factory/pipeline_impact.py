@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
-import tempfile
+import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
+from uuid import uuid4
 
 from .file_io import read_json_object
 from .pipeline_contracts import ProductionPackage, StageName
@@ -127,12 +130,15 @@ class ChangeRequest:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ChangeRequest:
+        subtitle_style = value.get("subtitle_style")
+        if type(subtitle_style) is not bool:
+            raise ValueError("Impact plan subtitle_style must be a JSON boolean")
         return cls(
             stage=StageName(str(value["stage"])),
             dialogue_ids=tuple(value.get("dialogue_ids") or ()),
             character_ids=tuple(value.get("character_ids") or ()),
             shot_ids=tuple(value.get("shot_ids") or ()),
-            subtitle_style=bool(value.get("subtitle_style")),
+            subtitle_style=subtitle_style,
             scope=ChangeScope(str(value["scope"])),
         )
 
@@ -414,36 +420,261 @@ def _safe_plans_dir(root: Path, *, create: bool) -> Path:
     plans_dir = root / "impact_plans"
     if plans_dir.is_symlink():
         raise ValueError("Impact plan directory cannot be a symlink")
-    if create:
-        plans_dir.mkdir(parents=True, exist_ok=True)
-    if plans_dir.is_symlink():
-        raise ValueError("Impact plan directory cannot be a symlink")
-    if not plans_dir.is_dir():
+    if plans_dir.exists() and not plans_dir.is_dir():
         raise ValueError("Impact plan directory is invalid")
+    if not create and not plans_dir.exists():
+        raise FileNotFoundError(plans_dir)
     return plans_dir
 
 
-def _persist_immutable_plan(path: Path, serialized: str) -> None:
-    if path.is_symlink():
-        raise ValueError(f"Impact plan cannot be a symlink: {path}")
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temporary = Path(temporary_name)
+def _require_secure_plan_primitives() -> None:
+    required_flags = ("O_DIRECTORY", "O_NOFOLLOW")
+    required_dir_fd = (os.open, os.mkdir, os.stat, os.unlink, os.link)
+    if (
+        any(not hasattr(os, name) for name in required_flags)
+        or any(function not in os.supports_dir_fd for function in required_dir_fd)
+        or os.stat not in os.supports_follow_symlinks
+        or os.link not in os.supports_follow_symlinks
+    ):
+        raise RuntimeError(
+            "Secure impact plan storage requires POSIX no-follow dir_fd support"
+        )
+
+
+def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _verify_open_plan_directory(root: Path, root_fd: int, plans_fd: int) -> None:
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(serialized)
-            handle.flush()
-            os.fsync(handle.fileno())
+        root_path = os.stat(root, follow_symlinks=False)
+        root_open = os.fstat(root_fd)
+        plans_path = os.stat("impact_plans", dir_fd=root_fd, follow_symlinks=False)
+        plans_open = os.fstat(plans_fd)
+    except OSError as exc:
+        raise ValueError("Impact plan directory identity changed") from exc
+    if (
+        not stat.S_ISDIR(root_path.st_mode)
+        or not stat.S_ISDIR(root_open.st_mode)
+        or not stat.S_ISDIR(plans_path.st_mode)
+        or not stat.S_ISDIR(plans_open.st_mode)
+        or not _same_file(root_path, root_open)
+        or not _same_file(plans_path, plans_open)
+    ):
+        raise ValueError("Impact plan directory identity changed")
+
+
+@contextmanager
+def _open_plan_directory(root: Path, *, create: bool):
+    _safe_plans_dir(root, create=create)
+    _require_secure_plan_primitives()
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        root_fd = os.open(root, directory_flags)
+    except OSError as exc:
+        raise ValueError("Project directory cannot be opened safely") from exc
+    plans_fd: int | None = None
+    try:
         try:
-            os.link(temporary, path)
-        except FileExistsError:
-            if path.is_symlink():
-                raise ValueError(f"Impact plan cannot be a symlink: {path}")
-            if path.read_text(encoding="utf-8") != serialized:
-                raise ValueError(f"Impact plan identity collision: {path.stem}")
+            plans_fd = os.open("impact_plans", directory_flags, dir_fd=root_fd)
+        except FileNotFoundError:
+            if not create:
+                raise FileNotFoundError(root / "impact_plans") from None
+            try:
+                os.mkdir("impact_plans", mode=0o700, dir_fd=root_fd)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise ValueError(
+                    "Impact plan directory cannot be created safely"
+                ) from exc
+            try:
+                plans_fd = os.open("impact_plans", directory_flags, dir_fd=root_fd)
+            except OSError as exc:
+                raise ValueError(
+                    "Impact plan directory cannot be opened safely"
+                ) from exc
+        except OSError as exc:
+            raise ValueError("Impact plan directory cannot be opened safely") from exc
+        _verify_open_plan_directory(root, root_fd, plans_fd)
+        yield plans_fd
+        _verify_open_plan_directory(root, root_fd, plans_fd)
     finally:
-        temporary.unlink(missing_ok=True)
+        if plans_fd is not None:
+            os.close(plans_fd)
+        os.close(root_fd)
+
+
+def _read_plan_file(plans_fd: int, filename: str) -> bytes:
+    try:
+        descriptor = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=plans_fd)
+    except OSError as exc:
+        if isinstance(exc, FileNotFoundError):
+            raise FileNotFoundError(filename) from None
+        if exc.errno == errno.ELOOP:
+            raise ValueError(f"Impact plan cannot be a symlink: {filename}") from exc
+        raise ValueError(f"Impact plan cannot be opened safely: {filename}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"Impact plan is not a regular file: {filename}")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _write_all(descriptor: int, content: bytes) -> None:
+    remaining = memoryview(content)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written == 0:
+            raise OSError("Unable to write impact plan")
+        remaining = remaining[written:]
+
+
+def _persist_immutable_plan(plans_fd: int, filename: str, serialized: str) -> None:
+    temporary = f".{filename}.{uuid4().hex}.tmp"
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=plans_fd,
+        )
+    except OSError as exc:
+        raise ValueError("Impact plan temporary file cannot be created safely") from exc
+    try:
+        try:
+            _write_all(descriptor, serialized.encode("utf-8"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        try:
+            os.link(
+                temporary,
+                filename,
+                src_dir_fd=plans_fd,
+                dst_dir_fd=plans_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            existing = _read_plan_file(plans_fd, filename)
+            if existing != serialized.encode("utf-8"):
+                raise ValueError(
+                    f"Impact plan identity collision: {filename.removesuffix('.json')}"
+                )
+        os.fsync(plans_fd)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=plans_fd)
+        except FileNotFoundError:
+            pass
+
+
+def _require_exact_object(
+    value: Any, keys: frozenset[str], label: str
+) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise ValueError(f"Impact plan {label} must be a JSON object")
+    if frozenset(value) != keys:
+        raise ValueError(f"Impact plan {label} does not match canonical schema")
+    return value
+
+
+def _require_string(value: Any, label: str, *, nonempty: bool = True) -> str:
+    if type(value) is not str or (nonempty and not value):
+        raise ValueError(f"Impact plan {label} must be a JSON string")
+    return value
+
+
+def _require_string_list(
+    value: Any, label: str, *, nonempty_items: bool = True
+) -> list[str]:
+    if type(value) is not list:
+        raise ValueError(f"Impact plan {label} must be a JSON array")
+    if any(type(item) is not str or (nonempty_items and not item) for item in value):
+        raise ValueError(f"Impact plan {label} must contain only strings")
+    return value
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
+
+
+def _decode_canonical_plan(content: bytes) -> dict[str, Any]:
+    try:
+        decoded = content.decode("utf-8")
+        value = json.loads(decoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Impact plan is not valid UTF-8 JSON") from exc
+    payload = _require_exact_object(
+        value,
+        frozenset(
+            {
+                "schema_version",
+                "plan_id",
+                "request",
+                "entries",
+                "preserved_artifacts",
+                "package_sha256",
+            }
+        ),
+        "payload",
+    )
+    if (
+        _require_string(payload["schema_version"], "schema_version")
+        != IMPACT_PLAN_SCHEMA
+    ):
+        raise ValueError("Impact plan schema_version is unsupported")
+    plan_id = _require_string(payload["plan_id"], "plan_id")
+    package_sha256 = _require_string(payload["package_sha256"], "package_sha256")
+    if not _is_sha256(plan_id) or not _is_sha256(package_sha256):
+        raise ValueError("Impact plan digest fields must be lowercase SHA-256 values")
+
+    request = _require_exact_object(
+        payload["request"],
+        frozenset(
+            {
+                "stage",
+                "scope",
+                "dialogue_ids",
+                "character_ids",
+                "shot_ids",
+                "subtitle_style",
+            }
+        ),
+        "request",
+    )
+    stage = _require_string(request["stage"], "request.stage")
+    scope = _require_string(request["scope"], "request.scope")
+    if stage not in {item.value for item in StageName}:
+        raise ValueError("Impact plan request.stage is invalid")
+    if scope not in {item.value for item in ChangeScope}:
+        raise ValueError("Impact plan request.scope is invalid")
+    for name in ("dialogue_ids", "character_ids", "shot_ids"):
+        _require_string_list(request[name], f"request.{name}")
+    if type(request["subtitle_style"]) is not bool:
+        raise ValueError("Impact plan request.subtitle_style must be a JSON boolean")
+
+    entries = payload["entries"]
+    if type(entries) is not list:
+        raise ValueError("Impact plan entries must be a JSON array")
+    for index, raw_entry in enumerate(entries):
+        entry = _require_exact_object(
+            raw_entry, frozenset({"stage", "item_ids"}), f"entries[{index}]"
+        )
+        entry_stage = _require_string(entry["stage"], f"entries[{index}].stage")
+        if entry_stage not in {item.value for item in StageName}:
+            raise ValueError(f"Impact plan entries[{index}].stage is invalid")
+        _require_string_list(entry["item_ids"], f"entries[{index}].item_ids")
+    _require_string_list(payload["preserved_artifacts"], "preserved_artifacts")
+    if content != _canonical_json(payload).encode("utf-8"):
+        raise ValueError("Impact plan JSON is not in canonical form")
+    return payload
 
 
 def preview_impact(project_dir: str | Path, request: ChangeRequest) -> ImpactPlan:
@@ -462,21 +693,22 @@ def preview_impact(project_dir: str | Path, request: ChangeRequest) -> ImpactPla
     encoded = json.dumps(seed, sort_keys=True, separators=(",", ":")).encode()
     plan_id = hashlib.sha256(encoded).hexdigest()
     plan = ImpactPlan(plan_id, request, entries, preserved, package_sha256)
-    plans_dir = _safe_plans_dir(root, create=True)
-    path = plans_dir / f"{plan_id}.json"
-    _persist_immutable_plan(path, _canonical_json(plan.to_dict()))
+    with _open_plan_directory(root, create=True) as plans_fd:
+        _persist_immutable_plan(
+            plans_fd, f"{plan_id}.json", _canonical_json(plan.to_dict())
+        )
     return plan
 
 
 def _load_plan(root: Path, plan_id: str) -> ImpactPlan:
-    if not plan_id or Path(plan_id).name != plan_id:
+    if type(plan_id) is not str or not _is_sha256(plan_id):
         raise ValueError("Impact plan ID must be a safe path component")
-    path = _safe_plans_dir(root, create=False) / f"{plan_id}.json"
-    if path.is_symlink():
-        raise ValueError(f"Impact plan cannot be a symlink: {path}")
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    payload = read_json_object(path)
+    with _open_plan_directory(root, create=False) as plans_fd:
+        content = _read_plan_file(plans_fd, f"{plan_id}.json")
+    try:
+        payload = _decode_canonical_plan(content)
+    except ValueError as exc:
+        raise ValueError(f"Impact plan content has changed: {exc}") from exc
     plan = ImpactPlan.from_dict(payload)
     if payload != plan.to_dict():
         raise ValueError("Impact plan content has changed")
