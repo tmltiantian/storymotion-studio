@@ -134,11 +134,10 @@ def update_stage(
         raise ValueError("production package is stale relative to project.json")
     target = StageName(stage)
     current = next(record for record in package.stages if record.stage is target)
-    changed = bool(
-        current.input_signature
-        and input_signature
-        and current.input_signature != input_signature
-    )
+    changed_signature = current.input_signature != input_signature
+    changed_artifacts = current.artifacts != tuple(map(str, artifacts))
+    changed = changed_signature or changed_artifacts
+    reset_review = changed and current.revision is not None and revision is None
     target_index = PIPELINE_STAGES.index(target)
     records: list[StageRecord] = []
     for index, record in enumerate(package.stages):
@@ -152,19 +151,33 @@ def update_stage(
                     artifacts=artifacts,
                     blocked_reasons=blocked_reasons,
                     error=error,
-                    revision=revision if revision is not None else current.revision,
+                    revision=(
+                        None
+                        if reset_review
+                        else revision if revision is not None else current.revision
+                    ),
                     review_policy=(
                         review_policy
                         if review_policy is not None
                         else current.review_policy
                     ),
                     review_state=(
-                        review_state if review_state is not None else current.review_state
+                        ReviewState.NOT_READY
+                        if reset_review
+                        else (
+                            review_state
+                            if review_state is not None
+                            else current.review_state
+                        )
                     ),
                     review_blocks_progress=(
-                        review_blocks_progress
-                        if review_blocks_progress is not None
-                        else current.review_blocks_progress
+                        False
+                        if reset_review
+                        else (
+                            review_blocks_progress
+                            if review_blocks_progress is not None
+                            else current.review_blocks_progress
+                        )
                     ),
                 )
             )
