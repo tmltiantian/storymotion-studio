@@ -9,7 +9,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from .character_assets import is_supported_image_file
@@ -994,6 +994,7 @@ def _execute_gateway_video_jobs(
     generation_token: str = "",
     generation_request: VideoGenerationRequest | None = None,
     provider_task_persisted: Callable[[str, str, str], None] | None = None,
+    provider_tasks: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     _validate_replacement_mode(
         overwrite=overwrite,
@@ -1141,6 +1142,36 @@ def _execute_gateway_video_jobs(
             lock_descriptor = _acquire_clip_lock(output)
 
             state = _read_clip_state(state_path)
+            persisted_task = (provider_tasks or {}).get(job.shot_id)
+            if not state and persisted_task is not None:
+                persisted_provider = str(persisted_task.get("provider") or "").lower()
+                expected_provider = str(getattr(client, "provider", "gateway")).lower()
+                task_id = persisted_task.get("task_id")
+                task_status = persisted_task.get("status")
+                if (
+                    persisted_provider != expected_provider
+                    or not _safe_task_id(task_id)
+                    or not _safe_task_status(task_status)
+                ):
+                    raise GatewayVideoError(
+                        "Persisted provider task state does not match the video job."
+                    )
+                state = _state_with_reference_audio(
+                    {
+                        **_clip_state_base(
+                            job,
+                            output,
+                            signature=signature,
+                            endpoint_fingerprint=endpoint_fingerprint,
+                            model=client.config.model,
+                            status="submitted",
+                        ),
+                        "task_id": task_id,
+                        "task_status": task_status,
+                    },
+                    job_reference_audio or reference_audio or {},
+                )
+                _write_json(state_path, state)
             matching_state = _state_matches_job(
                 state,
                 job=job,
@@ -1403,6 +1434,8 @@ def render_gateway_video_batch(
     generation_token: str = "",
     generation_request: VideoGenerationRequest | None = None,
     provider_task_persisted: Callable[[str, str, str], None] | None = None,
+    provider_tasks: Mapping[str, Mapping[str, Any]] | None = None,
+    selected_shot_ids: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     _validate_replacement_mode(
         overwrite=overwrite,
@@ -1414,6 +1447,25 @@ def render_gateway_video_batch(
         limit=limit,
         resolution=resolution,
     )
+    normalized_selected_ids = tuple(
+        dict.fromkeys(str(shot_id).strip() for shot_id in selected_shot_ids)
+    )
+    if any(not shot_id for shot_id in normalized_selected_ids):
+        raise GatewayVideoBatchError("Selected shot IDs cannot be empty.")
+    if normalized_selected_ids:
+        if limit:
+            raise GatewayVideoBatchError(
+                "Selected shot IDs cannot be combined with a numeric limit."
+            )
+        jobs_by_id = {job.shot_id: job for job in jobs}
+        unknown_selected_ids = tuple(
+            shot_id for shot_id in normalized_selected_ids if shot_id not in jobs_by_id
+        )
+        if unknown_selected_ids:
+            raise GatewayVideoBatchError(
+                "Unknown selected shot IDs: " + ", ".join(unknown_selected_ids)
+            )
+        jobs = [jobs_by_id[shot_id] for shot_id in normalized_selected_ids]
     normalized_repair_ids = tuple(
         dict.fromkeys(str(shot_id).strip() for shot_id in repair_shot_ids)
     )
@@ -1476,6 +1528,7 @@ def render_gateway_video_batch(
         generation_token=generation_token,
         generation_request=generation_request,
         provider_task_persisted=provider_task_persisted,
+        provider_tasks=provider_tasks,
     )
 
 
@@ -1499,6 +1552,7 @@ def render_gateway_video_single(
     generation_token: str = "",
     generation_request: VideoGenerationRequest | None = None,
     provider_task_persisted: Callable[[str, str, str], None] | None = None,
+    provider_tasks: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     _validate_replacement_mode(
         overwrite=overwrite,
@@ -1591,6 +1645,7 @@ def render_gateway_video_single(
         generation_token=generation_token,
         generation_request=generation_request,
         provider_task_persisted=provider_task_persisted,
+        provider_tasks=provider_tasks,
     )
     if result["errors"]:
         result["error"] = str(result["errors"][0].get("error") or "")
