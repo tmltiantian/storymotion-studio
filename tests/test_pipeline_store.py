@@ -129,6 +129,60 @@ def test_update_stage_replacement_clears_target_approval(
     assert record.review_blocks_progress is False
 
 
+@pytest.mark.parametrize(
+    ("input_signature", "artifacts"),
+    [
+        ("legacy-script-v2", ("legacy-script-v1.json",)),
+        ("legacy-script-v1", ("legacy-script-v2.json",)),
+    ],
+    ids=("changed-signature", "changed-artifacts"),
+)
+def test_update_stage_replacement_resets_legacy_passed_review(
+    tmp_path: Path,
+    input_signature: str,
+    artifacts: tuple[str, ...],
+) -> None:
+    project_dir = tmp_path / "projects" / "episode_01"
+    create_project(project_dir, _spec(tmp_path))
+    package_path = project_dir / "production_package.json"
+    payload = json.loads(package_path.read_text(encoding="utf-8"))
+    legacy_record = payload["stages"][1]
+    legacy_record.update(
+        {
+            "state": StageState.PASSED.value,
+            "executor": "legacy.script",
+            "input_signature": "legacy-script-v1",
+            "artifacts": ["legacy-script-v1.json"],
+        }
+    )
+    for field in (
+        "revision",
+        "review_policy",
+        "review_state",
+        "review_blocks_progress",
+    ):
+        legacy_record.pop(field, None)
+    package_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_production_package(project_dir).stages[1]
+    assert loaded.revision is None
+    assert loaded.review_state is ReviewState.APPROVED
+
+    package = update_stage(
+        project_dir,
+        StageName.SCRIPT,
+        StageState.PASSED,
+        executor="fixture-v2",
+        input_signature=input_signature,
+        artifacts=artifacts,
+    )
+
+    record = package.stages[1]
+    assert record.revision is None
+    assert record.review_state is ReviewState.NOT_READY
+    assert record.review_blocks_progress is False
+
+
 def test_store_rejects_symlinked_project_directory(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()
