@@ -57,10 +57,45 @@ _SENSITIVE_QUERY_KEYS = frozenset(
     }
 )
 _URL_IN_TEXT = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
+_RESERVATION_OPERATIONS = frozenset(
+    {"approve_stage", "request_changes", "apply_impact"}
+)
 
 
 class ProjectBusyError(RuntimeError):
     pass
+
+
+class JobWorkerLease:
+    def __init__(self, descriptor: int):
+        self._descriptor = descriptor
+        self._released = False
+
+    @property
+    def released(self) -> bool:
+        return self._released
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        try:
+            fcntl.flock(self._descriptor, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(self._descriptor)
+        except OSError:
+            pass
+
+    def __enter__(self) -> JobWorkerLease:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.release()
+
+    def __del__(self) -> None:
+        self.release()
 
 
 def _utc_now() -> str:
@@ -393,11 +428,40 @@ class JobManager:
     def _transition_path(self, job_id: str) -> Path:
         return self.jobs_dir / f".{_safe_job_id(job_id)}.transition"
 
+    @staticmethod
+    def _worker_lease_name(job_id: str) -> str:
+        return f".{_safe_job_id(job_id)}.worker.lock"
+
     def _owner_path(self, project_id: str) -> Path:
         digest = hashlib.sha256(
             _safe_project_id(project_id).encode("utf-8")
         ).hexdigest()
         return self.owners_dir / f"{digest}.json"
+
+    def acquire_worker_lease(self, job_id: str) -> JobWorkerLease:
+        name = self._worker_lease_name(job_id)
+        self._anchor.verify()
+        descriptor = os.open(
+            name,
+            os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=self._anchor.descriptor,
+        )
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError("Job worker lease is invalid")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("Job already has an active worker") from exc
+            self._anchor.verify()
+            return JobWorkerLease(descriptor)
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
 
     @contextmanager
     def _mutation_lock(self) -> Iterator[None]:
@@ -780,6 +844,30 @@ class JobManager:
                 record,
                 status="failed",
                 result=failure_result,
+                error=message,
+            )
+            self._commit_transition_locked(
+                updated,
+                "failed",
+                {"status": "failed", "error": message},
+            )
+            self._release_project_locked(updated)
+            return updated
+
+    def fail_reservation(self, job_id: str, *, error: str) -> JobRecord:
+        message = str(error).strip()
+        _validate_safe_data(message, key="error")
+        with self._mutation_lock():
+            self._recover_transitions_locked()
+            record = self._get_locked(job_id)
+            if record.operation not in _RESERVATION_OPERATIONS:
+                raise ValueError("Job is not a Workbench mutation reservation")
+            if record.status not in ACTIVE_STATUSES:
+                raise ValueError(f"Cannot fail {record.status} reservation")
+            updated = self._replace_locked(
+                record,
+                status="failed",
+                result={},
                 error=message,
             )
             self._commit_transition_locked(

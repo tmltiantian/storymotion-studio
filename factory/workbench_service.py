@@ -29,7 +29,7 @@ from .pipeline_impact import (
     apply_impact_plan,
     preview_impact,
 )
-from .pipeline_jobs import JobEvent, JobManager, JobRecord
+from .pipeline_jobs import JobEvent, JobManager, JobRecord, JobWorkerLease
 from .pipeline_modes import get_mode_adapter
 from .pipeline_runner import PipelineRunResult, resume_pipeline
 from .pipeline_store import (
@@ -235,16 +235,26 @@ class WorkbenchService:
     def _worker_key(self, job_id: str) -> tuple[str, str]:
         return str(self.jobs.jobs_dir), str(job_id)
 
-    def _claim_worker(self, job_id: str) -> None:
+    def _claim_worker(self, job_id: str) -> JobWorkerLease:
         key = self._worker_key(job_id)
         with _ACTIVE_WORKERS_LOCK:
             if key in _ACTIVE_WORKERS:
                 raise RuntimeError("Job already has an active worker")
             _ACTIVE_WORKERS.add(key)
 
-    def _release_worker(self, job_id: str) -> None:
-        with _ACTIVE_WORKERS_LOCK:
-            _ACTIVE_WORKERS.discard(self._worker_key(job_id))
+        try:
+            return self.jobs.acquire_worker_lease(job_id)
+        except BaseException:
+            with _ACTIVE_WORKERS_LOCK:
+                _ACTIVE_WORKERS.discard(key)
+            raise
+
+    def _release_worker(self, job_id: str, lease: JobWorkerLease) -> None:
+        try:
+            lease.release()
+        finally:
+            with _ACTIVE_WORKERS_LOCK:
+                _ACTIVE_WORKERS.discard(self._worker_key(job_id))
 
     @staticmethod
     def _frontend_origins(origins: Sequence[str]) -> tuple[str, ...]:
@@ -760,11 +770,18 @@ class WorkbenchService:
             result = callback()
             self.jobs.complete(job_id, result={})
             return result
-        except Exception as exc:
+        except BaseException as exc:
             try:
-                self.jobs.fail(job_id, error=self.public_error_message(exc))
-            except (KeyError, RuntimeError, ValueError):
-                pass
+                message = self.public_error_message(exc)
+            except BaseException:
+                message = "Workbench mutation was interrupted"
+            try:
+                self.jobs.fail(job_id, error=message)
+            except BaseException:
+                try:
+                    self.jobs.fail_reservation(job_id, error=message)
+                except BaseException:
+                    pass
             raise
 
     def approve_stage(
@@ -1092,10 +1109,9 @@ class WorkbenchService:
         operation: Callable[[], Mapping[str, Any]],
         *,
         provider_result: bool = False,
-        worker_claimed: bool = False,
+        worker_lease: JobWorkerLease | None = None,
     ) -> None:
-        if not worker_claimed:
-            self._claim_worker(job_id)
+        lease = worker_lease or self._claim_worker(job_id)
 
         def execute() -> None:
             try:
@@ -1116,12 +1132,12 @@ class WorkbenchService:
                 except (KeyError, RuntimeError, ValueError):
                     pass
             finally:
-                self._release_worker(job_id)
+                self._release_worker(job_id, lease)
 
         try:
             self._dispatch(execute)
         except BaseException:
-            self._release_worker(job_id)
+            self._release_worker(job_id, lease)
             raise
 
     def job_detail(self, job_id: str) -> dict[str, Any]:
@@ -1153,9 +1169,7 @@ class WorkbenchService:
         request = VideoGenerationRequest.from_dict(raw_request)
         if request.project_id != record.project_id:
             raise ValueError("Stored generation request belongs to another project")
-        if not record.provider_tasks:
-            raise ValueError("Stored provider task state is required for resume")
-        if any(
+        if record.provider_tasks and any(
             str(task.get("provider") or "") != request.provider
             or not str(task.get("task_id") or "")
             for task in record.provider_tasks.values()
@@ -1163,11 +1177,11 @@ class WorkbenchService:
             raise ValueError("Stored provider task state is invalid")
         project = self._project_dir(record.project_id)
 
-        self._claim_worker(job_id)
+        lease = self._claim_worker(job_id)
         try:
             record = self.jobs.resume(job_id)
         except BaseException:
-            self._release_worker(job_id)
+            self._release_worker(job_id, lease)
             raise
 
         def run() -> Mapping[str, Any]:
@@ -1192,7 +1206,7 @@ class WorkbenchService:
             job_id,
             run,
             provider_result=True,
-            worker_claimed=True,
+            worker_lease=lease,
         )
         return {"job_id": job_id, "status": "queued"}
 
