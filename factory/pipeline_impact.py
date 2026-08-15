@@ -445,20 +445,48 @@ def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
     return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
 
 
-def _verify_open_plan_directory(root: Path, root_fd: int, plans_fd: int) -> None:
+def _open_project_root(root: Path) -> int:
+    if not root.is_absolute() or root.anchor != os.sep:
+        raise ValueError("Project directory must be an absolute POSIX path")
+    components = root.parts[1:]
+    if any(component in {"", ".", ".."} for component in components):
+        raise ValueError("Project directory contains an unsafe path component")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
-        root_path = os.stat(root, follow_symlinks=False)
+        current_fd = os.open(root.anchor, directory_flags)
+    except OSError as exc:
+        raise ValueError("Project filesystem anchor cannot be opened safely") from exc
+    try:
+        for component in components:
+            try:
+                next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            except OSError as exc:
+                raise ValueError(
+                    f"Project path component cannot be opened safely: {component}"
+                ) from exc
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except Exception:
+        os.close(current_fd)
+        raise
+
+
+def _verify_open_plan_directory(
+    expected_root: os.stat_result, root_fd: int, plans_fd: int
+) -> None:
+    try:
         root_open = os.fstat(root_fd)
         plans_path = os.stat("impact_plans", dir_fd=root_fd, follow_symlinks=False)
         plans_open = os.fstat(plans_fd)
     except OSError as exc:
         raise ValueError("Impact plan directory identity changed") from exc
     if (
-        not stat.S_ISDIR(root_path.st_mode)
+        not stat.S_ISDIR(expected_root.st_mode)
         or not stat.S_ISDIR(root_open.st_mode)
         or not stat.S_ISDIR(plans_path.st_mode)
         or not stat.S_ISDIR(plans_open.st_mode)
-        or not _same_file(root_path, root_open)
+        or not _same_file(expected_root, root_open)
         or not _same_file(plans_path, plans_open)
     ):
         raise ValueError("Impact plan directory identity changed")
@@ -466,13 +494,16 @@ def _verify_open_plan_directory(root: Path, root_fd: int, plans_fd: int) -> None
 
 @contextmanager
 def _open_plan_directory(root: Path, *, create: bool):
-    _safe_plans_dir(root, create=create)
     _require_secure_plan_primitives()
-    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
-        root_fd = os.open(root, directory_flags)
+        expected_root = os.stat(root, follow_symlinks=False)
     except OSError as exc:
-        raise ValueError("Project directory cannot be opened safely") from exc
+        raise ValueError("Project directory identity cannot be verified") from exc
+    if not stat.S_ISDIR(expected_root.st_mode):
+        raise ValueError("Project directory is invalid")
+    _safe_plans_dir(root, create=create)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    root_fd = _open_project_root(root)
     plans_fd: int | None = None
     try:
         try:
@@ -496,9 +527,9 @@ def _open_plan_directory(root: Path, *, create: bool):
                 ) from exc
         except OSError as exc:
             raise ValueError("Impact plan directory cannot be opened safely") from exc
-        _verify_open_plan_directory(root, root_fd, plans_fd)
+        _verify_open_plan_directory(expected_root, root_fd, plans_fd)
         yield plans_fd
-        _verify_open_plan_directory(root, root_fd, plans_fd)
+        _verify_open_plan_directory(expected_root, root_fd, plans_fd)
     finally:
         if plans_fd is not None:
             os.close(plans_fd)

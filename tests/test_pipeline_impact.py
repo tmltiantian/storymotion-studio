@@ -381,6 +381,47 @@ def test_apply_rejects_integer_for_canonical_boolean(tmp_path: Path) -> None:
         apply_impact_plan(root, plan.plan_id)
 
 
+@pytest.mark.parametrize("operation", ("preview", "load"))
+def test_plan_io_rejects_project_ancestor_symlink_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    project_parent = tmp_path / "project-parent"
+    project_parent.mkdir()
+    root = _project(project_parent)
+    request = ChangeRequest(stage=StageName.STORYBOARD, shot_ids=("shot_03",))
+    plan = preview_impact(root, request) if operation == "load" else None
+
+    outside_parent = tmp_path / "outside-parent"
+    outside_root = outside_parent / root.name
+    outside_root.mkdir(parents=True)
+    if plan is not None:
+        outside_plans = outside_root / "impact_plans"
+        outside_plans.mkdir()
+        shutil.copy2(
+            root / "impact_plans" / f"{plan.plan_id}.json",
+            outside_plans / f"{plan.plan_id}.json",
+        )
+    detached_parent = tmp_path / "detached-project-parent"
+    original_safe_dir = pipeline_impact._safe_plans_dir
+
+    def validate_then_swap(project_root, *, create):
+        checked = original_safe_dir(project_root, create=create)
+        project_parent.rename(detached_parent)
+        project_parent.symlink_to(outside_parent, target_is_directory=True)
+        return checked
+
+    monkeypatch.setattr(pipeline_impact, "_safe_plans_dir", validate_then_swap)
+
+    with pytest.raises(ValueError, match="project|ancestor|symlink|identity"):
+        if plan is None:
+            preview_impact(root, request)
+        else:
+            pipeline_impact._load_plan(root, plan.plan_id)
+
+    if plan is None:
+        assert not (outside_root / "impact_plans").exists()
+
+
 def test_preview_fails_closed_when_plan_directory_is_swapped_before_publish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
