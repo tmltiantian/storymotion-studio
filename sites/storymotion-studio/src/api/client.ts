@@ -9,13 +9,14 @@ import type {
   ProjectDetail,
   ProviderSettings,
   RequestChangesRequest,
+  ResumeJobResponse,
   RunStageRequest,
   StageDetail,
   StageName,
   VideoGenerationSubmission,
   VideoPreflight,
-  WorkDetail,
-  WorkSummary,
+  WorkCapability,
+  WorkCatalogAdapter,
 } from "./types";
 
 type FetchImplementation = typeof fetch;
@@ -23,6 +24,7 @@ type FetchImplementation = typeof fetch;
 export interface ApiClientOptions {
   baseUrl?: string;
   fetch?: FetchImplementation;
+  workCatalog?: WorkCatalogAdapter;
 }
 
 export class ApiClientError extends Error {
@@ -51,7 +53,7 @@ function identifier(value: string): string {
 }
 
 export interface ApiClient {
-  listProjects(): Promise<ProjectDetail[]>;
+  listProjects(signal?: AbortSignal): Promise<ProjectDetail[]>;
   createProject(request: CreateProjectRequest): Promise<JobAccepted>;
   getProject(projectId: string): Promise<ProjectDetail>;
   getStage(projectId: string, stage: StageName): Promise<StageDetail>;
@@ -86,12 +88,11 @@ export interface ApiClient {
     request: VideoGenerationSubmission,
   ): Promise<JobAccepted>;
   getJob(jobId: string): Promise<JobDetail>;
-  resumeJob(jobId: string): Promise<JobAccepted>;
+  resumeJob(jobId: string): Promise<ResumeJobResponse>;
   jobEventsUrl(jobId: string): string;
   mediaUrl(artifactId: string): string;
   getMedia(artifactId: string, range?: string): Promise<Blob>;
-  listWorks(): Promise<WorkSummary[]>;
-  getWork(workId: string): Promise<WorkDetail>;
+  works: WorkCapability;
   getProviderSettings(): Promise<ProviderSettings>;
 }
 
@@ -147,8 +148,16 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
 
+  const works: WorkCapability = options.workCatalog
+    ? { availability: "available", catalog: options.workCatalog }
+    : {
+        availability: "unavailable",
+        reason: "local_catalog_not_configured",
+      };
+
   return {
-    listProjects: () => request<ProjectDetail[]>("/api/projects"),
+    listProjects: (signal) =>
+      request<ProjectDetail[]>("/api/projects", { signal }),
     createProject: (body) => post<JobAccepted>("/api/projects", body),
     getProject: (projectId) =>
       request<ProjectDetail>(`/api/projects/${identifier(projectId)}`),
@@ -200,7 +209,8 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     generateVideo: (projectId, body) =>
       post<JobAccepted>(`/api/projects/${identifier(projectId)}/video/generate`, body),
     getJob: (jobId) => request<JobDetail>(`/api/jobs/${identifier(jobId)}`),
-    resumeJob: (jobId) => post<JobAccepted>(`/api/jobs/${identifier(jobId)}/resume`),
+    resumeJob: (jobId) =>
+      post<ResumeJobResponse>(`/api/jobs/${identifier(jobId)}/resume`),
     jobEventsUrl: (jobId) => path(`/api/jobs/${identifier(jobId)}/events`),
     mediaUrl: (artifactId) => path(`/api/media/${identifier(artifactId)}`),
     getMedia: async (artifactId, range) => {
@@ -225,8 +235,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       }
       return response.blob();
     },
-    listWorks: () => request<WorkSummary[]>("/api/works"),
-    getWork: (workId) => request<WorkDetail>(`/api/works/${identifier(workId)}`),
+    works,
     getProviderSettings: () =>
       request<ProviderSettings>("/api/settings/providers"),
   };

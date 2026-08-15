@@ -1,12 +1,12 @@
 import "@testing-library/jest-dom/vitest";
 
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createApiClient } from "../api/client";
-import type { ProjectDetail } from "../api/types";
+import type { CreateProjectRequest, JobAccepted, ProjectDetail } from "../api/types";
 import { App } from "./App";
 import { AppShell } from "./AppShell";
 
@@ -46,7 +46,12 @@ const project: ProjectDetail = {
 };
 
 function projectsApi(result: Promise<ProjectDetail[]> = Promise.resolve([project])) {
-  return { listProjects: vi.fn(() => result) };
+  return {
+    listProjects: vi
+      .fn<(signal?: AbortSignal) => Promise<ProjectDetail[]>>()
+      .mockImplementation(() => result),
+    createProject: vi.fn<(request: CreateProjectRequest) => Promise<JobAccepted>>(),
+  };
 }
 
 afterEach(() => {
@@ -80,7 +85,7 @@ describe("production workbench shell", () => {
     expect(screen.getByRole("link", { name: "设置" })).toBeVisible();
   });
 
-  it("shows loading and then an actionable empty state", async () => {
+  it("shows loading and opens project creation from the empty state", async () => {
     let resolveProjects: (projects: ProjectDetail[]) => void = () => undefined;
     const pending = new Promise<ProjectDetail[]>((resolve) => {
       resolveProjects = resolve;
@@ -93,7 +98,8 @@ describe("production workbench shell", () => {
     await act(async () => resolveProjects([]));
 
     expect(await screen.findByText("还没有制作项目")).toBeVisible();
-    expect(screen.getByRole("button", { name: "新建项目" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "新建项目" }));
+    expect(screen.getByRole("dialog", { name: "新建项目" })).toBeVisible();
   });
 
   it("separates a busy response from a load failure", async () => {
@@ -117,6 +123,9 @@ describe("production workbench shell", () => {
         .fn<() => Promise<ProjectDetail[]>>()
         .mockRejectedValueOnce(new Error("offline"))
         .mockResolvedValueOnce([project]),
+      createProject: vi.fn<
+        (request: CreateProjectRequest) => Promise<JobAccepted>
+      >(),
     };
     const user = userEvent.setup();
     render(<App api={api} />);
@@ -125,6 +134,163 @@ describe("production workbench shell", () => {
     await user.click(screen.getByRole("button", { name: "重新加载" }));
 
     expect(await screen.findByText(project.title)).toBeVisible();
+  });
+
+  it("filters projects by project ID", async () => {
+    const secondProject: ProjectDetail = {
+      ...project,
+      project_id: "episode_02",
+      title: "雾港追踪 · 第 02 集",
+    };
+    window.history.replaceState({}, "", "/projects");
+    const user = userEvent.setup();
+    render(<App api={projectsApi(Promise.resolve([project, secondProject]))} />);
+    await screen.findByText(project.title);
+
+    await user.click(screen.getByRole("button", { name: "筛选项目" }));
+    await user.type(screen.getByRole("searchbox", { name: "筛选制作项目" }), "episode_02");
+
+    expect(screen.queryByText(project.title)).not.toBeInTheDocument();
+    expect(screen.getByText(secondProject.title)).toBeVisible();
+    expect(screen.getByText("1 个匹配项目")).toBeVisible();
+  });
+
+  it("submits a new original project and shows its queued job", async () => {
+    const api = projectsApi();
+    api.createProject.mockResolvedValue({ job_id: "c".repeat(32), status: "queued" });
+    window.history.replaceState({}, "", "/projects");
+    const user = userEvent.setup();
+    render(<App api={api} />);
+    await screen.findByText(project.title);
+
+    await user.click(screen.getByRole("button", { name: "新建项目" }));
+    await user.type(screen.getByRole("textbox", { name: "项目 ID" }), "episode_03");
+    await user.type(screen.getByRole("textbox", { name: "项目标题" }), "潮汐来信 · 第 03 集");
+    await user.type(screen.getByRole("textbox", { name: "创作构想" }), "一封被潮水送回的信。" );
+    await user.click(screen.getByRole("button", { name: "创建项目" }));
+
+    expect(api.createProject).toHaveBeenCalledWith({
+      project_id: "episode_03",
+      title: "潮汐来信 · 第 03 集",
+      mode: "original",
+      idea: "一封被潮水送回的信。",
+      source_artifact_id: "",
+      target: {},
+      approval_preset: "standard",
+    });
+    expect(await screen.findByText("项目已进入创建队列")).toBeVisible();
+    expect(screen.getByText("c".repeat(32))).toBeVisible();
+  });
+
+  it.each([
+    [{ code: "busy" }, "项目正在处理"],
+    [new Error("offline"), "无法创建项目"],
+  ])("shows a controlled create failure for %p", async (failure, message) => {
+    const api = projectsApi();
+    api.createProject.mockRejectedValue(failure);
+    window.history.replaceState({}, "", "/projects");
+    const user = userEvent.setup();
+    render(<App api={api} />);
+    await screen.findByText(project.title);
+
+    await user.click(screen.getByRole("button", { name: "新建项目" }));
+    await user.type(screen.getByRole("textbox", { name: "项目 ID" }), "episode_03");
+    await user.type(screen.getByRole("textbox", { name: "项目标题" }), "潮汐来信");
+    await user.type(screen.getByRole("textbox", { name: "创作构想" }), "潮汐送回一封信。" );
+    await user.click(screen.getByRole("button", { name: "创建项目" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+  });
+
+  it("aborts a manual refresh when the projects page unmounts", async () => {
+    let refreshSignal: AbortSignal | undefined;
+    const api = projectsApi();
+    api.listProjects
+      .mockResolvedValueOnce([project])
+      .mockImplementationOnce((signal?: AbortSignal) => {
+        refreshSignal = signal;
+        return new Promise<ProjectDetail[]>(() => undefined);
+      });
+    window.history.replaceState({}, "", "/projects");
+    const user = userEvent.setup();
+    render(<App api={api} />);
+    await screen.findByText(project.title);
+
+    await user.click(screen.getByRole("button", { name: "刷新项目" }));
+    await user.click(screen.getByRole("link", { name: "作品中心" }));
+
+    expect(refreshSignal?.aborted).toBe(true);
+  });
+
+  it("exposes every stage execution and review state as text", async () => {
+    const executionStates: ProjectDetail["stages"][number]["execution_state"][] = [
+      "pending",
+      "ready",
+      "running",
+      "passed",
+      "failed",
+      "blocked",
+      "stale",
+      "passed",
+      "passed",
+    ];
+    const reviewStates: ProjectDetail["stages"][number]["review_state"][] = [
+      "not_ready",
+      "changes_requested",
+      "not_ready",
+      "awaiting_review",
+      "approved",
+      "auto_approved",
+      "skipped",
+      "approved",
+      "approved",
+    ];
+    const stateProject: ProjectDetail = {
+      ...project,
+      next_stage: "script",
+      required_action: "address_review_changes",
+      stages: stages.map((stage, index) => ({
+        ...stage,
+        execution_state: executionStates[index],
+        review_state: reviewStates[index],
+      })),
+    };
+    window.history.replaceState({}, "", "/projects");
+    render(<App api={projectsApi(Promise.resolve([stateProject]))} />);
+
+    const rail = await screen.findByRole("list", { name: `${project.title} 制作进度` });
+    expect(rail).toHaveTextContent("待开始");
+    expect(rail).toHaveTextContent("可运行");
+    expect(rail).toHaveTextContent("运行中");
+    expect(rail).toHaveTextContent("成果已生成");
+    expect(rail).toHaveTextContent("运行失败");
+    expect(rail).toHaveTextContent("审核尚未开始");
+    expect(rail).toHaveTextContent("等待确认");
+    expect(rail).toHaveTextContent("已退回修改");
+    expect(rail).toHaveTextContent("已确认");
+    expect(rail).toHaveTextContent("已阻塞");
+    expect(rail).toHaveTextContent("需要重跑");
+    expect(rail).toHaveTextContent("自动通过");
+    expect(rail).toHaveTextContent("已跳过");
+    expect(
+      within(rail).getByRole("listitem", {
+        name: "02 剧本：可运行；已退回修改",
+      }),
+    ).toHaveClass("stage-changes");
+    expect(screen.getByText("需要修改")).toBeVisible();
+    expect(screen.getByRole("link", { name: "处理剧本修改" })).toHaveClass(
+      "action-changes",
+    );
+  });
+
+  it("shows works as unavailable without enabled catalog controls", async () => {
+    window.history.replaceState({}, "", "/works");
+    render(<App api={projectsApi()} />);
+
+    expect(await screen.findByText("作品目录尚未接入")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "筛选作品" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "查看历史版本" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "查看作业活动" })).not.toBeInTheDocument();
   });
 });
 
