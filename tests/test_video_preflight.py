@@ -660,11 +660,11 @@ def test_project_parent_swap_fails_closed(tmp_path: Path, monkeypatch) -> None:
     original = video_preflight._safe_existing_file
     swapped = False
 
-    def swap_after_check(path: Path, label: str):
+    def swap_after_check(path: Path, label: str, *args, **kwargs):
         nonlocal swapped
         if swapped:
             return path
-        source = original(path, label)
+        source = original(path, label, *args, **kwargs)
         if not swapped and label == "project spec":
             swapped = True
             project_dir.rename(held)
@@ -675,3 +675,81 @@ def test_project_parent_swap_fails_closed(tmp_path: Path, monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="identity|symlink"):
         build_video_preflight(project_dir, ("shot_03",))
+
+
+def test_project_swap_out_read_swap_back_cannot_substitute_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = _ready_video_project(tmp_path)
+    held = tmp_path / "project-held"
+    attacker = tmp_path / "attacker-project"
+    shutil.copytree(project_dir, attacker)
+    spec_path = attacker / "project.json"
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["providers"]["video_model"] = "attacker-model"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    original = video_preflight._read_bytes_secure
+
+    def swap_for_project_read(path: Path, label: str, *args, **kwargs):
+        if label != "project spec":
+            return original(path, label, *args, **kwargs)
+        project_dir.rename(held)
+        attacker.rename(project_dir)
+        try:
+            return original(path, label, *args, **kwargs)
+        finally:
+            project_dir.rename(attacker)
+            held.rename(project_dir)
+
+    monkeypatch.setattr(video_preflight, "_read_bytes_secure", swap_for_project_read)
+
+    preflight = build_video_preflight(project_dir, ("shot_03",))
+
+    assert preflight.model == "MiniMax-H3"
+
+
+def test_token_swap_out_write_swap_back_stays_on_original_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = _ready_video_project(tmp_path)
+    preflight = build_video_preflight(project_dir, ("shot_03",))
+    issue_generation_token(project_dir, preflight)
+    token_dir = project_dir / "runs/.workbench/tokens"
+    held = project_dir / "runs/.workbench/tokens-held"
+    attacker = tmp_path / "attacker-tokens"
+    shutil.copytree(token_dir, attacker)
+    original = video_preflight._write_token_atomic
+
+    def swap_for_token_write(path, payload, *args, **kwargs):
+        token_dir.rename(held)
+        attacker.rename(token_dir)
+        try:
+            return original(path, payload, *args, **kwargs)
+        finally:
+            token_dir.rename(attacker)
+            held.rename(token_dir)
+
+    monkeypatch.setattr(video_preflight, "_write_token_atomic", swap_for_token_write)
+
+    token = issue_generation_token(project_dir, preflight)
+    token_id = token.split(".", 1)[0]
+
+    assert (token_dir / f"{token_id}.json").is_file()
+    assert not (attacker / f"{token_id}.json").exists()
+
+
+def test_macos_var_alias_supports_project_preflight_and_tokens(tmp_path: Path) -> None:
+    private_var = Path("/private/var")
+    if not Path("/var").is_symlink() or not tmp_path.is_relative_to(private_var):
+        pytest.skip("macOS /var system alias is unavailable")
+    project_dir = _ready_video_project(tmp_path)
+    alias = Path("/var") / project_dir.relative_to(private_var)
+
+    preflight = build_video_preflight(alias, ("shot_03",))
+    request = VideoGenerationRequest.from_preflight(preflight)
+    token = issue_generation_token(alias, preflight)
+    consume_generation_token(alias, token, request)
+
+    assert preflight.ready is True

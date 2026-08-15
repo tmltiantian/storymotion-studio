@@ -14,6 +14,8 @@ from typing import Any, Iterator, Mapping
 from urllib.parse import parse_qsl, urlsplit
 from uuid import uuid4
 
+from .secure_posix import AnchoredDirectory
+
 
 JOB_SCHEMA = "motion-comic-factory.pipeline-job.v1"
 EVENT_SCHEMA = "motion-comic-factory.pipeline-job-event.v1"
@@ -160,109 +162,40 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
-    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+def _write_bytes_atomic(
+    path: Path,
+    content: bytes,
+    *,
+    anchor: AnchoredDirectory | None = None,
+) -> None:
+    if anchor is not None:
+        anchor.write_bytes_atomic(anchor.relative_path(path), content)
+        return
+    with AnchoredDirectory.open(path.parent, label="Job directory") as parent:
+        parent.write_bytes_atomic(path.name, content)
 
 
-def _open_absolute_directory(path: Path, *, create: bool) -> int:
-    absolute = path.expanduser().absolute()
-    if not absolute.is_absolute() or absolute.anchor != os.sep:
-        raise ValueError("Job directory must be an absolute POSIX path")
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    descriptor = os.open(absolute.anchor, flags)
-    try:
-        for component in absolute.parts[1:]:
-            if component in {"", ".", ".."}:
-                raise ValueError("Job directory contains an unsafe component")
-            try:
-                next_descriptor = os.open(component, flags, dir_fd=descriptor)
-            except FileNotFoundError:
-                if not create:
-                    raise
-                try:
-                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
-                except FileExistsError:
-                    pass
-                next_descriptor = os.open(component, flags, dir_fd=descriptor)
-            os.close(descriptor)
-            descriptor = next_descriptor
-        return descriptor
-    except Exception:
-        os.close(descriptor)
-        raise
-
-
-@contextmanager
-def _open_stable_directory(path: Path, *, create: bool = False) -> Iterator[int]:
-    absolute = path.expanduser().absolute()
-    try:
-        descriptor = _open_absolute_directory(absolute, create=create)
-        expected = os.fstat(descriptor)
-    except OSError as exc:
-        raise ValueError("Job directory cannot be opened without symlinks") from exc
-    try:
-        try:
-            current = os.stat(absolute, follow_symlinks=False)
-        except OSError as exc:
-            raise ValueError("Job directory identity changed") from exc
-        if not stat.S_ISDIR(current.st_mode) or not _same_file(expected, current):
-            raise ValueError("Job directory identity changed")
-        yield descriptor
-        try:
-            current = os.stat(absolute, follow_symlinks=False)
-        except OSError as exc:
-            raise ValueError("Job directory identity changed") from exc
-        if not stat.S_ISDIR(current.st_mode) or not _same_file(expected, current):
-            raise ValueError("Job directory identity changed")
-    finally:
-        os.close(descriptor)
-
-
-def _write_bytes_atomic(path: Path, content: bytes) -> None:
-    temporary = f".{path.name}.{uuid4().hex}.tmp"
-    with _open_stable_directory(path.parent) as directory:
-        try:
-            descriptor = os.open(
-                temporary,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o600,
-                dir_fd=directory,
-            )
-            try:
-                remaining = memoryview(content)
-                while remaining:
-                    written = os.write(descriptor, remaining)
-                    if written <= 0:
-                        raise OSError("Unable to write job data")
-                    remaining = remaining[written:]
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            os.replace(
-                temporary,
-                path.name,
-                src_dir_fd=directory,
-                dst_dir_fd=directory,
-            )
-            os.fsync(directory)
-        finally:
-            try:
-                os.unlink(temporary, dir_fd=directory)
-            except FileNotFoundError:
-                pass
-
-
-def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
+def _write_json_atomic(
+    path: Path,
+    payload: Mapping[str, Any],
+    *,
+    anchor: AnchoredDirectory | None = None,
+) -> None:
     _write_bytes_atomic(
         path,
         (
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8"),
+        anchor=anchor,
     )
 
 
-def _read_object(path: Path) -> dict[str, Any]:
-    content = _read_bytes(path)
+def _read_object(
+    path: Path,
+    *,
+    anchor: AnchoredDirectory | None = None,
+) -> dict[str, Any]:
+    content = _read_bytes(path, anchor=anchor)
     try:
         value = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -272,41 +205,36 @@ def _read_object(path: Path) -> dict[str, Any]:
     return value
 
 
-def _read_bytes(path: Path) -> bytes:
-    with _open_stable_directory(path.parent) as directory:
-        try:
-            descriptor = os.open(
-                path.name,
-                os.O_RDONLY | os.O_NOFOLLOW,
-                dir_fd=directory,
-            )
-        except FileNotFoundError:
-            raise
-        except OSError as exc:
-            raise ValueError(f"Job path cannot be opened safely: {path.name}") from exc
-        try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise ValueError(f"Job path is not a regular file: {path.name}")
-            chunks: list[bytes] = []
-            while chunk := os.read(descriptor, 1024 * 1024):
-                chunks.append(chunk)
-            return b"".join(chunks)
-        finally:
-            os.close(descriptor)
+def _read_bytes(
+    path: Path,
+    *,
+    anchor: AnchoredDirectory | None = None,
+) -> bytes:
+    if anchor is not None:
+        return anchor.read_bytes(anchor.relative_path(path))
+    with AnchoredDirectory.open(path.parent, label="Job directory") as parent:
+        return parent.read_bytes(path.name)
 
 
-def _unlink_file(path: Path) -> None:
-    with _open_stable_directory(path.parent) as directory:
-        try:
-            os.unlink(path.name, dir_fd=directory)
-        except FileNotFoundError:
-            return
-        os.fsync(directory)
+def _unlink_file(
+    path: Path,
+    *,
+    anchor: AnchoredDirectory | None = None,
+) -> None:
+    if anchor is not None:
+        anchor.unlink(anchor.relative_path(path))
+        return
+    with AnchoredDirectory.open(path.parent, label="Job directory") as parent:
+        parent.unlink(path.name)
 
 
-def _regular_file_exists(path: Path) -> bool:
+def _regular_file_exists(
+    path: Path,
+    *,
+    anchor: AnchoredDirectory | None = None,
+) -> bool:
     try:
-        _read_bytes(path)
+        _read_bytes(path, anchor=anchor)
     except FileNotFoundError:
         return False
     return True
@@ -426,18 +354,35 @@ class JobRecord:
 
 class JobManager:
     def __init__(self, workspace: str | Path):
-        self.workspace = Path(workspace).expanduser().absolute()
-        with _open_stable_directory(self.workspace, create=True):
-            pass
-        self.jobs_dir = self.workspace / "runs" / ".workbench" / "jobs"
-        with _open_stable_directory(self.jobs_dir, create=True):
-            pass
+        workspace_anchor = AnchoredDirectory.open(
+            workspace,
+            label="Job workspace directory",
+        )
+        try:
+            self.workspace = workspace_anchor.canonical_path
+            try:
+                self._anchor = workspace_anchor.child(
+                    Path("runs") / ".workbench" / "jobs",
+                    create=True,
+                    label="Job storage directory",
+                )
+            except OSError as exc:
+                raise ValueError("Job storage path cannot use a symlink") from exc
+        finally:
+            workspace_anchor.close()
+        self.jobs_dir = self._anchor.canonical_path
         self.owners_dir = self.jobs_dir / ".projects"
-        with _open_stable_directory(self.owners_dir, create=True):
-            pass
+        owners = self._anchor.open_directory(".projects", create=True)
+        os.close(owners)
         self._manager_lock_path = self.jobs_dir / ".manager.lock"
-        if self._manager_lock_path.is_symlink():
-            raise ValueError("Job manager lock cannot be a symlink")
+
+    def close(self) -> None:
+        self._anchor.close()
+
+    def __del__(self) -> None:
+        anchor = getattr(self, "_anchor", None)
+        if anchor is not None:
+            anchor.close()
 
     def _job_path(self, job_id: str) -> Path:
         return self.jobs_dir / f"{_safe_job_id(job_id)}.json"
@@ -456,22 +401,23 @@ class JobManager:
 
     @contextmanager
     def _mutation_lock(self) -> Iterator[None]:
-        with _open_stable_directory(self.jobs_dir) as directory:
-            flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
-            descriptor = os.open(
-                self._manager_lock_path.name,
-                flags,
-                0o600,
-                dir_fd=directory,
-            )
-            try:
-                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                    raise ValueError("Job manager lock is invalid")
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
-                yield
-            finally:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-                os.close(descriptor)
+        self._anchor.verify()
+        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
+        descriptor = os.open(
+            self._manager_lock_path.name,
+            flags,
+            0o600,
+            dir_fd=self._anchor.descriptor,
+        )
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError("Job manager lock is invalid")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+            self._anchor.verify()
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     def get(self, job_id: str) -> JobRecord:
         with self._mutation_lock():
@@ -480,20 +426,20 @@ class JobManager:
 
     def _get_locked(self, job_id: str) -> JobRecord:
         path = self._job_path(job_id)
-        if not _regular_file_exists(path):
+        if not _regular_file_exists(path, anchor=self._anchor):
             raise KeyError(job_id)
-        record = JobRecord.from_dict(_read_object(path))
+        record = JobRecord.from_dict(_read_object(path, anchor=self._anchor))
         if record.job_id != job_id:
             raise ValueError("Pipeline job identity does not match its file")
         return record
 
     def _events_locked(self, job_id: str) -> tuple[JobEvent, ...]:
         path = self._event_path(job_id)
-        if not _regular_file_exists(path):
+        if not _regular_file_exists(path, anchor=self._anchor):
             return ()
         events: list[JobEvent] = []
         try:
-            content = _read_bytes(path).decode("utf-8")
+            content = _read_bytes(path, anchor=self._anchor).decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("Job event journal is invalid") from exc
         if content and not content.endswith("\n"):
@@ -544,7 +490,11 @@ class JobManager:
         )
         if len(content) > MAX_EVENT_JOURNAL_BYTES:
             raise ValueError("Job event journal reached its byte limit")
-        _write_bytes_atomic(self._event_path(job_id), content)
+        _write_bytes_atomic(
+            self._event_path(job_id),
+            content,
+            anchor=self._anchor,
+        )
         return event
 
     def append_event(
@@ -599,26 +549,29 @@ class JobManager:
             },
         }
         path = self._transition_path(record.job_id)
-        _write_json_atomic(path, transition)
-        _write_json_atomic(self._job_path(record.job_id), record.to_dict())
+        _write_json_atomic(path, transition, anchor=self._anchor)
+        _write_json_atomic(
+            self._job_path(record.job_id),
+            record.to_dict(),
+            anchor=self._anchor,
+        )
         event = self._append_event_locked(record.job_id, normalized_kind, data)
         if event.sequence != sequence:
             raise ValueError("Job transition event sequence changed")
-        _unlink_file(path)
+        _unlink_file(path, anchor=self._anchor)
         return record, event
 
     def _recover_transitions_locked(self) -> None:
-        with _open_stable_directory(self.jobs_dir) as directory:
-            names = sorted(
-                name
-                for name in os.listdir(directory)
-                if name.startswith(".") and name.endswith(".transition")
-            )
+        names = sorted(
+            name
+            for name in self._anchor.listdir()
+            if name.startswith(".") and name.endswith(".transition")
+        )
         for name in names:
             job_id = name[1:].removesuffix(".transition")
             _safe_job_id(job_id)
             path = self._transition_path(job_id)
-            payload = _read_object(path)
+            payload = _read_object(path, anchor=self._anchor)
             if (
                 payload.get("schema_version") != TRANSITION_SCHEMA
                 or payload.get("job_id") != job_id
@@ -637,7 +590,11 @@ class JobManager:
             if record.job_id != job_id or not isinstance(data, dict):
                 raise ValueError("Pipeline job transition is invalid")
             _validate_safe_data(data, key="event")
-            _write_json_atomic(self._job_path(job_id), record.to_dict())
+            _write_json_atomic(
+                self._job_path(job_id),
+                record.to_dict(),
+                anchor=self._anchor,
+            )
             events = self._events_locked(job_id)
             if len(events) == sequence - 1:
                 event = self._append_event_locked(job_id, kind, data)
@@ -649,11 +606,10 @@ class JobManager:
                     raise ValueError("Pipeline job transition event is invalid")
             else:
                 raise ValueError("Pipeline job transition sequence is invalid")
-            _unlink_file(path)
+            _unlink_file(path, anchor=self._anchor)
 
     def _job_record_paths_locked(self) -> tuple[Path, ...]:
-        with _open_stable_directory(self.jobs_dir) as directory:
-            names = sorted(os.listdir(directory))
+        names = sorted(self._anchor.listdir())
         return tuple(
             self.jobs_dir / name
             for name in names
@@ -662,9 +618,9 @@ class JobManager:
 
     def _active_owner_locked(self, project_id: str) -> JobRecord | None:
         owner_path = self._owner_path(project_id)
-        if not _regular_file_exists(owner_path):
+        if not _regular_file_exists(owner_path, anchor=self._anchor):
             return None
-        owner = _read_object(owner_path)
+        owner = _read_object(owner_path, anchor=self._anchor)
         if owner.get("schema_version") != PROJECT_OWNER_SCHEMA:
             raise ValueError("Project job owner is invalid")
         if owner.get("project_id") != project_id:
@@ -677,7 +633,7 @@ class JobManager:
         if record.project_id != project_id:
             raise ValueError("Project job owner references another project")
         if record.status in TERMINAL_STATUSES:
-            _unlink_file(owner_path)
+            _unlink_file(owner_path, anchor=self._anchor)
             return None
         return record
 
@@ -689,6 +645,7 @@ class JobManager:
                 "project_id": record.project_id,
                 "job_id": record.job_id,
             },
+            anchor=self._anchor,
         )
 
     def _claim_project_locked(
@@ -704,7 +661,7 @@ class JobManager:
             )
         if active is None:
             for path in self._job_record_paths_locked():
-                candidate = JobRecord.from_dict(_read_object(path))
+                candidate = JobRecord.from_dict(_read_object(path, anchor=self._anchor))
                 if (
                     candidate.project_id == record.project_id
                     and candidate.job_id != record.job_id
@@ -718,11 +675,11 @@ class JobManager:
 
     def _release_project_locked(self, record: JobRecord) -> None:
         owner_path = self._owner_path(record.project_id)
-        if not _regular_file_exists(owner_path):
+        if not _regular_file_exists(owner_path, anchor=self._anchor):
             return
-        owner = _read_object(owner_path)
+        owner = _read_object(owner_path, anchor=self._anchor)
         if owner.get("job_id") == record.job_id:
-            _unlink_file(owner_path)
+            _unlink_file(owner_path, anchor=self._anchor)
 
     def submit(
         self,

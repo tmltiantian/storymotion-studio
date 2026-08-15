@@ -1043,9 +1043,9 @@ def _execute_gateway_video_jobs(
             consume_generation_token(project_dir, generation_token, generation_request)
             generation_authorized = True
 
-    def authorize_fresh_submit() -> None:
+    def authorize_fresh_submit():
         confirm_paid_request()
-        _authorize_confirmed_video_submit(client)
+        return _authorize_confirmed_video_submit(client)
 
     repair_targets = set(repair_shot_ids)
     if repair_targets:
@@ -1262,12 +1262,12 @@ def _execute_gateway_video_jobs(
                     ),
                 )
                 report["executed"] = True
-                authorize_fresh_submit()
+                submit_permit = authorize_fresh_submit()
                 try:
-                    task = client.submit_prepared(
-                        submission,
-                        allow_network=True,
-                    )
+                    submit_kwargs: dict[str, Any] = {"allow_network": True}
+                    if submit_permit is not None:
+                        submit_kwargs["_generation_permit"] = submit_permit
+                    task = client.submit_prepared(submission, **submit_kwargs)
                 except GatewayVideoHTTPError as exc:
                     _write_json(
                         state_path,

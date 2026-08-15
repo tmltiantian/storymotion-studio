@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -116,8 +117,8 @@ def test_interrupted_owner_publication_does_not_leave_project_stuck(
     class SimulatedProcessInterruption(BaseException):
         pass
 
-    def interrupt_after_owner_write(path, payload):
-        original(path, payload)
+    def interrupt_after_owner_write(path, payload, *args, **kwargs):
+        original(path, payload, *args, **kwargs)
         if path.parent.name == ".projects":
             raise SimulatedProcessInterruption
 
@@ -295,3 +296,80 @@ def test_event_journal_has_hard_scaling_bound(tmp_path: Path, monkeypatch) -> No
 
     with pytest.raises(ValueError, match="limit"):
         manager.append_event(job_id, "progress", {"completed": 2})
+
+
+def test_job_swap_out_read_swap_back_cannot_substitute_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = JobManager(tmp_path)
+    job_id = manager.submit(project_id="p1", operation="video_test", payload={})
+    jobs = tmp_path / "runs/.workbench/jobs"
+    held = tmp_path / "jobs-held"
+    attacker = tmp_path / "attacker-jobs"
+    shutil.copytree(jobs, attacker)
+    attacker_record = attacker / f"{job_id}.json"
+    payload = json.loads(attacker_record.read_text(encoding="utf-8"))
+    payload["operation"] = "attacker_operation"
+    attacker_record.write_text(json.dumps(payload), encoding="utf-8")
+    original = pipeline_jobs._read_bytes
+
+    def swap_for_job_read(path: Path, *args, **kwargs):
+        if path.name != f"{job_id}.json":
+            return original(path, *args, **kwargs)
+        jobs.rename(held)
+        attacker.rename(jobs)
+        try:
+            return original(path, *args, **kwargs)
+        finally:
+            jobs.rename(attacker)
+            held.rename(jobs)
+
+    monkeypatch.setattr(pipeline_jobs, "_read_bytes", swap_for_job_read)
+
+    restored = manager.get(job_id)
+
+    assert restored.operation == "video_test"
+
+
+def test_job_swap_out_write_swap_back_cannot_redirect_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = JobManager(tmp_path)
+    job_id = manager.submit(project_id="p1", operation="video_test", payload={})
+    jobs = tmp_path / "runs/.workbench/jobs"
+    held = tmp_path / "jobs-held"
+    attacker = tmp_path / "attacker-jobs"
+    shutil.copytree(jobs, attacker)
+    original = pipeline_jobs._write_bytes_atomic
+
+    def swap_for_job_write(path: Path, content: bytes, *args, **kwargs):
+        jobs.rename(held)
+        attacker.rename(jobs)
+        try:
+            return original(path, content, *args, **kwargs)
+        finally:
+            jobs.rename(attacker)
+            held.rename(jobs)
+
+    monkeypatch.setattr(pipeline_jobs, "_write_bytes_atomic", swap_for_job_write)
+
+    manager.append_event(job_id, "progress", {"completed": 1})
+
+    original_events = (jobs / f"{job_id}.jsonl").read_text(encoding="utf-8")
+    attacker_events = (attacker / f"{job_id}.jsonl").read_text(encoding="utf-8")
+    assert '"kind": "progress"' in original_events
+    assert '"kind": "progress"' not in attacker_events
+
+
+def test_macos_var_alias_supports_job_storage(tmp_path: Path) -> None:
+    private_var = Path("/private/var")
+    if not Path("/var").is_symlink() or not tmp_path.is_relative_to(private_var):
+        pytest.skip("macOS /var system alias is unavailable")
+    alias = Path("/var") / tmp_path.relative_to(private_var)
+
+    manager = JobManager(alias)
+    job_id = manager.submit(project_id="p1", operation="video_test", payload={})
+
+    assert manager.get(job_id).status == "queued"
