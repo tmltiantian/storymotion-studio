@@ -91,6 +91,7 @@ def test_completed_job_resume_is_read_only(tmp_path: Path) -> None:
         {"environment": {"HOME": "/private/home"}},
         {"provider_url": "https://user:secret@example.test/video"},
         {"message": "failed at https://user:secret@example.test/video"},
+        {"provider_url": "https://example.test/video?accessToken=secret"},
     ),
 )
 def test_job_records_reject_secret_bearing_payloads(
@@ -120,7 +121,9 @@ def test_interrupted_owner_publication_does_not_leave_project_stuck(
         if path.parent.name == ".projects":
             raise SimulatedProcessInterruption
 
-    monkeypatch.setattr(pipeline_jobs, "_write_json_atomic", interrupt_after_owner_write)
+    monkeypatch.setattr(
+        pipeline_jobs, "_write_json_atomic", interrupt_after_owner_write
+    )
     with pytest.raises(SimulatedProcessInterruption):
         manager.submit(project_id="p1", operation="video_test", payload={})
 
@@ -170,3 +173,125 @@ def test_event_journal_contains_complete_json_lines(tmp_path: Path) -> None:
     assert len(lines) == 2
     assert all(isinstance(json.loads(line), dict) for line in lines)
     assert [event.sequence for event in manager.events(job_id)] == [1, 2]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"x-api-key": "secret"},
+        {"accessToken": "secret"},
+        {"clientSecret": "secret"},
+        {"refresh-token": "secret"},
+    ),
+)
+def test_job_secret_detection_normalizes_common_key_spellings(
+    tmp_path: Path,
+    payload: dict[str, str],
+) -> None:
+    with pytest.raises(ValueError, match="sensitive"):
+        JobManager(tmp_path).submit(
+            project_id="p1",
+            operation="video_generate",
+            payload=payload,
+        )
+
+
+def test_job_rejects_sensitive_operation_and_event_kind(tmp_path: Path) -> None:
+    manager = JobManager(tmp_path)
+    with pytest.raises(ValueError, match="sensitive"):
+        manager.submit(project_id="p1", operation="accessToken", payload={})
+
+    job_id = manager.submit(project_id="p1", operation="video_test", payload={})
+    with pytest.raises(ValueError, match="sensitive"):
+        manager.append_event(job_id, "x-api-key", {})
+
+
+@pytest.mark.parametrize(
+    "transition", ("submitted", "started", "provider_task", "completed")
+)
+def test_interrupted_record_event_transition_recovers_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transition: str,
+) -> None:
+    manager = JobManager(tmp_path)
+    original = pipeline_jobs.JobManager._append_event_locked
+
+    class SimulatedProcessInterruption(BaseException):
+        pass
+
+    def interrupt(self, job_id, kind, data):
+        if kind == transition:
+            raise SimulatedProcessInterruption
+        return original(self, job_id, kind, data)
+
+    if transition == "submitted":
+        monkeypatch.setattr(pipeline_jobs.JobManager, "_append_event_locked", interrupt)
+        with pytest.raises(SimulatedProcessInterruption):
+            manager.submit(project_id="p1", operation="video_test", payload={})
+        job_id = next((tmp_path / "runs/.workbench/jobs").glob("*.json")).stem
+    else:
+        job_id = manager.submit(project_id="p1", operation="video_test", payload={})
+        if transition in {"provider_task", "completed"}:
+            manager.start(job_id)
+        monkeypatch.setattr(pipeline_jobs.JobManager, "_append_event_locked", interrupt)
+        with pytest.raises(SimulatedProcessInterruption):
+            if transition == "started":
+                manager.start(job_id)
+            elif transition == "provider_task":
+                manager.record_provider_task(
+                    job_id,
+                    shot_id="shot_03",
+                    provider="minimax",
+                    task_id="task-123",
+                    status="submitted",
+                )
+            else:
+                manager.complete(job_id, result={"completed": 1})
+
+    monkeypatch.setattr(pipeline_jobs.JobManager, "_append_event_locked", original)
+    restored = JobManager(tmp_path)
+    restored.get(job_id)
+    events = restored.events(job_id)
+
+    assert [event.kind for event in events].count(transition) == 1
+
+
+def test_job_directory_swap_fails_closed_without_outside_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = JobManager(tmp_path)
+    jobs = tmp_path / "runs/.workbench/jobs"
+    held = tmp_path / "jobs-held"
+    outside = tmp_path / "outside-jobs"
+    outside.mkdir()
+    original_replace = pipeline_jobs.os.replace
+    swapped = False
+
+    def swap_on_replace(source, destination, *args, **kwargs):
+        nonlocal swapped
+        destination_path = Path(destination)
+        if not swapped and destination_path.suffix == ".json":
+            swapped = True
+            jobs.rename(held)
+            jobs.symlink_to(outside, target_is_directory=True)
+            relocated_source = held / Path(source).name
+            return original_replace(relocated_source, destination, *args, **kwargs)
+        return original_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline_jobs.os, "replace", swap_on_replace)
+
+    with pytest.raises((OSError, ValueError), match="identity|symlink|No such file"):
+        manager.submit(project_id="p1", operation="video_test", payload={})
+    assert not list(outside.iterdir())
+
+
+def test_event_journal_has_hard_scaling_bound(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(pipeline_jobs, "MAX_JOB_EVENTS", 2, raising=False)
+    manager = JobManager(tmp_path)
+    job_id = manager.submit(project_id="p1", operation="video_test", payload={})
+    manager.append_event(job_id, "progress", {"completed": 1})
+
+    with pytest.raises(ValueError, match="limit"):
+        manager.append_event(job_id, "progress", {"completed": 2})

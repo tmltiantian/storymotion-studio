@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from factory.gateway_video import GatewayVideoClient, GatewayVideoError
@@ -48,6 +50,57 @@ def test_build_video_client_preserves_gateway_provider():
 
 def test_build_video_client_rejects_unsupported_provider():
     with pytest.raises(GatewayVideoError, match="Unsupported video provider"):
-        build_video_client(
-            _capability("local", model="preview", base_url="")
+        build_video_client(_capability("local", model="preview", base_url=""))
+
+
+@pytest.mark.parametrize("method_name", ("submit", "submit_prepared", "generate"))
+def test_production_built_client_blocks_every_direct_fresh_submit(method_name):
+    client = build_video_client(
+        _capability(
+            "gateway",
+            model="doubao-seedance-2-0-fast",
+            base_url="https://gateway.example/v1",
         )
+    )
+    client.urlopen = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("provider must not be contacted")
+    )
+    client.enable_curl_fallback = False
+
+    if method_name == "submit":
+
+        def call():
+            return client.submit("prompt", allow_network=True)
+    elif method_name == "submit_prepared":
+        submission = client.prepare_submission("prompt", allow_network=True)
+
+        def call():
+            return client.submit_prepared(submission, allow_network=True)
+    else:
+
+        def call():
+            return client.generate(
+                "prompt",
+                Path("unused.mp4"),
+                allow_network=True,
+            )
+
+    with pytest.raises(GatewayVideoError, match="confirmation"):
+        call()
+
+
+def test_direct_adapter_construction_is_explicit_unconfirmed_test_path():
+    client = GatewayVideoClient(
+        build_video_client(
+            _capability(
+                "gateway",
+                model="doubao-seedance-2-0-fast",
+                base_url="https://gateway.example/v1",
+            )
+        ).config,
+        urlopen_fn=lambda *_args, **_kwargs: None,
+    )
+
+    submission = client.prepare_submission("prompt", allow_network=True)
+
+    assert submission.request_body
