@@ -11,9 +11,23 @@ from typing import Callable, Sequence
 from .file_io import sha256_file
 from .pipeline_artifacts import stage_manifest_integrity_issue, write_stage_manifest
 from .pipeline_context import StageContext, StageExecution
-from .pipeline_contracts import PIPELINE_STAGES, StageName, StageState
+from .pipeline_contracts import (
+    PIPELINE_STAGES,
+    ReviewPolicy,
+    ReviewState,
+    StageName,
+    StageRecord,
+    StageState,
+)
 from .pipeline_executors import execute_native_stage
 from .pipeline_modes import ModeStep, get_mode_adapter
+from .pipeline_review import (
+    ApprovalPreset,
+    ReviewConfig,
+    resolve_review_config,
+    validate_stage_review,
+    write_stage_revision,
+)
 from .pipeline_store import (
     invalidate_stage_and_downstream,
     load_production_package,
@@ -82,8 +96,7 @@ def _approval_integrity_issue(artifacts: Sequence[str]) -> str:
             return f"Approval record is unreadable: {approval_path}"
         if (
             not isinstance(payload, dict)
-            or payload.get("schema_version")
-            != "motion-comic-factory.stage-approval.v1"
+            or payload.get("schema_version") != "motion-comic-factory.stage-approval.v1"
         ):
             return f"Approval record is invalid: {approval_path}"
         evidence = payload.get("evidence")
@@ -130,7 +143,9 @@ def _persist_execution(
     context: StageContext,
     result: StageExecution,
 ) -> tuple[StageState, tuple[str, ...], tuple[str, ...]]:
-    artifacts = tuple(str(Path(path).expanduser().resolve()) for path in result.artifacts)
+    artifacts = tuple(
+        str(Path(path).expanduser().resolve()) for path in result.artifacts
+    )
     state = result.state
     blocked_reasons = result.blocked_reasons
     should_write_manifest = state is StageState.PASSED or bool(artifacts)
@@ -141,12 +156,60 @@ def _persist_execution(
             metadata=result.metadata,
         )
         artifacts = (str(manifest.resolve()), *artifacts)
-    if state is StageState.PASSED and context.step.manual_gate:
-        state = StageState.BLOCKED
-        blocked_reasons = (
-            f"Manual approval is required after {context.step.executor_id}.",
-        )
     return state, artifacts, blocked_reasons
+
+
+def _resolved_review_config(
+    spec, adapter, supplied: ReviewConfig | None
+) -> ReviewConfig:
+    if supplied is not None:
+        return supplied
+    raw_preset = spec.policies.get("approval_preset")
+    if raw_preset:
+        overrides = spec.policies.get("review_overrides") or {}
+        if not isinstance(overrides, dict):
+            raise ValueError("review_overrides must be an object")
+        return resolve_review_config(ApprovalPreset(str(raw_preset)), overrides)
+    return ReviewConfig(
+        ApprovalPreset.QUICK,
+        {
+            stage: adapter.stage_steps[stage].compatibility_review_policy
+            for stage in PIPELINE_STAGES
+        },
+    )
+
+
+def _group_terminal(stage: StageName, config: ReviewConfig) -> bool:
+    index = PIPELINE_STAGES.index(stage)
+    return (
+        index == len(PIPELINE_STAGES) - 1
+        or config.policy_for(PIPELINE_STAGES[index + 1]) is not ReviewPolicy.GROUPED
+    )
+
+
+def _review_validation_issue(project_dir: Path, record: StageRecord) -> str:
+    if record.review_state is not ReviewState.APPROVED:
+        return ""
+    if record.review_policy not in (ReviewPolicy.MANUAL, ReviewPolicy.GROUPED):
+        return ""
+    validation = validate_stage_review(project_dir, record.stage)
+    if not validation.valid:
+        return validation.reason
+    if validation.review is None or validation.review.revision != record.revision:
+        return "Review does not match the package revision"
+    return ""
+
+
+def _review_wait_result(
+    stage: StageName, completed: list[StageName]
+) -> PipelineRunResult:
+    return PipelineRunResult(
+        False,
+        stage,
+        tuple(completed),
+        next_stage=stage,
+        stopped_state=StageState.BLOCKED,
+    )
 
 
 def run_pipeline(
@@ -155,6 +218,7 @@ def run_pipeline(
     through: StageName | None = None,
     enable_live: bool = False,
     executor: StageExecutor = execute_native_stage,
+    review_config: ReviewConfig | None = None,
 ) -> PipelineRunResult:
     root = Path(project_dir).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -168,6 +232,7 @@ def run_pipeline(
         spec = load_project_spec(root)
         package = load_production_package(root)
         adapter = get_mode_adapter(spec.mode)
+        resolved_reviews = _resolved_review_config(spec, adapter, review_config)
         through_index = (
             PIPELINE_STAGES.index(StageName(through))
             if through is not None
@@ -191,7 +256,19 @@ def run_pipeline(
                     and not record.input_signature.startswith("legacy:")
                     and record.input_signature != signature
                 )
-                if not missing and not integrity_issue and not signature_changed:
+                review_issue = _review_validation_issue(root, record)
+                if (
+                    not missing
+                    and not integrity_issue
+                    and not signature_changed
+                    and not review_issue
+                ):
+                    if record.review_blocks_progress and record.review_state not in (
+                        ReviewState.APPROVED,
+                        ReviewState.AUTO_APPROVED,
+                        ReviewState.SKIPPED,
+                    ):
+                        return _review_wait_result(stage, completed)
                     continue
                 package = invalidate_stage_and_downstream(
                     root,
@@ -200,21 +277,11 @@ def run_pipeline(
                         f"Registered artifact is missing: {missing[0]}"
                         if missing
                         else integrity_issue
+                        or review_issue
                         or "Stage executor signature changed"
                     ),
                 )
-            if step.requires_live and not enable_live:
-                reason = (
-                    "Cloud generation is disabled; rerun with --enable-live after review."
-                )
-                update_stage(
-                    root,
-                    stage,
-                    StageState.BLOCKED,
-                    executor=step.executor_id,
-                    input_signature=signature,
-                    blocked_reasons=(reason,),
-                )
+            elif record.state is StageState.BLOCKED:
                 return PipelineRunResult(
                     False,
                     stage,
@@ -222,8 +289,22 @@ def run_pipeline(
                     next_stage=stage,
                     stopped_state=StageState.BLOCKED,
                 )
-            if step.manual_gate and not step.prepare_before_gate:
-                reason = f"Manual approval is required before {step.executor_id}."
+            policy = resolved_reviews.policy_for(stage)
+            if policy is ReviewPolicy.NOT_APPLICABLE:
+                package = update_stage(
+                    root,
+                    stage,
+                    StageState.PASSED,
+                    executor=f"{step.executor_id}:skipped",
+                    input_signature=signature,
+                    review_policy=policy,
+                    review_state=ReviewState.SKIPPED,
+                    review_blocks_progress=False,
+                )
+                completed.append(stage)
+                continue
+            if step.requires_live and not enable_live:
+                reason = "Cloud generation is disabled; rerun with --enable-live after review."
                 update_stage(
                     root,
                     stage,
@@ -251,7 +332,9 @@ def run_pipeline(
                 result = executor(context)
                 state, artifacts, blocked_reasons = _persist_execution(context, result)
             except Exception as exc:
-                result = StageExecution.failed(_redact(str(exc)), executor=step.executor_id)
+                result = StageExecution.failed(
+                    _redact(str(exc)), executor=step.executor_id
+                )
                 state, artifacts, blocked_reasons = result.state, (), ()
             package = update_stage(
                 root,
@@ -271,7 +354,42 @@ def run_pipeline(
                     next_stage=stage,
                     stopped_state=state,
                 )
+            revision = write_stage_revision(
+                root,
+                stage,
+                tuple(artifacts),
+                signature,
+                result.executor,
+            )
+            review_blocks_progress = policy is ReviewPolicy.MANUAL or (
+                policy is ReviewPolicy.GROUPED
+                and _group_terminal(stage, resolved_reviews)
+            )
+            review_state = (
+                ReviewState.AUTO_APPROVED
+                if policy is ReviewPolicy.AUTOMATIC
+                else ReviewState.AWAITING_REVIEW
+            )
+            package = update_stage(
+                root,
+                stage,
+                StageState.PASSED,
+                executor=result.executor,
+                input_signature=signature,
+                artifacts=artifacts,
+                blocked_reasons=(
+                    (f"Review is required after {result.executor}.",)
+                    if review_blocks_progress
+                    else ()
+                ),
+                revision=revision.number,
+                review_policy=policy,
+                review_state=review_state,
+                review_blocks_progress=review_blocks_progress,
+            )
             completed.append(stage)
+            if review_blocks_progress:
+                return _review_wait_result(stage, completed)
     package = load_production_package(root)
     return PipelineRunResult(True, None, tuple(completed), package.next_stage)
 
@@ -282,12 +400,14 @@ def resume_pipeline(
     through: StageName | None = None,
     enable_live: bool = False,
     executor: StageExecutor = execute_native_stage,
+    review_config: ReviewConfig | None = None,
 ) -> PipelineRunResult:
     return run_pipeline(
         project_dir,
         through=through,
         enable_live=enable_live,
         executor=executor,
+        review_config=review_config,
     )
 
 
@@ -295,11 +415,28 @@ def pipeline_status(project_dir: str | Path) -> dict[str, object]:
     spec = load_project_spec(project_dir)
     package = load_production_package(project_dir)
     next_record = next(
-        (record for record in package.stages if record.state is not StageState.PASSED),
+        (
+            record
+            for record in package.stages
+            if record.state is not StageState.PASSED
+            or (
+                record.review_blocks_progress
+                and record.review_state
+                not in (
+                    ReviewState.APPROVED,
+                    ReviewState.AUTO_APPROVED,
+                    ReviewState.SKIPPED,
+                )
+            )
+        ),
         None,
     )
     if next_record is None:
         required_action = "none"
+    elif next_record.review_state is ReviewState.AWAITING_REVIEW:
+        required_action = "approve_review_evidence"
+    elif next_record.review_state is ReviewState.CHANGES_REQUESTED:
+        required_action = "address_review_changes"
     elif next_record.state is StageState.BLOCKED:
         required_action = (
             "approve_review_evidence"
@@ -315,10 +452,11 @@ def pipeline_status(project_dir: str | Path) -> dict[str, object]:
         "project_id": spec.project_id,
         "title": spec.title,
         "mode": spec.mode.value,
-        "next_stage": package.next_stage.value if package.next_stage else "complete",
-        "stages": {
-            record.stage.value: record.state.value for record in package.stages
-        },
+        "next_stage": next_record.stage.value if next_record else "complete",
+        "review_state": next_record.review_state.value if next_record else None,
+        "review_policy": next_record.review_policy.value if next_record else None,
+        "current_revision": next_record.revision if next_record else None,
+        "stages": {record.stage.value: record.state.value for record in package.stages},
         "stage_details": {
             record.stage.value: {
                 "state": record.state.value,
@@ -326,6 +464,10 @@ def pipeline_status(project_dir: str | Path) -> dict[str, object]:
                 "artifacts": list(record.artifacts),
                 "blocked_reasons": list(record.blocked_reasons),
                 "error": record.error,
+                "review_state": record.review_state.value,
+                "review_policy": record.review_policy.value,
+                "current_revision": record.revision,
+                "review_blocks_progress": record.review_blocks_progress,
             }
             for record in package.stages
         },

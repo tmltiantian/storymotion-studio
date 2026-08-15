@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
-from .pipeline_contracts import PIPELINE_STAGES, ProjectMode, StageName
+from .pipeline_contracts import PIPELINE_STAGES, ProjectMode, ReviewPolicy, StageName
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,10 @@ class ModeStep:
     requires_live: bool = False
     manual_gate: bool = False
     prepare_before_gate: bool = False
+
+    @property
+    def compatibility_review_policy(self) -> ReviewPolicy:
+        return ReviewPolicy.MANUAL if self.manual_gate else ReviewPolicy.AUTOMATIC
 
 
 class ModeAdapter:

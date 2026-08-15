@@ -7,8 +7,9 @@ from typing import Any
 
 from .pipeline_contracts import ProjectMode, ProjectSpec, StageName, StageState
 from .pipeline_migration import migrate_existing_project
+from .pipeline_review import ApprovalPreset
 from .pipeline_runner import pipeline_status, resume_pipeline, run_pipeline
-from .pipeline_store import approve_stage, create_project
+from .pipeline_store import approve_stage, create_project, request_stage_changes
 
 
 def add_factory_parser(
@@ -21,7 +22,9 @@ def add_factory_parser(
     commands = parser.add_subparsers(dest="factory_command", required=True)
 
     create = commands.add_parser("create", help="Create a unified project spec")
-    create.add_argument("--mode", choices=tuple(mode.value for mode in ProjectMode), required=True)
+    create.add_argument(
+        "--mode", choices=tuple(mode.value for mode in ProjectMode), required=True
+    )
     create.add_argument("--project", required=True)
     create.add_argument("--title", required=True)
     create.add_argument("--idea", default="")
@@ -33,12 +36,19 @@ def add_factory_parser(
     create.add_argument("--resolution", default="1080x1920")
     create.add_argument("--fps", type=int, default=30)
     create.add_argument("--character-assets", default="")
+    create.add_argument(
+        "--approval-preset",
+        choices=tuple(preset.value for preset in ApprovalPreset),
+        default=ApprovalPreset.STANDARD.value,
+    )
     create.set_defaults(factory_func=_create_command)
 
     migrate = commands.add_parser(
         "migrate", help="Register an existing project without moving its files"
     )
-    migrate.add_argument("--mode", choices=tuple(mode.value for mode in ProjectMode), required=True)
+    migrate.add_argument(
+        "--mode", choices=tuple(mode.value for mode in ProjectMode), required=True
+    )
     migrate.add_argument("--project", required=True)
     migrate.add_argument("--title", required=True)
     migrate.add_argument("--legacy-root", required=True)
@@ -50,7 +60,9 @@ def add_factory_parser(
     ):
         command = commands.add_parser(name, help=f"{name.title()} a unified project")
         command.add_argument("project")
-        command.add_argument("--through", choices=tuple(stage.value for stage in StageName))
+        command.add_argument(
+            "--through", choices=tuple(stage.value for stage in StageName)
+        )
         command.add_argument("--enable-live", action="store_true")
         command.set_defaults(factory_func=handler)
 
@@ -62,10 +74,24 @@ def add_factory_parser(
         "approve", help="Approve a blocked stage with review evidence"
     )
     approve.add_argument("project")
-    approve.add_argument("--stage", choices=tuple(stage.value for stage in StageName), required=True)
+    approve.add_argument(
+        "--stage", choices=tuple(stage.value for stage in StageName), required=True
+    )
+    approve.add_argument("--revision", type=int, required=True)
     approve.add_argument("--note", required=True)
     approve.add_argument("--evidence", action="append", required=True)
     approve.set_defaults(factory_func=_approve_command)
+
+    request_changes = commands.add_parser(
+        "request-changes", help="Request changes to a reviewed stage revision"
+    )
+    request_changes.add_argument("project")
+    request_changes.add_argument(
+        "--stage", choices=tuple(stage.value for stage in StageName), required=True
+    )
+    request_changes.add_argument("--revision", type=int, required=True)
+    request_changes.add_argument("--reason", required=True)
+    request_changes.set_defaults(factory_func=_request_changes_command)
 
     review = commands.add_parser("review", help="Run through the EVAL stage")
     review.add_argument("project")
@@ -142,7 +168,11 @@ def _create_command(args: argparse.Namespace) -> dict[str, Any]:
             "resolution": args.resolution,
             "fps": args.fps,
         },
-        policies={"enable_live": False, "audio_first": True},
+        policies={
+            "enable_live": False,
+            "audio_first": True,
+            "approval_preset": args.approval_preset,
+        },
         mode_options={
             "character_assets": args.character_assets,
             "factory_config": str(Path(args.config).expanduser().resolve()),
@@ -175,9 +205,7 @@ def _run_result(result) -> dict[str, Any]:
     if result.success:
         run_state = "complete" if result.next_stage is None else "paused"
     else:
-        run_state = (
-            "failed" if result.stopped_state is StageState.FAILED else "blocked"
-        )
+        run_state = "failed" if result.stopped_state is StageState.FAILED else "blocked"
     return {
         "success": result.success,
         "run_state": run_state,
@@ -215,12 +243,28 @@ def _approve_command(args: argparse.Namespace) -> dict[str, Any]:
     package = approve_stage(
         _project_dir(args),
         StageName(args.stage),
+        revision=args.revision,
         note=args.note,
         evidence=tuple(Path(path).expanduser() for path in args.evidence),
     )
     return {
         "success": True,
         "approved_stage": args.stage,
+        "next_stage": package.next_stage.value if package.next_stage else "complete",
+    }
+
+
+def _request_changes_command(args: argparse.Namespace) -> dict[str, Any]:
+    package = request_stage_changes(
+        _project_dir(args),
+        StageName(args.stage),
+        revision=args.revision,
+        reason=args.reason,
+    )
+    return {
+        "success": True,
+        "review_state": "changes_requested",
+        "requested_stage": args.stage,
         "next_stage": package.next_stage.value if package.next_stage else "complete",
     }
 
