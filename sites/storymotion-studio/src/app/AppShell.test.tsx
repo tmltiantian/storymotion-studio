@@ -1,11 +1,18 @@
 import "@testing-library/jest-dom/vitest";
 
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createApiClient } from "../api/client";
+import { createApiClient, type ApiClient } from "../api/client";
 import type { CreateProjectRequest, JobAccepted, ProjectDetail } from "../api/types";
 import { App } from "./App";
 import { AppShell } from "./AppShell";
@@ -50,7 +57,7 @@ function projectsApi(result: Promise<ProjectDetail[]> = Promise.resolve([project
     listProjects: vi
       .fn<(signal?: AbortSignal) => Promise<ProjectDetail[]>>()
       .mockImplementation(() => result),
-    createProject: vi.fn<(request: CreateProjectRequest) => Promise<JobAccepted>>(),
+    createProject: vi.fn<ApiClient["createProject"]>(),
   };
 }
 
@@ -163,23 +170,99 @@ describe("production workbench shell", () => {
     render(<App api={api} />);
     await screen.findByText(project.title);
 
-    await user.click(screen.getByRole("button", { name: "新建项目" }));
+    const trigger = screen.getByRole("button", { name: "新建项目" });
+    await user.click(trigger);
     await user.type(screen.getByRole("textbox", { name: "项目 ID" }), "episode_03");
     await user.type(screen.getByRole("textbox", { name: "项目标题" }), "潮汐来信 · 第 03 集");
     await user.type(screen.getByRole("textbox", { name: "创作构想" }), "一封被潮水送回的信。" );
     await user.click(screen.getByRole("button", { name: "创建项目" }));
 
-    expect(api.createProject).toHaveBeenCalledWith({
-      project_id: "episode_03",
-      title: "潮汐来信 · 第 03 集",
-      mode: "original",
-      idea: "一封被潮水送回的信。",
-      source_artifact_id: "",
-      target: {},
-      approval_preset: "standard",
-    });
+    expect(api.createProject).toHaveBeenCalledWith(
+      {
+        project_id: "episode_03",
+        title: "潮汐来信 · 第 03 集",
+        mode: "original",
+        idea: "一封被潮水送回的信。",
+        source_artifact_id: "",
+        target: {},
+        approval_preset: "standard",
+      },
+      expect.any(AbortSignal),
+    );
     expect(await screen.findByText("项目已进入创建队列")).toBeVisible();
     expect(screen.getByText("c".repeat(32))).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "完成" }));
+    expect(trigger).toHaveFocus();
+  });
+
+  it("traps focus, makes the shell inert, and restores focus after Escape", async () => {
+    const api = projectsApi();
+    window.history.replaceState({}, "", "/projects");
+    const user = userEvent.setup();
+    render(<App api={api} />);
+    await screen.findByText(project.title);
+    const trigger = screen.getByRole("button", { name: "新建项目" });
+
+    await user.click(trigger);
+
+    const dialog = screen.getByRole("dialog", { name: "新建项目" });
+    const shell = document.querySelector(".app-shell");
+    const firstField = screen.getByRole("textbox", { name: "项目 ID" });
+    const close = screen.getByRole("button", { name: "关闭新建项目" });
+    const submit = screen.getByRole("button", { name: "创建项目" });
+    expect(firstField).toHaveFocus();
+    expect(shell).toHaveAttribute("inert");
+    expect(shell).toHaveAttribute("aria-hidden", "true");
+    expect(screen.queryByRole("link", { name: "制作项目" })).not.toBeInTheDocument();
+
+    close.focus();
+    await user.tab({ shift: true });
+    expect(submit).toHaveFocus();
+    await user.tab();
+    expect(close).toHaveFocus();
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "新建项目" })).not.toBeInTheDocument();
+    expect(shell).not.toHaveAttribute("inert");
+    expect(shell).not.toHaveAttribute("aria-hidden");
+    expect(trigger).toHaveFocus();
+  });
+
+  it("keeps a pending create safe from Escape, duplicate submit, and unmount", async () => {
+    let resolveCreate: (job: JobAccepted) => void = () => undefined;
+    let submissionSignal: AbortSignal | undefined;
+    const pending = new Promise<JobAccepted>((resolve) => {
+      resolveCreate = resolve;
+    });
+    const api = projectsApi();
+    api.createProject.mockImplementation((_request, signal) => {
+      submissionSignal = signal;
+      return pending;
+    });
+    window.history.replaceState({}, "", "/projects");
+    const user = userEvent.setup();
+    const view = render(<App api={api} />);
+    await screen.findByText(project.title);
+    await user.click(screen.getByRole("button", { name: "新建项目" }));
+    await user.type(screen.getByRole("textbox", { name: "项目 ID" }), "episode_04");
+    await user.type(screen.getByRole("textbox", { name: "项目标题" }), "岸边回声");
+    await user.type(screen.getByRole("textbox", { name: "创作构想" }), "一段未完成的回声。" );
+    await user.click(screen.getByRole("button", { name: "创建项目" }));
+    const pendingButton = screen.getByRole("button", { name: "正在创建" });
+
+    fireEvent.submit(pendingButton.closest("form") as HTMLFormElement);
+    await user.keyboard("{Escape}");
+
+    expect(api.createProject).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("dialog", { name: "新建项目" })).toBeVisible();
+    expect(pendingButton).toBeDisabled();
+
+    view.unmount();
+    expect(submissionSignal?.aborted).toBe(true);
+    await act(async () =>
+      resolveCreate({ job_id: "d".repeat(32), status: "queued" }),
+    );
   });
 
   it.each([

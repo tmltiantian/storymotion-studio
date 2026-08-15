@@ -54,7 +54,10 @@ function identifier(value: string): string {
 
 export interface ApiClient {
   listProjects(signal?: AbortSignal): Promise<ProjectDetail[]>;
-  createProject(request: CreateProjectRequest): Promise<JobAccepted>;
+  createProject(
+    request: CreateProjectRequest,
+    signal?: AbortSignal,
+  ): Promise<JobAccepted>;
   getProject(projectId: string): Promise<ProjectDetail>;
   getStage(projectId: string, stage: StageName): Promise<StageDetail>;
   runStage(
@@ -142,9 +145,10 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     return (await response.json()) as T;
   }
 
-  const post = <T>(endpoint: string, body?: unknown) =>
+  const post = <T>(endpoint: string, body?: unknown, signal?: AbortSignal) =>
     request<T>(endpoint, {
       method: "POST",
+      signal,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
 
@@ -158,7 +162,8 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   return {
     listProjects: (signal) =>
       request<ProjectDetail[]>("/api/projects", { signal }),
-    createProject: (body) => post<JobAccepted>("/api/projects", body),
+    createProject: (body, signal) =>
+      post<JobAccepted>("/api/projects", body, signal),
     getProject: (projectId) =>
       request<ProjectDetail>(`/api/projects/${identifier(projectId)}`),
     getStage: (projectId, stage) =>
