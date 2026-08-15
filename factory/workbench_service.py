@@ -16,7 +16,13 @@ from urllib.parse import urlsplit
 from .gateway_video_batch import render_gateway_video_batch
 from .openmontage_adapter import write_openmontage_package
 from .pipeline_context import StageContext
-from .pipeline_contracts import ProductionPackage, ProjectMode, ProjectSpec, StageName
+from .pipeline_contracts import (
+    PIPELINE_STAGES,
+    ProductionPackage,
+    ProjectMode,
+    ProjectSpec,
+    StageName,
+)
 from .pipeline_impact import (
     ChangeRequest,
     ImpactPlan,
@@ -77,6 +83,8 @@ _MEDIA_TYPES = {
     ".webp": "image/webp",
     ".json": "application/json; charset=utf-8",
 }
+_ACTIVE_WORKERS: set[tuple[str, str]] = set()
+_ACTIVE_WORKERS_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -87,6 +95,59 @@ class _ArtifactRef:
     relative_path: Path
     name: str
     media_type: str
+
+
+class OpenedMedia:
+    """An authorized media descriptor owned by one response or reader."""
+
+    def __init__(self, descriptor: int, info: Mapping[str, Any]):
+        self._descriptor = descriptor
+        self.info = dict(info)
+        self._closed = False
+        self._close_lock = threading.Lock()
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            os.close(self._descriptor)
+
+    def iter_range(
+        self,
+        *,
+        start: int,
+        end: int,
+        chunk_size: int = 1024 * 1024,
+    ) -> Iterator[bytes]:
+        size = int(self.info["size"])
+        if start < 0 or end < start or end >= size:
+            raise ValueError("Media byte range is invalid")
+        if chunk_size <= 0:
+            raise ValueError("Media chunk size must be positive")
+
+        def chunks() -> Iterator[bytes]:
+            try:
+                os.lseek(self._descriptor, start, os.SEEK_SET)
+                remaining = end - start + 1
+                while remaining:
+                    chunk = os.read(self._descriptor, min(chunk_size, remaining))
+                    if not chunk:
+                        raise OSError("Authorized artifact changed while reading")
+                    remaining -= len(chunk)
+                    yield chunk
+            finally:
+                self.close()
+
+        return chunks()
+
+    def __del__(self) -> None:
+        if not getattr(self, "_closed", True):
+            self.close()
 
 
 def _safe_identifier(value: str, label: str) -> str:
@@ -170,6 +231,20 @@ class WorkbenchService:
         self._dispatch = dispatch or self._dispatch_thread
         self._job_artifacts: dict[str, _ArtifactRef] = {}
         self._registry_lock = threading.Lock()
+
+    def _worker_key(self, job_id: str) -> tuple[str, str]:
+        return str(self.jobs.jobs_dir), str(job_id)
+
+    def _claim_worker(self, job_id: str) -> None:
+        key = self._worker_key(job_id)
+        with _ACTIVE_WORKERS_LOCK:
+            if key in _ACTIVE_WORKERS:
+                raise RuntimeError("Job already has an active worker")
+            _ACTIVE_WORKERS.add(key)
+
+    def _release_worker(self, job_id: str) -> None:
+        with _ACTIVE_WORKERS_LOCK:
+            _ACTIVE_WORKERS.discard(self._worker_key(job_id))
 
     @staticmethod
     def _frontend_origins(origins: Sequence[str]) -> tuple[str, ...]:
@@ -515,8 +590,9 @@ class WorkbenchService:
         except KeyError as exc:
             raise KeyError(value) from exc
 
-    def media_info(self, artifact_id: str) -> dict[str, Any]:
+    def open_media(self, artifact_id: str) -> OpenedMedia:
         ref = self._media_ref(artifact_id)
+        descriptor = -1
         with AnchoredDirectory.open(
             ref.root, label="Authorized artifact root"
         ) as anchor:
@@ -527,20 +603,31 @@ class WorkbenchService:
                     os.O_RDONLY | os.O_NOFOLLOW,
                     dir_fd=parent,
                 )
-                try:
-                    metadata = os.fstat(descriptor)
-                    if not stat.S_ISREG(metadata.st_mode):
-                        raise KeyError(artifact_id)
-                finally:
+                metadata = os.fstat(descriptor)
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise KeyError(artifact_id)
+            except BaseException:
+                if descriptor >= 0:
                     os.close(descriptor)
+                raise
             finally:
                 os.close(parent)
-        return {
-            "artifact_id": ref.artifact_id,
-            "name": ref.name,
-            "media_type": ref.media_type,
-            "size": metadata.st_size,
-        }
+        return OpenedMedia(
+            descriptor,
+            {
+                "artifact_id": ref.artifact_id,
+                "name": ref.name,
+                "media_type": ref.media_type,
+                "size": metadata.st_size,
+            },
+        )
+
+    def media_info(self, artifact_id: str) -> dict[str, Any]:
+        opened = self.open_media(artifact_id)
+        try:
+            return dict(opened.info)
+        finally:
+            opened.close()
 
     def read_media(
         self,
@@ -549,37 +636,15 @@ class WorkbenchService:
         start: int = 0,
         end: int | None = None,
     ) -> tuple[dict[str, Any], bytes]:
-        info = self.media_info(artifact_id)
+        opened = self.open_media(artifact_id)
+        info = dict(opened.info)
         size = int(info["size"])
         last = size - 1 if end is None else end
-        if start < 0 or last < start or last >= size:
-            raise ValueError("Media byte range is invalid")
-        ref = self._media_ref(artifact_id)
-        with AnchoredDirectory.open(
-            ref.root, label="Authorized artifact root"
-        ) as anchor:
-            parent = self._open_artifact_parent(anchor, ref.relative_path)
-            try:
-                descriptor = os.open(
-                    ref.relative_path.name,
-                    os.O_RDONLY | os.O_NOFOLLOW,
-                    dir_fd=parent,
-                )
-                try:
-                    os.lseek(descriptor, start, os.SEEK_SET)
-                    remaining = last - start + 1
-                    chunks: list[bytes] = []
-                    while remaining:
-                        chunk = os.read(descriptor, min(1024 * 1024, remaining))
-                        if not chunk:
-                            raise OSError("Authorized artifact changed while reading")
-                        chunks.append(chunk)
-                        remaining -= len(chunk)
-                finally:
-                    os.close(descriptor)
-            finally:
-                os.close(parent)
-        return info, b"".join(chunks)
+        try:
+            return info, b"".join(opened.iter_range(start=start, end=last))
+        except BaseException:
+            opened.close()
+            raise
 
     def iter_media(
         self,
@@ -589,66 +654,38 @@ class WorkbenchService:
         end: int | None = None,
         chunk_size: int = 1024 * 1024,
     ) -> tuple[dict[str, Any], Iterator[bytes]]:
-        info = self.media_info(artifact_id)
+        opened = self.open_media(artifact_id)
+        info = dict(opened.info)
         size = int(info["size"])
         last = size - 1 if end is None else end
-        if start < 0 or last < start or last >= size:
-            raise ValueError("Media byte range is invalid")
-        ref = self._media_ref(artifact_id)
-
-        def chunks() -> Iterator[bytes]:
-            with AnchoredDirectory.open(
-                ref.root, label="Authorized artifact root"
-            ) as anchor:
-                parent = self._open_artifact_parent(anchor, ref.relative_path)
-                try:
-                    descriptor = os.open(
-                        ref.relative_path.name,
-                        os.O_RDONLY | os.O_NOFOLLOW,
-                        dir_fd=parent,
-                    )
-                    try:
-                        os.lseek(descriptor, start, os.SEEK_SET)
-                        remaining = last - start + 1
-                        while remaining:
-                            chunk = os.read(descriptor, min(chunk_size, remaining))
-                            if not chunk:
-                                raise OSError(
-                                    "Authorized artifact changed while reading"
-                                )
-                            remaining -= len(chunk)
-                            yield chunk
-                    finally:
-                        os.close(descriptor)
-                finally:
-                    os.close(parent)
-
-        return info, chunks()
+        try:
+            return info, opened.iter_range(
+                start=start,
+                end=last,
+                chunk_size=chunk_size,
+            )
+        except BaseException:
+            opened.close()
+            raise
 
     def provider_status(self) -> dict[str, Any]:
         profile = self._load_provider_profile()
         if profile is None:
             return {"capabilities": {}}
-        provider_secrets = tuple(
-            value
-            for capability in (
-                profile.text,
-                profile.image,
-                profile.video,
-                profile.audio,
-            )
-            for value in (capability.api_key, capability.base_url)
-            if value
-        )
+        provider_secrets = self._profile_redaction_values(profile)
         capabilities: dict[str, dict[str, Any]] = {}
         for name in ("text", "image", "video", "audio"):
             capability = getattr(profile, name)
             payload: dict[str, Any] = {
-                "provider": capability.provider,
-                "model": capability.model,
+                "provider": self._public_text(
+                    capability.provider, exact_values=provider_secrets
+                ),
+                "model": self._public_text(
+                    capability.model, exact_values=provider_secrets
+                ),
                 "ready": capability.ready,
                 "blockers": [
-                    self._public_text(self._redact_values(item, provider_secrets))
+                    self._public_text(item, exact_values=provider_secrets)
                     for item in capability.blockers
                 ],
                 "enabled": capability.enabled,
@@ -678,8 +715,57 @@ class WorkbenchService:
                 redacted = redacted.replace(secret, "[redacted]")
         return redacted
 
+    @staticmethod
+    def _profile_redaction_values(profile: ProviderProfile) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                value
+                for capability in (
+                    profile.text,
+                    profile.image,
+                    profile.video,
+                    profile.audio,
+                )
+                for value in (capability.api_key, capability.base_url)
+                if value
+            )
+        )
+
+    def _loaded_redaction_values(self) -> tuple[str, ...]:
+        try:
+            profile = self._load_provider_profile()
+        except Exception:
+            return ()
+        return () if profile is None else self._profile_redaction_values(profile)
+
     def public_error_message(self, error: Exception) -> str:
-        return self._public_text(str(error)) or "Request could not be completed"
+        return (
+            self._public_text(str(error), exact_values=self._loaded_redaction_values())
+            or "Request could not be completed"
+        )
+
+    def _reserved_mutation(
+        self,
+        project_id: str,
+        operation: str,
+        callback: Callable[[], Any],
+    ) -> Any:
+        job_id = self.jobs.submit(
+            project_id=project_id,
+            operation=operation,
+            payload={},
+        )
+        try:
+            self.jobs.start(job_id)
+            result = callback()
+            self.jobs.complete(job_id, result={})
+            return result
+        except Exception as exc:
+            try:
+                self.jobs.fail(job_id, error=self.public_error_message(exc))
+            except (KeyError, RuntimeError, ValueError):
+                pass
+            raise
 
     def approve_stage(
         self,
@@ -691,18 +777,22 @@ class WorkbenchService:
         evidence_artifact_ids: Sequence[str],
     ) -> dict[str, Any]:
         project = self._project_dir(project_id)
-        evidence = tuple(
-            self._artifact_path_for_project(project_id, artifact_id)
-            for artifact_id in evidence_artifact_ids
-        )
-        approve_stage(
-            project,
-            StageName(stage),
-            revision=revision,
-            note=note,
-            evidence=evidence,
-        )
-        return self.stage_detail(project_id, stage)
+
+        def mutate() -> dict[str, Any]:
+            evidence = tuple(
+                self._artifact_path_for_project(project_id, artifact_id)
+                for artifact_id in evidence_artifact_ids
+            )
+            approve_stage(
+                project,
+                StageName(stage),
+                revision=revision,
+                note=note,
+                evidence=evidence,
+            )
+            return self.stage_detail(project_id, stage)
+
+        return self._reserved_mutation(project_id, "approve_stage", mutate)
 
     def request_stage_changes(
         self,
@@ -712,13 +802,18 @@ class WorkbenchService:
         revision: int,
         reason: str,
     ) -> dict[str, Any]:
-        request_stage_changes(
-            self._project_dir(project_id),
-            StageName(stage),
-            revision=revision,
-            reason=reason,
-        )
-        return self.stage_detail(project_id, stage)
+        project = self._project_dir(project_id)
+
+        def mutate() -> dict[str, Any]:
+            request_stage_changes(
+                project,
+                StageName(stage),
+                revision=revision,
+                reason=reason,
+            )
+            return self.stage_detail(project_id, stage)
+
+        return self._reserved_mutation(project_id, "request_changes", mutate)
 
     def _artifact_path_for_project(self, project_id: str, artifact_id: str) -> Path:
         ref = self._media_ref(artifact_id)
@@ -736,8 +831,13 @@ class WorkbenchService:
         return self._impact_public(project_id, plan)
 
     def apply_impact(self, project_id: str, plan_id: str) -> dict[str, Any]:
-        apply_impact_plan(self._project_dir(project_id), plan_id)
-        return self.project_detail(project_id)
+        project = self._project_dir(project_id)
+
+        def mutate() -> dict[str, Any]:
+            apply_impact_plan(project, plan_id)
+            return self.project_detail(project_id)
+
+        return self._reserved_mutation(project_id, "apply_impact", mutate)
 
     def _impact_public(self, project_id: str, plan: ImpactPlan) -> dict[str, Any]:
         payload = plan.to_dict()
@@ -885,7 +985,9 @@ class WorkbenchService:
         enable_live: bool = False,
     ) -> dict[str, Any]:
         target = StageName(stage)
-        if target is StageName.VIDEO and enable_live:
+        if enable_live and PIPELINE_STAGES.index(target) >= PIPELINE_STAGES.index(
+            StageName.VIDEO
+        ):
             raise ValueError("Paid video generation requires confirmed video routes")
         project = self._project_dir(project_id)
         job_id = self.jobs.submit(
@@ -947,24 +1049,80 @@ class WorkbenchService:
                 test_mode=test_mode,
             )
 
-        self._execute_job(job_id, run)
+        self._execute_job(job_id, run, provider_result=True)
         return {"job_id": job_id, "status": "queued"}
 
+    @staticmethod
+    def _provider_result_failed(result: Mapping[str, Any]) -> bool:
+        if result.get("success") is False:
+            return True
+        failed_count = result.get("failed_count")
+        if isinstance(failed_count, int) and not isinstance(failed_count, bool):
+            if failed_count > 0:
+                return True
+        for key in ("status", "state"):
+            if str(result.get(key) or "").strip().lower() in {
+                "cancelled",
+                "error",
+                "failed",
+                "failure",
+            }:
+                return True
+        errors = result.get("errors")
+        return isinstance(errors, (list, tuple)) and bool(errors)
+
+    def _provider_failure_message(self, result: Mapping[str, Any]) -> str:
+        errors = result.get("errors")
+        if isinstance(errors, (list, tuple)) and errors:
+            first = errors[0]
+            if isinstance(first, Mapping):
+                detail = first.get("error") or first.get("message")
+            else:
+                detail = first
+            if detail:
+                return self._public_text(str(detail))
+        detail = result.get("error") or result.get("message")
+        if detail:
+            return self._public_text(str(detail))
+        return "Provider operation reported failure"
+
     def _execute_job(
-        self, job_id: str, operation: Callable[[], Mapping[str, Any]]
+        self,
+        job_id: str,
+        operation: Callable[[], Mapping[str, Any]],
+        *,
+        provider_result: bool = False,
+        worker_claimed: bool = False,
     ) -> None:
+        if not worker_claimed:
+            self._claim_worker(job_id)
+
         def execute() -> None:
             try:
                 self.jobs.start(job_id)
                 result = dict(operation())
-                self.jobs.complete(job_id, result=result)
+                if provider_result and self._provider_result_failed(result):
+                    sanitized = self._public_value(result)
+                    self.jobs.fail(
+                        job_id,
+                        error=self._provider_failure_message(sanitized),
+                        result=sanitized,
+                    )
+                else:
+                    self.jobs.complete(job_id, result=result)
             except Exception as exc:
                 try:
-                    self.jobs.fail(job_id, error=self._public_text(str(exc)))
+                    self.jobs.fail(job_id, error=self.public_error_message(exc))
                 except (KeyError, RuntimeError, ValueError):
                     pass
+            finally:
+                self._release_worker(job_id)
 
-        self._dispatch(execute)
+        try:
+            self._dispatch(execute)
+        except BaseException:
+            self._release_worker(job_id)
+            raise
 
     def job_detail(self, job_id: str) -> dict[str, Any]:
         if not _JOB_ID.fullmatch(str(job_id)):
@@ -982,16 +1140,35 @@ class WorkbenchService:
         ]
 
     def resume_job(self, job_id: str) -> dict[str, Any]:
-        record = self.jobs.resume(job_id)
-        if record.status == "completed":
+        record = self.jobs.get(job_id)
+        if record.status in {"completed", "cancelled"}:
             return self._job_public(record)
         if record.operation not in {"video_test", "video_generate"}:
             raise ValueError("Only provider jobs can be resumed through the public API")
+        if record.status not in {"failed", "queued", "running"}:
+            raise ValueError("Stored provider job is not resumable")
         raw_request = record.payload.get("generation_request")
         if not isinstance(raw_request, dict):
             raise ValueError("Stored generation request is invalid")
         request = VideoGenerationRequest.from_dict(raw_request)
+        if request.project_id != record.project_id:
+            raise ValueError("Stored generation request belongs to another project")
+        if not record.provider_tasks:
+            raise ValueError("Stored provider task state is required for resume")
+        if any(
+            str(task.get("provider") or "") != request.provider
+            or not str(task.get("task_id") or "")
+            for task in record.provider_tasks.values()
+        ):
+            raise ValueError("Stored provider task state is invalid")
         project = self._project_dir(record.project_id)
+
+        self._claim_worker(job_id)
+        try:
+            record = self.jobs.resume(job_id)
+        except BaseException:
+            self._release_worker(job_id)
+            raise
 
         def run() -> Mapping[str, Any]:
             return self._video_renderer(
@@ -1011,10 +1188,16 @@ class WorkbenchService:
                 test_mode=record.operation == "video_test",
             )
 
-        self._execute_job(job_id, run)
+        self._execute_job(
+            job_id,
+            run,
+            provider_result=True,
+            worker_claimed=True,
+        )
         return {"job_id": job_id, "status": "queued"}
 
     def _job_public(self, record: JobRecord) -> dict[str, Any]:
+        exact_values = self._loaded_redaction_values()
         return {
             "job_id": record.job_id,
             "project_id": record.project_id,
@@ -1022,47 +1205,126 @@ class WorkbenchService:
             "status": record.status,
             "created_at": record.created_at,
             "updated_at": record.updated_at,
-            "provider_tasks": self._public_value(record.provider_tasks),
-            "result": self._public_job_value(record.project_id, record.result),
-            "error": self._public_text(record.error),
+            "provider_tasks": self._public_value(
+                record.provider_tasks, exact_values=exact_values
+            ),
+            "result": self._public_job_value(
+                record.project_id,
+                record.result,
+                exact_values=exact_values,
+            ),
+            "error": self._public_text(record.error, exact_values=exact_values),
             "resume_count": record.resume_count,
         }
 
     def _event_public(self, event: JobEvent) -> dict[str, Any]:
+        exact_values = self._loaded_redaction_values()
         return {
             "job_id": event.job_id,
             "sequence": event.sequence,
             "kind": event.kind,
-            "data": self._public_value(event.data),
+            "data": self._public_value(event.data, exact_values=exact_values),
             "created_at": event.created_at,
         }
 
-    def _public_value(self, value: Any) -> Any:
+    @staticmethod
+    def _unique_public_key(candidate: str, result: Mapping[str, Any]) -> str:
+        if candidate not in result:
+            return candidate
+        index = 2
+        while f"{candidate}-{index}" in result:
+            index += 1
+        return f"{candidate}-{index}"
+
+    def _public_key(self, value: Any, exact_values: Sequence[str]) -> str:
+        raw = str(value)
+        sanitized = self._public_text(raw, exact_values=exact_values)
+        if sanitized != raw or "[redacted" in sanitized:
+            return "[redacted-key]"
+        return sanitized
+
+    def _public_value(
+        self,
+        value: Any,
+        *,
+        exact_values: Sequence[str] | None = None,
+    ) -> Any:
+        redaction_values = (
+            self._loaded_redaction_values()
+            if exact_values is None
+            else tuple(exact_values)
+        )
         if isinstance(value, Mapping):
-            return {str(key): self._public_value(item) for key, item in value.items()}
+            result: dict[str, Any] = {}
+            for key, item in value.items():
+                public_key = self._unique_public_key(
+                    self._public_key(key, redaction_values), result
+                )
+                result[public_key] = self._public_value(
+                    item, exact_values=redaction_values
+                )
+            return result
         if isinstance(value, (list, tuple)):
-            return [self._public_value(item) for item in value]
+            return [
+                self._public_value(item, exact_values=redaction_values)
+                for item in value
+            ]
         if isinstance(value, Path):
             return "[redacted-path]"
         if isinstance(value, str):
-            return self._public_text(value)
+            return self._public_text(value, exact_values=redaction_values)
         return value
 
-    def _public_job_value(self, project_id: str, value: Any) -> Any:
+    def _public_job_value(
+        self,
+        project_id: str,
+        value: Any,
+        *,
+        exact_values: Sequence[str] | None = None,
+    ) -> Any:
+        redaction_values = (
+            self._loaded_redaction_values()
+            if exact_values is None
+            else tuple(exact_values)
+        )
         if isinstance(value, Mapping):
-            return {
-                str(key): self._public_job_value(project_id, item)
-                for key, item in value.items()
-            }
+            result: dict[str, Any] = {}
+            for key, item in value.items():
+                public_key = self._unique_public_key(
+                    self._public_key(key, redaction_values), result
+                )
+                result[public_key] = self._public_job_value(
+                    project_id,
+                    item,
+                    exact_values=redaction_values,
+                )
+            return result
         if isinstance(value, (list, tuple)):
-            return [self._public_job_value(project_id, item) for item in value]
+            return [
+                self._public_job_value(
+                    project_id,
+                    item,
+                    exact_values=redaction_values,
+                )
+                for item in value
+            ]
         if isinstance(value, (str, Path)) and Path(value).is_absolute():
             ref = self._register_artifact(project_id, value)
             return ref.artifact_id if ref is not None else "[redacted-path]"
-        return self._public_value(value)
+        return self._public_value(value, exact_values=redaction_values)
 
-    def _public_text(self, value: str) -> str:
-        text = str(value)
+    def _public_text(
+        self,
+        value: str,
+        *,
+        exact_values: Sequence[str] | None = None,
+    ) -> str:
+        redaction_values = (
+            self._loaded_redaction_values()
+            if exact_values is None
+            else tuple(exact_values)
+        )
+        text = self._redact_values(str(value), redaction_values)
         text = _TOKEN_TEXT.sub("[redacted]", text)
         text = _AUTH_TEXT.sub("[redacted]", text)
         text = _SECRET_ASSIGNMENT.sub("[redacted]", text)

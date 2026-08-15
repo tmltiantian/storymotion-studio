@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
 
+from factory.pipeline_contracts import ProjectMode, ProjectSpec, StageState
 from factory.pipeline_jobs import JobManager
+from factory.pipeline_store import create_project
 from factory.workbench_api import create_workbench_app, run_workbench_api
 from factory.workbench_service import WorkbenchService
 
@@ -56,6 +62,41 @@ class FakeWorkbenchService:
 @pytest.fixture
 def client() -> TestClient:
     return TestClient(create_workbench_app(FakeWorkbenchService()))
+
+
+def _authorized_media_service(
+    tmp_path: Path,
+) -> tuple[WorkbenchService, Path, str]:
+    project = tmp_path / "runs/episode_01"
+    artifact = project / "stages/concept/preview.mp4"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"0123456789")
+    spec = ProjectSpec(
+        project_id="episode_01",
+        title="Episode 01",
+        mode=ProjectMode.ORIGINAL,
+        input={"kind": "idea", "text": "Media test"},
+        output_dir=project / "output",
+    )
+    package = create_project(project, spec)
+    first = replace(
+        package.stages[0],
+        state=StageState.PASSED,
+        artifacts=(str(artifact),),
+    )
+    (project / "production_package.json").write_text(
+        json.dumps(package.with_stages((first, *package.stages[1:])).to_dict()),
+        encoding="utf-8",
+    )
+    service = WorkbenchService(
+        tmp_path,
+        job_manager=JobManager(tmp_path),
+        provider_profile_loader=lambda: None,
+    )
+    artifact_id = service.project_detail("episode_01")["stages"][0]["artifacts"][0][
+        "artifact_id"
+    ]
+    return service, artifact, artifact_id
 
 
 def test_project_detail_contains_execution_and_review_states(client: TestClient):
@@ -227,6 +268,88 @@ def test_media_supports_head_and_exact_single_ranges(tmp_path: Path) -> None:
     assert empty.status_code == 200
     assert empty.headers["content-length"] == "0"
     assert empty.content == b""
+
+
+def test_media_stream_and_head_use_and_close_one_authorized_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, artifact, artifact_id = _authorized_media_service(tmp_path)
+    assert hasattr(service, "open_media"), "service must expose opened media contract"
+    original_open = service.open_media
+    opened = []
+
+    def open_then_replace(selected_artifact_id: str):
+        authorized = original_open(selected_artifact_id)
+        opened.append(authorized)
+        if len(opened) == 1:
+            replacement = artifact.with_name("replacement.mp4")
+            replacement.write_bytes(b"xy")
+            os.replace(replacement, artifact)
+        return authorized
+
+    monkeypatch.setattr(service, "open_media", open_then_replace)
+    media_client = TestClient(create_workbench_app(service))
+
+    streamed = media_client.get(f"/api/media/{artifact_id}")
+    head = media_client.head(f"/api/media/{artifact_id}")
+
+    assert streamed.status_code == 200
+    assert streamed.headers["content-length"] == "10"
+    assert streamed.content == b"0123456789"
+    assert head.status_code == 200
+    assert head.headers["content-length"] == "2"
+    assert all(item.closed for item in opened)
+
+
+def test_media_disconnect_before_first_chunk_closes_authorized_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _artifact, artifact_id = _authorized_media_service(tmp_path)
+    original_open = service.open_media
+    opened = []
+
+    def capture_open(selected_artifact_id: str):
+        authorized = original_open(selected_artifact_id)
+        opened.append(authorized)
+        return authorized
+
+    monkeypatch.setattr(service, "open_media", capture_open)
+    app = create_workbench_app(service)
+    route = next(
+        item
+        for item in app.routes
+        if getattr(item, "path", "") == "/api/media/{artifact_id}"
+        and "GET" in getattr(item, "methods", set())
+    )
+
+    async def disconnect() -> None:
+        response = await route.endpoint(artifact_id=artifact_id, range_header=None)
+
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        async def send(_message):
+            raise OSError("client disconnected")
+
+        with pytest.raises(ClientDisconnect):
+            await response(
+                {
+                    "type": "http",
+                    "asgi": {"spec_version": "2.4"},
+                    "method": "GET",
+                    "path": f"/api/media/{artifact_id}",
+                    "headers": [],
+                },
+                receive,
+                send,
+            )
+
+    asyncio.run(disconnect())
+
+    assert len(opened) == 1
+    assert opened[0].closed
 
 
 def test_sse_replays_only_events_after_last_event_id(tmp_path: Path) -> None:

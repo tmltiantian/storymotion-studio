@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from factory import workbench_service as workbench_service_module
 from factory.pipeline_contracts import (
     ProjectMode,
     ProjectSpec,
@@ -13,7 +14,7 @@ from factory.pipeline_contracts import (
     ReviewState,
     StageState,
 )
-from factory.pipeline_jobs import JobManager
+from factory.pipeline_jobs import JobManager, ProjectBusyError
 from factory.pipeline_store import create_project, load_production_package
 from factory.provider_profile import CapabilityConfig, ProviderProfile
 from factory.workbench_service import WorkbenchService
@@ -38,6 +39,27 @@ def _provider_profile() -> ProviderProfile:
         audio=capability,
         source_paths={"factory": "/private/.env"},
     )
+
+
+def _video_request(project_id: str = "episode_01") -> dict[str, object]:
+    return {
+        "schema_version": "motion-comic-factory.video-generation-request.v1",
+        "project_id": project_id,
+        "project_sha256": "a" * 64,
+        "package_sha256": "b" * 64,
+        "revision_hashes": {},
+        "artifact_hashes": {},
+        "approval_hashes": {},
+        "repair_plan_sha256": "",
+        "shot_ids": ["shot-1"],
+        "shots": [{"shot_id": "shot-1", "duration": 5, "resolution": "720p"}],
+        "provider": "gateway",
+        "model": "safe-model",
+        "resolution": "720p",
+        "output_seconds": 5,
+        "estimated_cost_yuan": 1.0,
+        "price_yuan_per_second": 0.2,
+    }
 
 
 @pytest.fixture
@@ -343,3 +365,317 @@ def test_non_original_project_creation_accepts_artifact_id_not_source_path(
     detail = service.project_detail("novel_01")
     assert detail["mode"] == "novel"
     assert "/runs/" not in json.dumps(detail)
+
+
+@pytest.mark.parametrize("stage", ("video", "edit", "eval", "deliver"))
+def test_live_stage_traversal_cannot_reach_video_without_confirmation(
+    service: WorkbenchService,
+    stage: str,
+) -> None:
+    with pytest.raises(ValueError, match="confirmed video"):
+        service.submit_stage_run("episode_01", stage, enable_live=True)
+
+
+def test_failed_provider_result_is_resumable_and_keeps_provider_task(
+    project_workspace: tuple[Path, Path],
+) -> None:
+    workspace, _artifact = project_workspace
+    manager = JobManager(workspace)
+    attempts = 0
+
+    def render_video(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        kwargs["provider_task_persisted"]("shot-1", "task-123", "submitted")
+        if attempts == 1:
+            return {
+                "success": False,
+                "failed_count": 1,
+                "errors": [
+                    {
+                        "error": (
+                            "sk-secret-value failed at /private/provider/result.json"
+                        )
+                    }
+                ],
+            }
+        return {"success": True, "completed_count": 1}
+
+    service = WorkbenchService(
+        workspace,
+        job_manager=manager,
+        provider_profile_loader=_provider_profile,
+        video_renderer=render_video,
+        dispatch=lambda callback: callback(),
+    )
+
+    submitted = service.submit_video_generation(
+        "episode_01",
+        generation_token="token-id.secret",
+        generation_request=_video_request(),
+        test_mode=True,
+    )
+    failed = manager.get(submitted["job_id"])
+
+    assert failed.status == "failed"
+    assert failed.result["success"] is False
+    assert failed.provider_tasks["shot-1"]["task_id"] == "task-123"
+    assert "sk-secret-value" not in json.dumps(service.job_detail(failed.job_id))
+    assert "/private/" not in json.dumps(service.job_detail(failed.job_id))
+
+    service.resume_job(failed.job_id)
+
+    assert manager.get(failed.job_id).status == "completed"
+    assert attempts == 2
+
+
+def test_invalid_resume_does_not_mutate_or_reclaim_failed_job(
+    service: WorkbenchService,
+) -> None:
+    job_id = service.jobs.submit(
+        project_id="episode_01",
+        operation="run_stage",
+        payload={},
+    )
+    service.jobs.fail(job_id, error="stage failed")
+    record_path = service.jobs.jobs_dir / f"{job_id}.json"
+    before = record_path.read_bytes()
+
+    with pytest.raises(ValueError, match="provider jobs"):
+        service.resume_job(job_id)
+
+    assert record_path.read_bytes() == before
+    assert service.jobs.get(job_id).status == "failed"
+    next_job = service.jobs.submit(
+        project_id="episode_01",
+        operation="run_stage",
+        payload={},
+    )
+    assert next_job != job_id
+
+
+def test_resume_does_not_dispatch_duplicate_for_live_worker(
+    project_workspace: tuple[Path, Path],
+) -> None:
+    workspace, _artifact = project_workspace
+    manager = JobManager(workspace)
+    pending: list[object] = []
+    service = WorkbenchService(
+        workspace,
+        job_manager=manager,
+        provider_profile_loader=_provider_profile,
+        video_renderer=lambda **_kwargs: {"success": True},
+        dispatch=pending.append,
+    )
+    submitted = service.submit_video_generation(
+        "episode_01",
+        generation_token="token-id.secret",
+        generation_request=_video_request(),
+        test_mode=True,
+    )
+    manager.start(submitted["job_id"])
+    manager.record_provider_task(
+        submitted["job_id"],
+        shot_id="shot-1",
+        provider="gateway",
+        task_id="task-123",
+        status="submitted",
+    )
+
+    with pytest.raises(RuntimeError, match="active worker"):
+        service.resume_job(submitted["job_id"])
+
+    assert len(pending) == 1
+    assert manager.get(submitted["job_id"]).status == "running"
+
+
+@pytest.mark.parametrize(
+    ("request_project", "with_provider_task"),
+    (("other_project", True), ("episode_01", False)),
+)
+def test_resume_validates_project_ownership_and_provider_state_before_mutation(
+    project_workspace: tuple[Path, Path],
+    request_project: str,
+    with_provider_task: bool,
+) -> None:
+    workspace, _artifact = project_workspace
+    manager = JobManager(workspace)
+    job_id = manager.submit(
+        project_id="episode_01",
+        operation="video_generate",
+        payload={"generation_request": _video_request(request_project)},
+    )
+    manager.start(job_id)
+    if with_provider_task:
+        manager.record_provider_task(
+            job_id,
+            shot_id="shot-1",
+            provider="gateway",
+            task_id="task-123",
+            status="submitted",
+        )
+    manager.fail(job_id, error="interrupted")
+    record_path = manager.jobs_dir / f"{job_id}.json"
+    before = record_path.read_bytes()
+    service = WorkbenchService(
+        workspace,
+        job_manager=manager,
+        provider_profile_loader=_provider_profile,
+        dispatch=lambda callback: callback(),
+    )
+
+    with pytest.raises(ValueError, match="Stored generation|provider task"):
+        service.resume_job(job_id)
+
+    assert record_path.read_bytes() == before
+    assert manager.get(job_id).status == "failed"
+
+
+def test_review_and_repair_mutations_respect_persistent_project_owner(
+    service: WorkbenchService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_id = service.project_detail("episode_01")["stages"][0]["artifacts"][0][
+        "artifact_id"
+    ]
+    service.jobs.submit(
+        project_id="episode_01",
+        operation="run_stage",
+        payload={},
+    )
+    called: list[str] = []
+    monkeypatch.setattr(
+        workbench_service_module,
+        "approve_stage",
+        lambda *_args, **_kwargs: called.append("approve"),
+    )
+    monkeypatch.setattr(
+        workbench_service_module,
+        "request_stage_changes",
+        lambda *_args, **_kwargs: called.append("changes"),
+    )
+    monkeypatch.setattr(
+        workbench_service_module,
+        "apply_impact_plan",
+        lambda *_args, **_kwargs: called.append("impact"),
+    )
+
+    operations = (
+        lambda: service.approve_stage(
+            "episode_01",
+            "concept",
+            revision=1,
+            note="approved",
+            evidence_artifact_ids=[artifact_id],
+        ),
+        lambda: service.request_stage_changes(
+            "episode_01",
+            "concept",
+            revision=1,
+            reason="revise",
+        ),
+        lambda: service.apply_impact("episode_01", "a" * 64),
+    )
+    for operation in operations:
+        with pytest.raises(ProjectBusyError):
+            operation()
+
+    assert called == []
+
+
+def test_exact_loaded_secrets_are_redacted_from_status_and_errors(
+    project_workspace: tuple[Path, Path],
+) -> None:
+    workspace, _artifact = project_workspace
+    secret = "opaque-value-12345"
+    credential_url = "https://user:password@provider.example/v1"
+    capability = CapabilityConfig(
+        provider=secret,
+        model=secret,
+        base_url=credential_url,
+        api_key=secret,
+        key_name="GATEWAY_API_KEY",
+        key_source=None,
+        ready=False,
+        blockers=(f"{secret} rejected by {credential_url}",),
+    )
+    profile = ProviderProfile(
+        text=capability,
+        image=capability,
+        video=capability,
+        audio=capability,
+        source_paths={},
+    )
+    service = WorkbenchService(
+        workspace,
+        job_manager=JobManager(workspace),
+        provider_profile_loader=lambda: profile,
+    )
+
+    encoded = json.dumps(service.provider_status())
+    public_error = service.public_error_message(
+        RuntimeError(f"Provider {secret} failed via {credential_url}")
+    )
+
+    assert secret not in encoded
+    assert credential_url not in encoded
+    assert secret not in public_error
+    assert credential_url not in public_error
+
+
+def test_public_payloads_sanitize_mapping_keys_recursively(
+    project_workspace: tuple[Path, Path],
+) -> None:
+    workspace, _artifact = project_workspace
+    secret = "opaque-value-12345"
+    capability = CapabilityConfig(
+        provider="gateway",
+        model="safe-model",
+        base_url="https://provider.example/v1",
+        api_key=secret,
+        key_name="GATEWAY_API_KEY",
+        key_source=None,
+        ready=True,
+    )
+    profile = ProviderProfile(
+        text=capability,
+        image=capability,
+        video=capability,
+        audio=capability,
+        source_paths={},
+    )
+    project_file = workspace / "runs/episode_01/project.json"
+    project_payload = json.loads(project_file.read_text(encoding="utf-8"))
+    project_payload["target"] = {"/private/project-key": {secret: "project-value"}}
+    project_file.write_text(json.dumps(project_payload), encoding="utf-8")
+    manager = JobManager(workspace)
+    job_id = manager.submit(
+        project_id="episode_01",
+        operation="video_generate",
+        payload={},
+    )
+    manager.append_event(
+        job_id,
+        "progress",
+        {"nested": {"/private/event-key": {secret: "event-value"}}},
+    )
+    manager.complete(
+        job_id,
+        result={"nested": {"/private/result-key": {secret: "result-value"}}},
+    )
+    service = WorkbenchService(
+        workspace,
+        job_manager=manager,
+        provider_profile_loader=lambda: profile,
+    )
+
+    encoded = json.dumps(
+        {
+            "project": service.project_detail("episode_01"),
+            "job": service.job_detail(job_id),
+            "events": service.job_events(job_id),
+        }
+    )
+
+    assert "/private/" not in encoded
+    assert secret not in encoded
