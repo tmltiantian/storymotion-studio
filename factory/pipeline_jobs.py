@@ -760,15 +760,28 @@ class JobManager:
             self._release_project_locked(updated)
             return updated
 
-    def fail(self, job_id: str, *, error: str) -> JobRecord:
+    def fail(
+        self,
+        job_id: str,
+        *,
+        error: str,
+        result: Mapping[str, Any] | None = None,
+    ) -> JobRecord:
         message = str(error).strip()
         _validate_safe_data(message, key="error")
+        failure_result = dict(result or {})
+        _validate_safe_data(failure_result, key="result")
         with self._mutation_lock():
             self._recover_transitions_locked()
             record = self._get_locked(job_id)
             if record.status not in ACTIVE_STATUSES:
                 raise ValueError(f"Cannot fail {record.status} job")
-            updated = self._replace_locked(record, status="failed", error=message)
+            updated = self._replace_locked(
+                record,
+                status="failed",
+                result=failure_result,
+                error=message,
+            )
             self._commit_transition_locked(
                 updated,
                 "failed",

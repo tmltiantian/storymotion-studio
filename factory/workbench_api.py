@@ -149,6 +149,18 @@ def _parse_range(value: str, size: int) -> tuple[int, int]:
     return start, min(end, size - 1)
 
 
+class _ClosingStreamingResponse(StreamingResponse):
+    def __init__(self, *args: Any, close: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._close = close
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._close()
+
+
 def create_workbench_app(service: WorkbenchService) -> FastAPI:
     app = FastAPI(title="StoryMotion Studio Workbench", docs_url=None, redoc_url=None)
     origins = tuple(service.frontend_origins)
@@ -360,23 +372,40 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
 
     def media_response(artifact_id: str, range_header: str | None, *, head: bool):
         selected = _identifier(artifact_id)
-        info = service.media_info(selected)
+        opened = service.open_media(selected)
+        info = opened.info
         size = int(info["size"])
         headers = {
             "Accept-Ranges": "bytes",
             "Content-Type": str(info["media_type"]),
         }
+
+        async def stream(start: int, end: int):
+            try:
+                for chunk in opened.iter_range(start=start, end=end):
+                    yield chunk
+                    await asyncio.sleep(0)
+            finally:
+                opened.close()
+
         if range_header is None:
             headers["Content-Length"] = str(size)
             if head:
+                opened.close()
                 return Response(status_code=200, headers=headers)
             if size == 0:
+                opened.close()
                 return Response(content=b"", status_code=200, headers=headers)
-            _info, content = service.iter_media(selected, start=0, end=size - 1)
-            return StreamingResponse(content, status_code=200, headers=headers)
+            return _ClosingStreamingResponse(
+                stream(0, size - 1),
+                status_code=200,
+                headers=headers,
+                close=opened.close,
+            )
         try:
             start, end = _parse_range(range_header, size)
         except ValueError:
+            opened.close()
             return Response(
                 status_code=416,
                 headers={**headers, "Content-Range": f"bytes */{size}"},
@@ -388,9 +417,14 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
             }
         )
         if head:
+            opened.close()
             return Response(status_code=206, headers=headers)
-        _info, content = service.iter_media(selected, start=start, end=end)
-        return StreamingResponse(content, status_code=206, headers=headers)
+        return _ClosingStreamingResponse(
+            stream(start, end),
+            status_code=206,
+            headers=headers,
+            close=opened.close,
+        )
 
     @app.head("/api/media/{artifact_id}")
     async def head_media(
