@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import math
+from types import MethodType
+from typing import Any, Callable
+
 from .gateway_video import GatewayVideoClient, GatewayVideoConfig, GatewayVideoError
 from .minimax_h3_video import (
     H3_OUTPUT_PRICE_YUAN_PER_SECOND,
@@ -30,9 +34,60 @@ def estimate_video_cost_yuan(
         )
     if price_yuan_per_second is None:
         raise GatewayVideoError("Video price per output second is not configured.")
-    if isinstance(price_yuan_per_second, bool) or price_yuan_per_second < 0:
-        raise GatewayVideoError("Video price per output second cannot be negative.")
-    return round(output_seconds * float(price_yuan_per_second), 4)
+    if isinstance(price_yuan_per_second, bool):
+        raise GatewayVideoError("Video price per output second must be positive.")
+    try:
+        rate = float(price_yuan_per_second)
+    except (TypeError, ValueError) as exc:
+        raise GatewayVideoError(
+            "Video price per output second must be positive."
+        ) from exc
+    if not math.isfinite(rate) or rate <= 0:
+        raise GatewayVideoError("Video price per output second must be positive.")
+    estimate = round(output_seconds * rate, 4)
+    if not math.isfinite(estimate) or estimate <= 0:
+        raise GatewayVideoError("Video cost estimate must be positive and finite.")
+    return estimate
+
+
+def _confirmation_guard(
+    raw_method: Callable[..., Any],
+) -> Callable[..., Any]:
+    def guarded(client: GatewayVideoClient, *args: Any, **kwargs: Any) -> Any:
+        depth = int(getattr(client, "_generation_confirmation_depth", 0))
+        if depth:
+            return raw_method(*args, **kwargs)
+        permits = int(getattr(client, "_generation_confirmation_permits", 0))
+        if permits <= 0:
+            raise GatewayVideoError(
+                "Paid video submission requires a consumed generation confirmation."
+            )
+        client._generation_confirmation_permits = permits - 1
+        client._generation_confirmation_depth = depth + 1
+        try:
+            return raw_method(*args, **kwargs)
+        finally:
+            client._generation_confirmation_depth = depth
+
+    return guarded
+
+
+def _install_confirmation_gate(client: GatewayVideoClient) -> None:
+    client._generation_confirmation_permits = 0
+    client._generation_confirmation_depth = 0
+    for name in ("submit", "submit_prepared", "generate"):
+        raw_method = getattr(client, name)
+        setattr(client, name, MethodType(_confirmation_guard(raw_method), client))
+    client.requires_generation_confirmation = True
+
+
+def _authorize_confirmed_video_submit(client: GatewayVideoClient) -> None:
+    """Grant one fresh-submit entry to a production-built client."""
+    if not getattr(client, "requires_generation_confirmation", False):
+        return
+    client._generation_confirmation_permits = (
+        int(getattr(client, "_generation_confirmation_permits", 0)) + 1
+    )
 
 
 def build_video_client(
@@ -62,5 +117,5 @@ def build_video_client(
         client = GatewayVideoClient(GatewayVideoConfig(**config_values))
     else:
         raise GatewayVideoError(f"Unsupported video provider: {provider or 'empty'}.")
-    client.requires_generation_confirmation = True
+    _install_confirmation_gate(client)
     return client

@@ -26,7 +26,9 @@ from .video_preflight import (
     GenerationTokenError,
     VideoGenerationRequest,
     consume_generation_token,
+    describe_submitted_video_request,
 )
+from .video_provider import _authorize_confirmed_video_submit
 
 
 class GatewayVideoBatchError(RuntimeError):
@@ -116,9 +118,7 @@ def gateway_endpoint_fingerprint(base_url: str) -> str:
         scheme == "http" and port == 80
     )
     port_suffix = "" if port is None or default_port else f":{port}"
-    normalized = (
-        f"{scheme}://{display_host}{port_suffix}{normalized_path}"
-    )
+    normalized = f"{scheme}://{display_host}{port_suffix}{normalized_path}"
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
@@ -144,7 +144,10 @@ def _validate_report_destination(
                 ("video output", output),
                 ("resume state", _resolved_path(_clip_state_path(output))),
                 ("process lock", _resolved_path(_clip_lock_path(output))),
-                ("partial download", _resolved_path(output.with_suffix(output.suffix + ".part"))),
+                (
+                    "partial download",
+                    _resolved_path(output.with_suffix(output.suffix + ".part")),
+                ),
             ]
         )
         for image in job.images:
@@ -192,7 +195,9 @@ def _read_json(path: str | Path, label: str) -> dict[str, Any]:
     except FileNotFoundError as exc:
         raise GatewayVideoBatchError(f"{label} not found: {source}") from exc
     except (OSError, json.JSONDecodeError) as exc:
-        raise GatewayVideoBatchError(f"Unable to read {label}: {source}: {exc}") from exc
+        raise GatewayVideoBatchError(
+            f"Unable to read {label}: {source}: {exc}"
+        ) from exc
     if not isinstance(data, dict):
         raise GatewayVideoBatchError(f"{label} must contain a JSON object: {source}")
     return data
@@ -212,7 +217,9 @@ def _duration(value: Any) -> int:
     try:
         duration = int(round(float(value)))
     except (OverflowError, TypeError, ValueError) as exc:
-        raise GatewayVideoBatchError(f"Invalid gateway video duration: {value}") from exc
+        raise GatewayVideoBatchError(
+            f"Invalid gateway video duration: {value}"
+        ) from exc
     if not 1 <= duration <= 3600:
         raise GatewayVideoBatchError(
             f"Gateway video duration must be between 1 and 3600 seconds: {duration}"
@@ -409,9 +416,13 @@ def build_gateway_video_jobs(
             raise GatewayVideoBatchError(
                 f"No {handoff_label} frame matches OpenMontage shot {shot_id} at index {index}."
             )
-        prompt = str(frame.get("video_prompt") or shot.get("visual_prompt") or "").strip()
+        prompt = str(
+            frame.get("video_prompt") or shot.get("visual_prompt") or ""
+        ).strip()
         if not prompt:
-            raise GatewayVideoBatchError(f"Gateway video prompt is empty for {shot_id}.")
+            raise GatewayVideoBatchError(
+                f"Gateway video prompt is empty for {shot_id}."
+            )
 
         character_ids = frame.get("character_ids")
         if character_ids is None:
@@ -436,13 +447,15 @@ def build_gateway_video_jobs(
                 f"{', '.join(missing_references)}"
             )
         character_images = tuple(
-            reference_by_id[character_id]
-            for character_id in normalized_character_ids
+            reference_by_id[character_id] for character_id in normalized_character_ids
         )
         expected_assets = shot.get("expected_assets")
         expected_assets = expected_assets if isinstance(expected_assets, dict) else {}
         keyframes: list[tuple[str, str]] = []
-        for field, role in (("first_frame", "first_frame"), ("last_frame", "last_frame")):
+        for field, role in (
+            ("first_frame", "first_frame"),
+            ("last_frame", "last_frame"),
+        ):
             value = str(expected_assets.get(field) or "").strip()
             if value and Path(value).is_file():
                 if not is_supported_image_file(value):
@@ -456,7 +469,9 @@ def build_gateway_video_jobs(
         ) * len(character_images)
         output_path = str(expected_assets.get("video_clip") or "").strip()
         audio_path = str(expected_assets.get("voice_audio") or "").strip()
-        if audio_path and not audio_path.lower().startswith(("http://", "https://", "data:")):
+        if audio_path and not audio_path.lower().startswith(
+            ("http://", "https://", "data:")
+        ):
             audio_path = audio_path if Path(audio_path).is_file() else ""
         if not output_path:
             raise GatewayVideoBatchError(
@@ -508,6 +523,14 @@ def write_atomic_json(path: Path, data: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         temporary.replace(path)
+        directory = os.open(
+            path.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
@@ -617,9 +640,7 @@ def _prepare_clip_lock_parent(output: Path) -> None:
 
 def _canonical_output_path(output: Path) -> str:
     if _path_uses_symlink(output):
-        raise GatewayVideoError(
-            "Gateway video output path must not use a symlink."
-        )
+        raise GatewayVideoError("Gateway video output path must not use a symlink.")
     return str(output.expanduser().resolve())
 
 
@@ -646,8 +667,7 @@ def _state_matches_job(
     return bool(
         state.get("schema_version") == CLIP_STATE_SCHEMA
         and state.get("signature") == signature
-        and state.get("endpoint_fingerprint_sha256")
-        == endpoint_fingerprint
+        and state.get("endpoint_fingerprint_sha256") == endpoint_fingerprint
         and state.get("model") == model
         and state.get("shot_id") == job.shot_id
         and state_output == canonical_output
@@ -656,17 +676,11 @@ def _state_matches_job(
 
 
 def _safe_task_id(value: Any) -> bool:
-    return bool(
-        isinstance(value, str)
-        and _SAFE_TASK_ID.fullmatch(value)
-    )
+    return bool(isinstance(value, str) and _SAFE_TASK_ID.fullmatch(value))
 
 
 def _safe_task_status(value: Any) -> bool:
-    return bool(
-        isinstance(value, str)
-        and _SAFE_TASK_STATUS.fullmatch(value)
-    )
+    return bool(isinstance(value, str) and _SAFE_TASK_STATUS.fullmatch(value))
 
 
 def _resumable_task_from_state(
@@ -739,18 +753,14 @@ def _job_signature(
         output = Path(job.output_path)
         state_path = _clip_state_path(output)
         if _path_uses_symlink(state_path):
-            raise GatewayVideoError(
-                "Gateway video endpoint fingerprint is required."
-            )
+            raise GatewayVideoError("Gateway video endpoint fingerprint is required.")
         state = _read_clip_state(state_path)
         state_output = state.get("output_path")
         try:
             canonical_output = _canonical_output_path(output)
         except GatewayVideoError:
             canonical_output = ""
-        endpoint_fingerprint = state.get(
-            "endpoint_fingerprint_sha256"
-        )
+        endpoint_fingerprint = state.get("endpoint_fingerprint_sha256")
         if not (
             state.get("schema_version") == CLIP_STATE_SCHEMA
             and state.get("model") == model
@@ -759,15 +769,11 @@ def _job_signature(
             and state_output == canonical_output
             and isinstance(endpoint_fingerprint, str)
         ):
-            raise GatewayVideoError(
-                "Gateway video endpoint fingerprint is required."
-            )
+            raise GatewayVideoError("Gateway video endpoint fingerprint is required.")
     if not isinstance(endpoint_fingerprint, str) or not _SHA256.fullmatch(
         endpoint_fingerprint
     ):
-        raise GatewayVideoError(
-            "Gateway video endpoint fingerprint is invalid."
-        )
+        raise GatewayVideoError("Gateway video endpoint fingerprint is invalid.")
     references: list[dict[str, Any]] = []
     for value in job.images:
         path = Path(value)
@@ -789,11 +795,7 @@ def _job_signature(
             )
         else:
             references.append(
-                {
-                    "value_sha256": hashlib.sha256(
-                        value.encode("utf-8")
-                    ).hexdigest()
-                }
+                {"value_sha256": hashlib.sha256(value.encode("utf-8")).hexdigest()}
             )
     payload = {
         "model": model,
@@ -820,11 +822,70 @@ def _job_signature(
 
 def _sanitize(message: str, api_key: str) -> str:
     sanitized = message.replace(api_key, "[redacted]") if api_key else message
-    return re.sub(
+    sanitized = re.sub(
         r"data:audio/[A-Za-z0-9.+-]+;base64,[^\s<'\"]+",
         "[redacted-audio]",
         sanitized,
     )
+    sanitized = re.sub(
+        r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/-]+=*",
+        "[redacted-authorization]",
+        sanitized,
+    )
+    sanitized = re.sub(
+        r"(?i)(https?://)[^/@\s:]+:[^/@\s]+@",
+        r"\1[redacted]@",
+        sanitized,
+    )
+    return re.sub(
+        r"(?i)\b(api[-_]?key|access[-_]?token|refresh[-_]?token|client[-_]?secret|authorization|password)\s*[:=]\s*([^&,;\s]+)",
+        r"\1=[redacted]",
+        sanitized,
+    )
+
+
+def _normalized_secret_key(value: object) -> str:
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(value))
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def _secret_report_key(value: object) -> bool:
+    normalized = _normalized_secret_key(value)
+    parts = set(normalized.split("_"))
+    return normalized in {
+        "api_key",
+        "x_api_key",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "auth_token",
+        "client_secret",
+        "private_key",
+        "authorization",
+        "proxy_authorization",
+        "cookie",
+        "set_cookie",
+        "password",
+        "credentials",
+        "environment",
+    } or bool(parts & {"secret", "credential", "credentials"})
+
+
+def _deep_sanitize_report(value: Any, api_key: str = "") -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "[redacted]"
+                if _secret_report_key(key)
+                else _deep_sanitize_report(item, api_key)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_deep_sanitize_report(item, api_key) for item in value]
+    if isinstance(value, str):
+        return _sanitize(value, api_key)
+    return value
 
 
 def _reference_audio_evidence(audio: str | Path | None) -> dict[str, str]:
@@ -871,8 +932,13 @@ def _write_report(
     destination: Path,
     report: dict[str, Any],
     report_sanitizer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    *,
+    api_key: str = "",
 ) -> dict[str, Any]:
-    safe_report = report_sanitizer(report) if report_sanitizer else report
+    safe_report = _deep_sanitize_report(report, api_key)
+    if report_sanitizer:
+        safe_report = report_sanitizer(safe_report)
+    safe_report = _deep_sanitize_report(safe_report, api_key)
     _write_json(destination, safe_report)
     return safe_report
 
@@ -935,32 +1001,51 @@ def _execute_gateway_video_jobs(
     )
     if not allow_network:
         report["blocked_reasons"] = ["Live gateway video generation is disabled."]
-        return _write_report(destination, report, report_sanitizer)
+        return _write_report(
+            destination,
+            report,
+            report_sanitizer,
+            api_key=client.config.api_key,
+        )
 
     confirmation_required = bool(
         getattr(client, "requires_generation_confirmation", False)
     )
     generation_authorized = False
 
-    def authorize_fresh_submit() -> None:
+    def confirm_paid_request() -> None:
         nonlocal generation_authorized
-        if not confirmation_required or generation_authorized:
+        if not confirmation_required:
             return
-        if project_dir is None or not generation_token or generation_request is None:
-            raise GenerationTokenError(
-                "Paid video generation requires a confirmation token."
+        if not generation_authorized:
+            if (
+                project_dir is None
+                or not generation_token
+                or generation_request is None
+            ):
+                raise GenerationTokenError(
+                    "Paid video generation requires a confirmation token."
+                )
+            target_ids = set(repair_shot_ids)
+            target_jobs = [
+                job for job in jobs if not target_ids or job.shot_id in target_ids
+            ]
+            actual = describe_submitted_video_request(
+                generation_request,
+                provider=getattr(client, "provider", "gateway"),
+                model=client.config.model,
+                jobs=target_jobs,
             )
-        requested_jobs = tuple(
-            job.shot_id
-            for job in jobs
-            if not repair_shot_ids or job.shot_id in set(repair_shot_ids)
-        )
-        if requested_jobs != generation_request.shot_ids:
-            raise GenerationTokenError(
-                "Generation confirmation does not match requested shots."
-            )
-        consume_generation_token(project_dir, generation_token, generation_request)
-        generation_authorized = True
+            if actual != generation_request.paid_description():
+                raise GenerationTokenError(
+                    "Generation confirmation does not match the submitted request."
+                )
+            consume_generation_token(project_dir, generation_token, generation_request)
+            generation_authorized = True
+
+    def authorize_fresh_submit() -> None:
+        confirm_paid_request()
+        _authorize_confirmed_video_submit(client)
 
     repair_targets = set(repair_shot_ids)
     if repair_targets:
@@ -999,8 +1084,7 @@ def _execute_gateway_video_jobs(
                     model=client.config.model,
                 )
                 if not (
-                    matching_state
-                    and _completed_state_matches_output(state, output)
+                    matching_state and _completed_state_matches_output(state, output)
                 ):
                     raise GatewayVideoError(
                         "Preserved gateway video job is not reusable for scoped repair."
@@ -1025,7 +1109,12 @@ def _execute_gateway_video_jobs(
                     }
                 )
                 report["failed_count"] += 1
-                return _write_report(destination, report, report_sanitizer)
+                return _write_report(
+                    destination,
+                    report,
+                    report_sanitizer,
+                    api_key=client.config.api_key,
+                )
             finally:
                 _release_clip_lock(lock_descriptor)
 
@@ -1040,9 +1129,7 @@ def _execute_gateway_video_jobs(
             job_reference_audio = (
                 _reference_audio_evidence(job_audio) if job_audio is not None else {}
             )
-            endpoint_fingerprint = gateway_endpoint_fingerprint(
-                client.config.base_url
-            )
+            endpoint_fingerprint = gateway_endpoint_fingerprint(client.config.base_url)
             signature = _job_signature(
                 job,
                 model=client.config.model,
@@ -1068,8 +1155,7 @@ def _execute_gateway_video_jobs(
                     "submission; manual resolution is required."
                 )
             completed_state = bool(
-                matching_state
-                and _completed_state_matches_output(state, output)
+                matching_state and _completed_state_matches_output(state, output)
             )
             if not overwrite and completed_state:
                 report["results"].append(
@@ -1099,9 +1185,7 @@ def _execute_gateway_video_jobs(
                     )
                 )
             resumable_task = (
-                _resumable_task_from_state(state)
-                if matching_state
-                else None
+                _resumable_task_from_state(state) if matching_state else None
             )
             existing_artifacts = output.exists() or state_path.exists()
             replace_existing = False
@@ -1119,11 +1203,7 @@ def _execute_gateway_video_jobs(
 
             prepare_gateway_video_output_target(
                 output,
-                overwrite=(
-                    overwrite
-                    or replace_existing
-                    or resumable_task is not None
-                ),
+                overwrite=(overwrite or replace_existing or resumable_task is not None),
             )
             if resumable_task:
                 report["executed"] = True
@@ -1155,7 +1235,7 @@ def _execute_gateway_video_jobs(
                     overwrite=True,
                 )
             else:
-                authorize_fresh_submit()
+                confirm_paid_request()
                 submission = client.prepare_submission(
                     job.prompt,
                     images=list(job.images),
@@ -1182,6 +1262,7 @@ def _execute_gateway_video_jobs(
                     ),
                 )
                 report["executed"] = True
+                authorize_fresh_submit()
                 try:
                     task = client.submit_prepared(
                         submission,
@@ -1294,11 +1375,15 @@ def _execute_gateway_video_jobs(
             _release_clip_lock(lock_descriptor)
 
     report["success"] = (
-        report["completed_count"] + report["skipped_count"]
-        == report["planned_count"]
+        report["completed_count"] + report["skipped_count"] == report["planned_count"]
         and report["failed_count"] == 0
     )
-    return _write_report(destination, report, report_sanitizer)
+    return _write_report(
+        destination,
+        report,
+        report_sanitizer,
+        api_key=client.config.api_key,
+    )
 
 
 def render_gateway_video_batch(
@@ -1343,9 +1428,7 @@ def render_gateway_video_batch(
             "Unknown repair shot IDs: " + ", ".join(unknown_repair_ids)
         )
     if normalized_repair_ids and not replace_stale:
-        raise GatewayVideoBatchError(
-            "Scoped repair shot IDs require replace_stale."
-        )
+        raise GatewayVideoBatchError("Scoped repair shot IDs require replace_stale.")
     destination = Path(report_path)
     _validate_report_destination(
         destination,
@@ -1444,8 +1527,7 @@ def render_gateway_video_single(
     image_values = tuple(image_values_list)
     single_shot_id = (
         generation_request.shot_ids[0]
-        if generation_request is not None
-        and len(generation_request.shot_ids) == 1
+        if generation_request is not None and len(generation_request.shot_ids) == 1
         else "single"
     )
     job = GatewayVideoJob(
@@ -1512,5 +1594,10 @@ def render_gateway_video_single(
     )
     if result["errors"]:
         result["error"] = str(result["errors"][0].get("error") or "")
-        result = _write_report(destination, result, report_sanitizer)
+        result = _write_report(
+            destination,
+            result,
+            report_sanitizer,
+            api_key=client.config.api_key,
+        )
     return result

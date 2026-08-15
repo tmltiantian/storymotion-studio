@@ -4,18 +4,17 @@ import fcntl
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
 import stat
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
-from .file_io import sha256_file
 from .pipeline_contracts import (
     ProductionPackage,
     ProjectSpec,
@@ -24,6 +23,7 @@ from .pipeline_contracts import (
     StageState,
 )
 from .pipeline_review import REVIEW_SCHEMA, REVISIONS_SCHEMA, StageRevision
+from .pipeline_store import ACTIVE_REPAIR_SCHEMA
 from .video_provider import default_video_resolution, estimate_video_cost_yuan
 
 
@@ -47,38 +47,123 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _path_uses_symlink(path: Path) -> bool:
+def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _open_absolute_directory(path: Path, *, create: bool = False) -> int:
     absolute = path.expanduser().absolute()
-    current = Path(absolute.anchor)
-    for component in absolute.parts[1:]:
-        current /= component
-        if current.is_symlink():
-            return True
-    return False
+    if not absolute.is_absolute() or absolute.anchor != os.sep:
+        raise ValueError("Video preflight requires an absolute POSIX path")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(absolute.anchor, flags)
+    try:
+        for component in absolute.parts[1:]:
+            if component in {"", ".", ".."}:
+                raise ValueError("Video preflight path contains an unsafe component")
+            try:
+                next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+class _StableDirectory:
+    def __init__(self, path: Path, *, create: bool = False):
+        self.path = path.expanduser().absolute()
+        self.create = create
+        self.descriptor = -1
+        self.identity: os.stat_result | None = None
+
+    def __enter__(self) -> int:
+        try:
+            self.descriptor = _open_absolute_directory(self.path, create=self.create)
+            self.identity = os.fstat(self.descriptor)
+            self._verify()
+            return self.descriptor
+        except FileNotFoundError:
+            if self.descriptor >= 0:
+                os.close(self.descriptor)
+            raise
+        except OSError as exc:
+            if self.descriptor >= 0:
+                os.close(self.descriptor)
+            raise ValueError("Video preflight directory cannot use a symlink") from exc
+
+    def _verify(self) -> None:
+        try:
+            current = os.stat(self.path, follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError("Video preflight directory identity changed") from exc
+        if (
+            self.identity is None
+            or not stat.S_ISDIR(current.st_mode)
+            or not _same_file(self.identity, current)
+        ):
+            raise ValueError("Video preflight directory identity changed")
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        try:
+            self._verify()
+        finally:
+            os.close(self.descriptor)
+
+
+def _read_bytes_secure(path: Path, label: str) -> bytes:
+    absolute = path.expanduser().absolute()
+    with _StableDirectory(absolute.parent) as directory:
+        try:
+            descriptor = os.open(
+                absolute.name,
+                os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=directory,
+            )
+        except OSError as exc:
+            if isinstance(exc, FileNotFoundError):
+                raise FileNotFoundError(absolute) from None
+            raise ValueError(f"{label} cannot be opened safely") from exc
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError(f"{label} must be a regular file")
+            chunks: list[bytes] = []
+            while chunk := os.read(descriptor, 1024 * 1024):
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(descriptor)
+
+
+def _sha256_secure(path: Path, label: str) -> str:
+    return hashlib.sha256(_read_bytes_secure(path, label)).hexdigest()
 
 
 def _safe_project_root(project_dir: str | Path) -> Path:
     root = Path(project_dir).expanduser().absolute()
-    if _path_uses_symlink(root):
-        raise ValueError("Video preflight project path cannot use a symlink")
-    if not root.is_dir():
-        raise FileNotFoundError(root)
-    return root.resolve()
+    with _StableDirectory(root):
+        pass
+    return root
 
 
 def _safe_existing_file(path: Path, label: str) -> Path:
-    if _path_uses_symlink(path) or path.is_symlink():
-        raise ValueError(f"{label} cannot use a symlink")
-    if not path.is_file():
-        raise FileNotFoundError(path)
+    _read_bytes_secure(path, label)
     return path
 
 
 def _read_object(path: Path, label: str) -> dict[str, Any]:
-    source = _safe_existing_file(path, label)
     try:
-        value = json.loads(source.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        value = json.loads(_read_bytes_secure(path, label).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{label} is invalid") from exc
     if not isinstance(value, dict):
         raise ValueError(f"{label} must contain a JSON object")
@@ -121,9 +206,10 @@ def _latest_revision(
     stage: StageName,
 ) -> tuple[StageRevision | None, dict[str, Any] | None]:
     path = root / "reviews" / f"{stage.value}.revisions.json"
-    if not path.exists():
+    try:
+        payload = _read_object(path, f"{stage.value} revision record")
+    except FileNotFoundError:
         return None, None
-    payload = _read_object(path, f"{stage.value} revision record")
     if (
         payload.get("schema_version") != REVISIONS_SCHEMA
         or payload.get("stage") != stage.value
@@ -144,7 +230,7 @@ def _artifact_hashes(
     hashes: dict[str, str] = {}
     for index, artifact in enumerate(revision.artifacts, start=1):
         path = _safe_existing_file(Path(artifact.path), f"{stage.value} artifact")
-        current = sha256_file(path)
+        current = _sha256_secure(path, f"{stage.value} artifact")
         if current != artifact.sha256:
             raise ValueError(f"{stage.value} artifact changed")
         hashes[f"{stage.value}:{index}:{path.name}"] = current
@@ -153,41 +239,48 @@ def _artifact_hashes(
     return hashes
 
 
-def _approved_revision_is_current(
+def _approved_revision_hash(
     root: Path,
     stage: StageName,
     revision: StageRevision,
     review_state: ReviewState,
-) -> bool:
+) -> str | None:
     if review_state is ReviewState.AUTO_APPROVED:
-        return True
+        return _canonical_hash(
+            {
+                "stage": stage.value,
+                "revision": revision.number,
+                "review_state": review_state.value,
+            }
+        )
     if review_state is not ReviewState.APPROVED:
-        return False
+        return None
     path = root / "reviews" / f"{stage.value}.review.json"
-    if not path.exists():
-        return False
-    payload = _read_object(path, f"{stage.value} review record")
+    try:
+        payload = _read_object(path, f"{stage.value} review record")
+    except FileNotFoundError:
+        return None
     if (
         payload.get("schema_version") != REVIEW_SCHEMA
         or payload.get("stage") != stage.value
         or payload.get("state") != ReviewState.APPROVED.value
         or payload.get("revision") != revision.number
     ):
-        return False
+        return None
     evidence = payload.get("evidence")
     if not isinstance(evidence, list) or not evidence:
-        return False
+        return None
     for item in evidence:
         if not isinstance(item, dict):
-            return False
+            return None
         path_value = item.get("path")
         digest = item.get("sha256")
         if not isinstance(path_value, str) or not isinstance(digest, str):
-            return False
+            return None
         path = _safe_existing_file(Path(path_value), f"{stage.value} review evidence")
-        if sha256_file(path) != digest:
-            return False
-    return True
+        if _sha256_secure(path, f"{stage.value} review evidence") != digest:
+            return None
+    return _canonical_hash(payload)
 
 
 def _storyboard_rows(revision: StageRevision) -> tuple[dict[str, Any], ...]:
@@ -202,7 +295,7 @@ def _storyboard_rows(revision: StageRevision) -> tuple[dict[str, Any], ...]:
     raise ValueError("Storyboard revision has no episode shot snapshot")
 
 
-def _provider_settings(spec: ProjectSpec) -> tuple[str, str, str, float | None]:
+def _provider_settings(spec: ProjectSpec) -> tuple[str, str, str, Any]:
     raw_video = str(spec.providers.get("video") or "").strip()
     provider = str(spec.providers.get("video_provider") or "").strip().lower()
     model = str(spec.providers.get("video_model") or "").strip()
@@ -213,12 +306,50 @@ def _provider_settings(spec: ProjectSpec) -> tuple[str, str, str, float | None]:
     if not provider and model:
         provider = "minimax" if model.lower() == "minimax-h3" else "gateway"
     resolution = str(
-        spec.target.get("video_resolution")
-        or default_video_resolution(provider)
+        spec.target.get("video_resolution") or default_video_resolution(provider)
     ).strip()
     raw_rate = spec.target.get("video_price_yuan_per_second")
-    rate = float(raw_rate) if raw_rate is not None else None
-    return provider, model, resolution, rate
+    return provider, model, resolution, raw_rate
+
+
+def _strict_price_rate(provider: str, resolution: str, raw_rate: Any) -> float:
+    estimate_video_cost_yuan(
+        provider,
+        resolution=resolution,
+        output_seconds=1,
+        price_yuan_per_second=raw_rate,
+    )
+    if raw_rate is None:
+        from .minimax_h3_video import H3_OUTPUT_PRICE_YUAN_PER_SECOND
+
+        raw_rate = H3_OUTPUT_PRICE_YUAN_PER_SECOND.get(resolution.upper())
+    if isinstance(raw_rate, bool):
+        raise ValueError("Video price per output second must be positive.")
+    rate = float(raw_rate)
+    if not math.isfinite(rate) or rate <= 0:
+        raise ValueError("Video price per output second must be positive.")
+    return rate
+
+
+@dataclass(frozen=True)
+class VideoShotRequest:
+    shot_id: str
+    duration: int
+    resolution: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "shot_id", _safe_shot_ids((self.shot_id,))[0])
+        if isinstance(self.duration, bool) or self.duration <= 0:
+            raise ValueError("Video shot duration must be positive")
+        if not str(self.resolution).strip():
+            raise ValueError("Video shot resolution is required")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "shot_id": self.shot_id,
+            "duration": self.duration,
+            "resolution": self.resolution,
+        }
 
 
 @dataclass(frozen=True)
@@ -228,13 +359,16 @@ class VideoPreflight:
     package_sha256: str
     revision_hashes: Mapping[str, str]
     artifact_hashes: Mapping[str, str]
+    approval_hashes: Mapping[str, str]
     repair_plan_sha256: str
     shot_ids: tuple[str, ...]
+    shots: tuple[VideoShotRequest, ...]
     provider: str
     model: str
     resolution: str
     output_seconds: int
     estimated_cost_yuan: float
+    price_yuan_per_second: float
     ready: bool
     blockers: tuple[str, ...] = field(default_factory=tuple)
 
@@ -242,6 +376,8 @@ class VideoPreflight:
         object.__setattr__(self, "shot_ids", _safe_shot_ids(self.shot_ids))
         object.__setattr__(self, "revision_hashes", dict(self.revision_hashes))
         object.__setattr__(self, "artifact_hashes", dict(self.artifact_hashes))
+        object.__setattr__(self, "approval_hashes", dict(self.approval_hashes))
+        object.__setattr__(self, "shots", tuple(self.shots))
         object.__setattr__(self, "blockers", tuple(map(str, self.blockers)))
 
 
@@ -252,19 +388,24 @@ class VideoGenerationRequest:
     package_sha256: str
     revision_hashes: Mapping[str, str]
     artifact_hashes: Mapping[str, str]
+    approval_hashes: Mapping[str, str]
     repair_plan_sha256: str
     shot_ids: tuple[str, ...]
+    shots: tuple[VideoShotRequest, ...]
     provider: str
     model: str
     resolution: str
     output_seconds: int
     estimated_cost_yuan: float
+    price_yuan_per_second: float
     schema_version: str = REQUEST_SCHEMA
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "shot_ids", _safe_shot_ids(self.shot_ids))
         object.__setattr__(self, "revision_hashes", dict(self.revision_hashes))
         object.__setattr__(self, "artifact_hashes", dict(self.artifact_hashes))
+        object.__setattr__(self, "approval_hashes", dict(self.approval_hashes))
+        object.__setattr__(self, "shots", tuple(self.shots))
         if self.schema_version != REQUEST_SCHEMA:
             raise ValueError("Unsupported video generation request schema")
 
@@ -276,13 +417,16 @@ class VideoGenerationRequest:
             package_sha256=preflight.package_sha256,
             revision_hashes=preflight.revision_hashes,
             artifact_hashes=preflight.artifact_hashes,
+            approval_hashes=preflight.approval_hashes,
             repair_plan_sha256=preflight.repair_plan_sha256,
             shot_ids=preflight.shot_ids,
+            shots=preflight.shots,
             provider=preflight.provider,
             model=preflight.model,
             resolution=preflight.resolution,
             output_seconds=preflight.output_seconds,
             estimated_cost_yuan=preflight.estimated_cost_yuan,
+            price_yuan_per_second=preflight.price_yuan_per_second,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -293,41 +437,151 @@ class VideoGenerationRequest:
             "package_sha256": self.package_sha256,
             "revision_hashes": dict(self.revision_hashes),
             "artifact_hashes": dict(self.artifact_hashes),
+            "approval_hashes": dict(self.approval_hashes),
             "repair_plan_sha256": self.repair_plan_sha256,
             "shot_ids": list(self.shot_ids),
+            "shots": [shot.to_dict() for shot in self.shots],
             "provider": self.provider,
             "model": self.model,
             "resolution": self.resolution,
             "output_seconds": self.output_seconds,
             "estimated_cost_yuan": round(self.estimated_cost_yuan, 4),
+            "price_yuan_per_second": self.price_yuan_per_second,
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> VideoGenerationRequest:
         revision_hashes = value.get("revision_hashes")
         artifact_hashes = value.get("artifact_hashes")
+        approval_hashes = value.get("approval_hashes")
         shot_ids = value.get("shot_ids")
+        shots = value.get("shots")
         if (
             not isinstance(revision_hashes, dict)
             or not isinstance(artifact_hashes, dict)
+            or not isinstance(approval_hashes, dict)
             or not isinstance(shot_ids, list)
+            or not isinstance(shots, list)
         ):
             raise ValueError("Video generation request is invalid")
         return cls(
             project_id=str(value["project_id"]),
             project_sha256=str(value["project_sha256"]),
             package_sha256=str(value["package_sha256"]),
-            revision_hashes={str(key): str(item) for key, item in revision_hashes.items()},
-            artifact_hashes={str(key): str(item) for key, item in artifact_hashes.items()},
+            revision_hashes={
+                str(key): str(item) for key, item in revision_hashes.items()
+            },
+            artifact_hashes={
+                str(key): str(item) for key, item in artifact_hashes.items()
+            },
+            approval_hashes={
+                str(key): str(item) for key, item in approval_hashes.items()
+            },
             repair_plan_sha256=str(value.get("repair_plan_sha256") or ""),
             shot_ids=tuple(map(str, shot_ids)),
+            shots=tuple(
+                VideoShotRequest(
+                    shot_id=str(item["shot_id"]),
+                    duration=int(item["duration"]),
+                    resolution=str(item["resolution"]),
+                )
+                for item in shots
+                if isinstance(item, dict)
+            ),
             provider=str(value["provider"]),
             model=str(value["model"]),
             resolution=str(value["resolution"]),
             output_seconds=int(value["output_seconds"]),
             estimated_cost_yuan=float(value["estimated_cost_yuan"]),
+            price_yuan_per_second=float(value["price_yuan_per_second"]),
             schema_version=str(value.get("schema_version") or ""),
         )
+
+    def paid_description(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "shots": [shot.to_dict() for shot in self.shots],
+            "output_seconds": self.output_seconds,
+            "price_yuan_per_second": self.price_yuan_per_second,
+            "estimated_cost_yuan": self.estimated_cost_yuan,
+        }
+
+
+def describe_submitted_video_request(
+    request: VideoGenerationRequest,
+    *,
+    provider: str,
+    model: str,
+    jobs: list[Any],
+) -> dict[str, Any]:
+    shots = tuple(
+        VideoShotRequest(
+            shot_id=str(job.shot_id),
+            duration=job.duration,
+            resolution=str(job.resolution),
+        )
+        for job in jobs
+    )
+    output_seconds = sum(shot.duration for shot in shots)
+    resolutions = {shot.resolution for shot in shots}
+    resolution = next(iter(resolutions)) if len(resolutions) == 1 else ""
+    estimate = estimate_video_cost_yuan(
+        provider,
+        resolution=resolution,
+        output_seconds=output_seconds,
+        price_yuan_per_second=request.price_yuan_per_second,
+    )
+    return {
+        "provider": str(provider).strip().lower(),
+        "model": str(model).strip(),
+        "shots": [shot.to_dict() for shot in shots],
+        "output_seconds": output_seconds,
+        "price_yuan_per_second": request.price_yuan_per_second,
+        "estimated_cost_yuan": estimate,
+    }
+
+
+def _validate_active_repair(value: Mapping[str, Any]) -> tuple[str, ...]:
+    required = {
+        "schema_version",
+        "plan_id",
+        "request_stage",
+        "affected",
+        "preserved_artifacts",
+        "source_package_sha256",
+        "target_package_sha256",
+    }
+    if set(value) != required or value.get("schema_version") != ACTIVE_REPAIR_SCHEMA:
+        raise ValueError("Active repair state is invalid")
+    if not isinstance(value.get("plan_id"), str) or not value["plan_id"]:
+        raise ValueError("Active repair state is invalid")
+    try:
+        StageName(str(value.get("request_stage") or ""))
+    except ValueError as exc:
+        raise ValueError("Active repair state is invalid") from exc
+    affected = value.get("affected")
+    preserved = value.get("preserved_artifacts")
+    if not isinstance(affected, dict) or not isinstance(preserved, list):
+        raise ValueError("Active repair state is invalid")
+    for key, item_ids in affected.items():
+        if not isinstance(key, str) or not key or not isinstance(item_ids, list):
+            raise ValueError("Active repair state is invalid")
+        _safe_shot_ids((key,))
+        if any(not isinstance(item, str) for item in item_ids):
+            raise ValueError("Active repair state is invalid")
+        if item_ids:
+            _safe_shot_ids(item_ids)
+    video_ids = affected.get(StageName.VIDEO.value)
+    if not isinstance(video_ids, list) or not video_ids:
+        raise ValueError("Active repair state has no video scope")
+    if any(not isinstance(item, str) for item in preserved):
+        raise ValueError("Active repair state is invalid")
+    for name in ("source_package_sha256", "target_package_sha256"):
+        digest = value.get(name)
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("Active repair state is invalid")
+    return _safe_shot_ids(video_ids)
 
 
 def build_video_preflight(
@@ -335,6 +589,14 @@ def build_video_preflight(
     shot_ids: tuple[str, ...],
 ) -> VideoPreflight:
     root = _safe_project_root(project_dir)
+    with _StableDirectory(root):
+        return _build_video_preflight(root, shot_ids)
+
+
+def _build_video_preflight(
+    root: Path,
+    shot_ids: tuple[str, ...],
+) -> VideoPreflight:
     requested = _safe_shot_ids(shot_ids)
     spec_path = _safe_existing_file(root / "project.json", "project spec")
     package_path = _safe_existing_file(
@@ -348,6 +610,7 @@ def build_video_preflight(
     blockers: list[str] = []
     revision_hashes: dict[str, str] = {}
     artifact_hashes: dict[str, str] = {}
+    approval_hashes: dict[str, str] = {}
     revisions: dict[StageName, StageRevision] = {}
     for stage in PREFLIGHT_STAGES:
         record = next(item for item in package.stages if item.stage is stage)
@@ -359,15 +622,22 @@ def build_video_preflight(
             revisions[stage] = revision
             revision_hashes[stage.value] = _canonical_hash(raw_revision)
             artifact_hashes.update(_artifact_hashes(stage, revision))
-            if record.state is not StageState.PASSED or record.revision != revision.number:
-                blockers.append(f"{stage.value} package revision is not current.")
-            elif not _approved_revision_is_current(
-                root,
-                stage,
-                revision,
-                record.review_state,
+            if (
+                record.state is not StageState.PASSED
+                or record.revision != revision.number
             ):
-                blockers.append(f"{stage.value} revision is not approved.")
+                blockers.append(f"{stage.value} package revision is not current.")
+            else:
+                approval_hash = _approved_revision_hash(
+                    root,
+                    stage,
+                    revision,
+                    record.review_state,
+                )
+                if approval_hash is None:
+                    blockers.append(f"{stage.value} revision is not approved.")
+                else:
+                    approval_hashes[stage.value] = approval_hash
         except (FileNotFoundError, KeyError, TypeError, ValueError) as exc:
             blockers.append(f"{stage.value} preflight failed: {exc}")
     storyboard = revisions.get(StageName.STORYBOARD)
@@ -383,7 +653,9 @@ def build_video_preflight(
     unknown = tuple(shot_id for shot_id in requested if shot_id not in row_by_id)
     if unknown:
         raise ValueError("Unknown requested shot IDs: " + ", ".join(unknown))
+    provider, model, resolution, raw_rate = _provider_settings(spec)
     output_seconds = 0
+    shot_requests: list[VideoShotRequest] = []
     for shot_id in requested:
         value = row_by_id[shot_id].get("duration_seconds")
         if isinstance(value, bool):
@@ -392,7 +664,13 @@ def build_video_preflight(
         if duration <= 0:
             raise ValueError(f"Storyboard shot duration is invalid: {shot_id}")
         output_seconds += duration
-    provider, model, resolution, rate = _provider_settings(spec)
+        shot_requests.append(
+            VideoShotRequest(
+                shot_id=shot_id,
+                duration=duration,
+                resolution=resolution,
+            )
+        )
     if provider not in {"gateway", "minimax"}:
         blockers.append("A paid gateway or minimax video provider is required.")
     if not model:
@@ -400,6 +678,7 @@ def build_video_preflight(
     if not resolution:
         blockers.append("Video resolution is not configured.")
     try:
+        rate = _strict_price_rate(provider, resolution, raw_rate)
         estimate = estimate_video_cost_yuan(
             provider,
             resolution=resolution,
@@ -409,31 +688,37 @@ def build_video_preflight(
     except (TypeError, ValueError, RuntimeError) as exc:
         blockers.append(str(exc))
         estimate = 0.0
+        rate = 0.0
     repair_path = root / "impact_plans" / "active.json"
     repair_hash = ""
-    if repair_path.exists():
-        _safe_existing_file(repair_path, "active repair plan")
-        repair_hash = sha256_file(repair_path)
+    try:
         active = _read_object(repair_path, "active repair plan")
-        affected = active.get("affected")
-        if isinstance(affected, dict) and affected.get(StageName.VIDEO.value):
-            repair_ids = tuple(map(str, affected[StageName.VIDEO.value]))
-            if any(shot_id not in repair_ids for shot_id in requested):
-                blockers.append("Requested shots are outside the active video repair scope.")
+    except FileNotFoundError:
+        active = None
+    if active is not None:
+        repair_hash = _sha256_secure(repair_path, "active repair plan")
+        repair_ids = _validate_active_repair(active)
+        if any(shot_id not in repair_ids for shot_id in requested):
+            blockers.append(
+                "Requested shots are outside the active video repair scope."
+            )
     project_binding = hashlib.sha256(str(root).encode("utf-8")).hexdigest()
     return VideoPreflight(
         project_id=package.project_id,
         project_sha256=project_binding,
-        package_sha256=sha256_file(package_path),
+        package_sha256=_sha256_secure(package_path, "production package"),
         revision_hashes=revision_hashes,
         artifact_hashes=artifact_hashes,
+        approval_hashes=approval_hashes,
         repair_plan_sha256=repair_hash,
         shot_ids=requested,
+        shots=tuple(shot_requests),
         provider=provider,
         model=model,
         resolution=resolution,
         output_seconds=output_seconds,
         estimated_cost_yuan=estimate,
+        price_yuan_per_second=rate,
         ready=not blockers,
         blockers=tuple(blockers),
     )
@@ -441,44 +726,91 @@ def build_video_preflight(
 
 def _token_directory(root: Path, *, create: bool) -> Path:
     directory = root / "runs" / ".workbench" / "tokens"
-    if _path_uses_symlink(directory):
-        raise ValueError("Generation token path cannot use a symlink")
-    if create:
-        directory.mkdir(parents=True, exist_ok=True)
-    if _path_uses_symlink(directory):
-        raise ValueError("Generation token path cannot use a symlink")
-    if not directory.is_dir():
-        raise ValueError("Generation token directory is invalid")
+    try:
+        with _StableDirectory(directory, create=create):
+            pass
+    except ValueError as exc:
+        raise ValueError("Generation token path cannot use a symlink") from exc
     return directory
 
 
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def _write_token_at(
+    directory: int,
+    filename: str,
+    payload: Mapping[str, Any],
+) -> None:
+    temporary = f".{filename}.{uuid4().hex}.tmp"
+    content = (
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
     try:
-        os.fsync(descriptor)
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory,
+        )
+        try:
+            remaining = memoryview(content)
+            while remaining:
+                written = os.write(descriptor, remaining)
+                if written <= 0:
+                    raise OSError("Unable to write generation token")
+                remaining = remaining[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(
+            temporary,
+            filename,
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+        )
+        os.fsync(directory)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+
+
+def _write_token_atomic(
+    path: Path,
+    payload: Mapping[str, Any],
+    *,
+    directory_fd: int | None = None,
+) -> None:
+    if directory_fd is not None:
+        _write_token_at(directory_fd, path.name, payload)
+        return
+    with _StableDirectory(path.parent) as directory:
+        _write_token_at(directory, path.name, payload)
+
+
+def _read_token_object(directory: int, filename: str) -> dict[str, Any]:
+    try:
+        descriptor = os.open(
+            filename,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=directory,
+        )
+    except OSError as exc:
+        raise GenerationTokenError("Generation token record is invalid") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise GenerationTokenError("Generation token record is invalid")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
     finally:
         os.close(descriptor)
-
-
-def _write_token_atomic(path: Path, payload: Mapping[str, Any]) -> None:
-    if _path_uses_symlink(path) or path.is_symlink():
-        raise ValueError("Generation token path cannot use a symlink")
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    finally:
-        temporary.unlink(missing_ok=True)
+        value = json.loads(b"".join(chunks).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise GenerationTokenError("Generation token record is invalid") from exc
+    if not isinstance(value, dict):
+        raise GenerationTokenError("Generation token record is invalid")
+    return value
 
 
 def _token_digest(secret: str, request: VideoGenerationRequest) -> str:
@@ -540,22 +872,28 @@ def consume_generation_token(
         raise GenerationTokenError("Generation token storage is invalid") from exc
     path = token_dir / f"{token_id}.json"
     lock_path = token_dir / f"{token_id}.lock"
-    if lock_path.is_symlink():
-        raise GenerationTokenError("Generation token lock is invalid")
-    descriptor = os.open(
-        lock_path,
-        os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
-        0o600,
-    )
+    del lock_path
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise GenerationTokenError("Generation token lock is invalid")
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        token_context = _StableDirectory(token_dir)
+        token_directory = token_context.__enter__()
+    except ValueError as exc:
+        raise GenerationTokenError("Generation token storage is invalid") from exc
+    descriptor = -1
+    try:
         try:
             try:
-                record = _read_object(path, "generation token")
-            except (FileNotFoundError, ValueError) as exc:
-                raise GenerationTokenError("Generation token record is invalid") from exc
+                descriptor = os.open(
+                    f"{token_id}.lock",
+                    os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=token_directory,
+                )
+            except OSError as exc:
+                raise GenerationTokenError("Generation token lock is invalid") from exc
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise GenerationTokenError("Generation token lock is invalid")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            record = _read_token_object(token_directory, path.name)
             if (
                 record.get("schema_version") != TOKEN_SCHEMA
                 or record.get("token_id") != token_id
@@ -573,13 +911,17 @@ def consume_generation_token(
                     "Generation token request is invalid"
                 ) from exc
             if stored_request != request:
-                raise GenerationTokenError("Generation token does not match the request")
+                raise GenerationTokenError(
+                    "Generation token does not match the request"
+                )
             expected_digest = _token_digest(secret, request)
             if not hmac.compare_digest(
                 str(record.get("request_digest") or ""),
                 expected_digest,
             ):
-                raise GenerationTokenError("Generation token does not match the request")
+                raise GenerationTokenError(
+                    "Generation token does not match the request"
+                )
             try:
                 current_preflight = build_video_preflight(root, request.shot_ids)
                 if not current_preflight.ready:
@@ -598,8 +940,16 @@ def consume_generation_token(
                     "Project changed after generation token issue"
                 )
             record["consumed_at"] = _utc_now()
-            _write_token_atomic(path, record)
+            _write_token_atomic(path, record, directory_fd=token_directory)
         finally:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            if descriptor >= 0:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            token_context.__exit__(None, None, None)
+        except ValueError as exc:
+            raise GenerationTokenError(
+                "Generation token storage identity changed"
+            ) from exc

@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import shutil
+import stat
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from factory.gateway_video_batch import GatewayVideoJob, _execute_gateway_video_jobs
+from factory import gateway_video_batch as gateway_batch
+from factory import video_preflight
+from factory.gateway_video_batch import (
+    GatewayVideoJob,
+    _execute_gateway_video_jobs,
+    render_gateway_video_single,
+)
 from factory.pipeline_contracts import (
     ProjectMode,
     ProjectSpec,
@@ -58,8 +67,15 @@ def _ready_video_project(tmp_path: Path) -> Path:
     evidence = project_dir / "approval-evidence.json"
     evidence.write_text('{"approved":true}', encoding="utf-8")
     for stage, payload in stages.items():
-        artifact = project_dir / "stages" / stage.value / (
-            "episode.json" if stage is StageName.STORYBOARD else f"{stage.value}.json"
+        artifact = (
+            project_dir
+            / "stages"
+            / stage.value
+            / (
+                "episode.json"
+                if stage is StageName.STORYBOARD
+                else f"{stage.value}.json"
+            )
         )
         artifact.parent.mkdir(parents=True, exist_ok=True)
         artifact.write_text(json.dumps(payload), encoding="utf-8")
@@ -251,11 +267,9 @@ def test_confirmed_request_is_consumed_before_billable_submit(tmp_path: Path) ->
             del allow_network
             token_id = token.split(".", 1)[0]
             record = json.loads(
-                (
-                    project_dir
-                    / "runs/.workbench/tokens"
-                    / f"{token_id}.json"
-                ).read_text(encoding="utf-8")
+                (project_dir / "runs/.workbench/tokens" / f"{token_id}.json").read_text(
+                    encoding="utf-8"
+                )
             )
             observed_consumed.append(bool(record["consumed_at"]))
             raise RuntimeError("stop after observing submit boundary")
@@ -299,7 +313,9 @@ def test_confirmed_request_is_consumed_before_billable_submit(tmp_path: Path) ->
     assert observed_consumed == [True]
 
 
-def test_confirmation_required_client_cannot_submit_without_token(tmp_path: Path) -> None:
+def test_confirmation_required_client_cannot_submit_without_token(
+    tmp_path: Path,
+) -> None:
     output = tmp_path / "clip.mp4"
 
     class FakeConfig:
@@ -347,3 +363,315 @@ def test_confirmation_required_client_cannot_submit_without_token(tmp_path: Path
             allow_network=True,
             overwrite=False,
         )
+
+
+@pytest.mark.parametrize(
+    ("client_provider", "client_model", "duration", "resolution"),
+    (
+        ("gateway", "MiniMax-H3", 6, "768P"),
+        ("minimax", "different-model", 6, "768P"),
+        ("minimax", "MiniMax-H3", 5, "768P"),
+        ("minimax", "MiniMax-H3", 6, "2K"),
+    ),
+)
+def test_batch_confirmation_rejects_actual_billable_parameter_mismatch(
+    tmp_path: Path,
+    client_provider: str,
+    client_model: str,
+    duration: int,
+    resolution: str,
+) -> None:
+    project_dir = _ready_video_project(tmp_path)
+    preflight = build_video_preflight(project_dir, ("shot_03",))
+    request = VideoGenerationRequest.from_preflight(preflight)
+    token = issue_generation_token(project_dir, preflight)
+    submit_count = 0
+
+    class FakeConfig:
+        api_key = ""
+        base_url = "https://provider.example"
+        model = client_model
+
+    class FakeClient:
+        provider = client_provider
+        requires_generation_confirmation = True
+        config = FakeConfig()
+
+        def prepare_submission(self, *_args, **_kwargs):
+            return object()
+
+        def submit_prepared(self, *_args, **_kwargs):
+            nonlocal submit_count
+            submit_count += 1
+            raise AssertionError("mismatched request reached provider")
+
+    job = GatewayVideoJob(
+        shot_id="shot_03",
+        index=3,
+        prompt="A safe prompt",
+        images=(),
+        duration=duration,
+        ratio="9:16",
+        resolution=resolution,
+        output_path=str(tmp_path / "clip.mp4"),
+    )
+    report = {
+        "executed": False,
+        "blocked_reasons": [],
+        "results": [],
+        "errors": [],
+        "completed_count": 0,
+        "skipped_count": 0,
+        "resumed_count": 0,
+        "failed_count": 0,
+        "planned_count": 1,
+    }
+
+    with pytest.raises(GenerationTokenError, match="match"):
+        _execute_gateway_video_jobs(
+            [job],
+            FakeClient(),
+            tmp_path / "report.json",
+            report,
+            generate_audio=False,
+            allow_network=True,
+            overwrite=False,
+            project_dir=project_dir,
+            generation_token=token,
+            generation_request=request,
+        )
+
+    assert submit_count == 0
+    token_id = token.split(".", 1)[0]
+    record = json.loads(
+        (project_dir / "runs/.workbench/tokens" / f"{token_id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert record["consumed_at"] == ""
+
+
+def test_single_confirmation_rejects_actual_duration_before_submit(
+    tmp_path: Path,
+) -> None:
+    project_dir = _ready_video_project(tmp_path)
+    preflight = build_video_preflight(project_dir, ("shot_03",))
+    request = VideoGenerationRequest.from_preflight(preflight)
+    token = issue_generation_token(project_dir, preflight)
+
+    class FakeConfig:
+        api_key = ""
+        base_url = "https://provider.example"
+        model = "MiniMax-H3"
+
+    class FakeClient:
+        provider = "minimax"
+        requires_generation_confirmation = True
+        config = FakeConfig()
+
+        def validate_generation_settings(self, **_kwargs):
+            return None
+
+        def validate_reference_images(self, _images):
+            return None
+
+        def validate_reference_audio(self, _audio):
+            return None
+
+        def prepare_submission(self, *_args, **_kwargs):
+            return object()
+
+        def submit_prepared(self, *_args, **_kwargs):
+            raise AssertionError("mismatched single request reached provider")
+
+    with pytest.raises(GenerationTokenError, match="match"):
+        render_gateway_video_single(
+            "prompt",
+            tmp_path / "single.mp4",
+            FakeClient(),
+            tmp_path / "single-report.json",
+            duration=5,
+            resolution="768P",
+            allow_network=True,
+            project_dir=project_dir,
+            generation_token=token,
+            generation_request=request,
+        )
+
+
+def test_token_binds_replaced_valid_approval_provenance(tmp_path: Path) -> None:
+    project_dir = _ready_video_project(tmp_path)
+    preflight = build_video_preflight(project_dir, ("shot_03",))
+    request = VideoGenerationRequest.from_preflight(preflight)
+    token = issue_generation_token(project_dir, preflight)
+    evidence = project_dir / "replacement-evidence.json"
+    evidence.write_text('{"approved":"replacement"}', encoding="utf-8")
+    review_path = project_dir / "reviews/script.review.json"
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    review["note"] = "replacement valid approval"
+    review["evidence"] = [
+        {
+            "path": str(evidence.resolve()),
+            "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+            "media_type": "application/json",
+        }
+    ]
+    review_path.write_text(json.dumps(review), encoding="utf-8")
+
+    current = build_video_preflight(project_dir, ("shot_03",))
+
+    assert current.ready is True
+    assert current.approval_hashes != preflight.approval_hashes
+    with pytest.raises(GenerationTokenError, match="changed"):
+        consume_generation_token(project_dir, token, request)
+
+
+@pytest.mark.parametrize("rate", (0, -1, float("inf"), float("nan"), 1e-300, True))
+def test_preflight_rejects_non_billable_or_non_finite_price(
+    rate, tmp_path: Path
+) -> None:
+    project_dir = _ready_video_project(tmp_path)
+    spec_path = project_dir / "project.json"
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["target"]["video_price_yuan_per_second"] = rate
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    preflight = build_video_preflight(project_dir, ("shot_03",))
+
+    assert preflight.ready is False
+    assert preflight.estimated_cost_yuan == 0
+    with pytest.raises(GenerationTokenError, match="not ready"):
+        issue_generation_token(project_dir, preflight)
+
+
+@pytest.mark.parametrize(
+    "active",
+    (
+        {"schema_version": "wrong", "affected": {"video": ["shot_03"]}},
+        {
+            "schema_version": "motion-comic-factory.active-repair.v1",
+            "plan_id": "plan",
+            "request_stage": "storyboard",
+            "affected": [],
+            "preserved_artifacts": [],
+            "source_package_sha256": "0" * 64,
+            "target_package_sha256": "1" * 64,
+        },
+        {
+            "schema_version": "motion-comic-factory.active-repair.v1",
+            "plan_id": "plan",
+            "request_stage": "storyboard",
+            "affected": {"video": []},
+            "preserved_artifacts": [],
+            "source_package_sha256": "0" * 64,
+            "target_package_sha256": "1" * 64,
+        },
+    ),
+)
+def test_preflight_fails_closed_on_malformed_active_repair(
+    tmp_path: Path,
+    active: dict[str, object],
+) -> None:
+    project_dir = _ready_video_project(tmp_path)
+    active_path = project_dir / "impact_plans/active.json"
+    active_path.parent.mkdir()
+    active_path.write_text(json.dumps(active), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="repair"):
+        build_video_preflight(project_dir, ("shot_03",))
+
+
+def test_gateway_report_always_deep_sanitizes_nested_secrets(tmp_path: Path) -> None:
+    destination = tmp_path / "report.json"
+    payload = {
+        "headers": {"Authorization": "Bearer nested-secret"},
+        "error": "failed at https://user:url-secret@provider.example/video",
+        "nested": [{"accessToken": "token-secret"}],
+        "callback_error": "clientSecret: callback-secret",
+    }
+
+    safe = gateway_batch._write_report(destination, payload, None)
+    serialized = json.dumps(safe)
+
+    for secret in (
+        "nested-secret",
+        "url-secret",
+        "token-secret",
+        "callback-secret",
+    ):
+        assert secret not in serialized
+        assert secret not in destination.read_text(encoding="utf-8")
+
+
+def test_gateway_state_fsyncs_parent_directory(tmp_path: Path, monkeypatch) -> None:
+    state_path = tmp_path / "clip.mp4.gateway.json"
+    directory_fsyncs: list[int] = []
+    original_fsync = gateway_batch.os.fsync
+
+    def observe_fsync(descriptor: int) -> None:
+        if stat.S_ISDIR(gateway_batch.os.fstat(descriptor).st_mode):
+            directory_fsyncs.append(descriptor)
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(gateway_batch.os, "fsync", observe_fsync)
+
+    gateway_batch.write_atomic_json(state_path, {"task_id": "task-123"})
+
+    assert directory_fsyncs
+
+
+def test_token_directory_swap_fails_closed_without_outside_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = _ready_video_project(tmp_path)
+    preflight = build_video_preflight(project_dir, ("shot_03",))
+    issue_generation_token(project_dir, preflight)
+    token_dir = project_dir / "runs/.workbench/tokens"
+    held = project_dir / "runs/.workbench/tokens-held"
+    outside = tmp_path / "outside-tokens"
+    outside.mkdir()
+    original_replace = video_preflight.os.replace
+    swapped = False
+
+    def swap_on_replace(source, destination, *args, **kwargs):
+        nonlocal swapped
+        destination_path = Path(destination)
+        if not swapped and destination_path.suffix == ".json":
+            swapped = True
+            token_dir.rename(held)
+            token_dir.symlink_to(outside, target_is_directory=True)
+            relocated_source = held / Path(source).name
+            return original_replace(relocated_source, destination, *args, **kwargs)
+        return original_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(video_preflight.os, "replace", swap_on_replace)
+
+    with pytest.raises(ValueError, match="identity|symlink"):
+        issue_generation_token(project_dir, preflight)
+    assert not list(outside.iterdir())
+
+
+def test_project_parent_swap_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    project_dir = _ready_video_project(tmp_path)
+    held = tmp_path / "project-held"
+    outside = tmp_path / "outside-project"
+    shutil.copytree(project_dir, outside)
+    original = video_preflight._safe_existing_file
+    swapped = False
+
+    def swap_after_check(path: Path, label: str):
+        nonlocal swapped
+        if swapped:
+            return path
+        source = original(path, label)
+        if not swapped and label == "project spec":
+            swapped = True
+            project_dir.rename(held)
+            project_dir.symlink_to(outside, target_is_directory=True)
+        return source
+
+    monkeypatch.setattr(video_preflight, "_safe_existing_file", swap_after_check)
+
+    with pytest.raises(ValueError, match="identity|symlink"):
+        build_video_preflight(project_dir, ("shot_03",))
