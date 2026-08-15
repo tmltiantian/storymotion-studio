@@ -40,9 +40,14 @@ LEGACY_REVIEW_TRANSACTION_SCHEMA = "motion-comic-factory.review-transaction.v1"
 REVIEW_TRANSACTION_SCHEMA = "motion-comic-factory.review-transaction.v2"
 REVIEW_TRANSACTION_TOMBSTONE_SUFFIX = ".tombstone"
 ACTIVE_REPAIR_SCHEMA = "motion-comic-factory.active-repair.v1"
+REPAIR_TRANSACTION_SCHEMA = "motion-comic-factory.repair-transaction.v1"
 
 
 class ApprovalInProgressError(RuntimeError):
+    pass
+
+
+class PipelineInProgressError(RuntimeError):
     pass
 
 
@@ -102,12 +107,185 @@ def save_production_package(
 def load_active_repair_state(project_dir: str | Path) -> dict[str, Any]:
     root = _require_safe_project_dir(project_dir)
     path = root / "impact_plans" / "active.json"
+    if path.is_symlink():
+        raise ValueError(f"Active repair state cannot be a symlink: {path}")
     if not path.exists():
         return {}
+    if not path.is_file():
+        raise ValueError(f"Active repair state is invalid: {path}")
     value = _read_object(path)
     if value.get("schema_version") != ACTIVE_REPAIR_SCHEMA:
         raise ValueError(f"Active repair state is invalid: {path}")
     return value
+
+
+@contextmanager
+def _pipeline_lock(root: Path):
+    lock_path = root / ".pipeline.lock"
+    if lock_path.is_symlink():
+        raise ValueError("Pipeline lock cannot be a symlink")
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise PipelineInProgressError(
+                "Unified project is already running"
+            ) from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _repair_transactions_path(root: Path) -> Path:
+    plans = root / "impact_plans"
+    if plans.is_symlink():
+        raise ValueError("Impact plan directory cannot be a symlink")
+    plans.mkdir(parents=True, exist_ok=True)
+    transactions = plans / ".transactions"
+    if transactions.is_symlink():
+        raise ValueError("Repair transaction directory cannot be a symlink")
+    transactions.mkdir(parents=True, exist_ok=True)
+    return transactions
+
+
+def _json_payload_sha256(payload: dict[str, Any]) -> str:
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _initialize_repair_transaction(
+    root: Path,
+    *,
+    plan_id: str,
+    source_package_sha256: str,
+    target_package: ProductionPackage,
+    active_state: dict[str, Any],
+) -> tuple[Path, str]:
+    transactions = _repair_transactions_path(root)
+    transaction_id = uuid4().hex
+    temporary = transactions / f".{transaction_id}.tmp"
+    transaction = transactions / transaction_id
+    temporary.mkdir()
+    try:
+        package_payload = target_package.to_dict()
+        target_sha256 = _json_payload_sha256(package_payload)
+        active_sha256 = _json_payload_sha256(active_state)
+        write_json_atomic(temporary / "production_package.json", package_payload)
+        write_json_atomic(temporary / "active.json", active_state)
+        write_json_atomic(
+            temporary / "transaction.json",
+            {
+                "schema_version": REPAIR_TRANSACTION_SCHEMA,
+                "transaction_id": transaction_id,
+                "plan_id": plan_id,
+                "source_package_sha256": source_package_sha256,
+                "target_package_sha256": target_sha256,
+                "active_sha256": active_sha256,
+            },
+        )
+        os.replace(temporary, transaction)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary, ignore_errors=False)
+    return transaction, target_sha256
+
+
+def _read_repair_transaction(transaction: Path) -> dict[str, Any]:
+    if transaction.is_symlink() or not transaction.is_dir():
+        raise ValueError(f"Repair transaction is invalid: {transaction}")
+    journal_path = transaction / "transaction.json"
+    if journal_path.is_symlink() or not journal_path.is_file():
+        raise ValueError(f"Repair transaction is incomplete: {transaction}")
+    payload = _read_object(journal_path)
+    if (
+        payload.get("schema_version") != REPAIR_TRANSACTION_SCHEMA
+        or payload.get("transaction_id") != transaction.name
+        or not str(payload.get("plan_id") or "")
+    ):
+        raise ValueError(f"Repair transaction is invalid: {transaction}")
+    for name in ("production_package.json", "active.json"):
+        path = transaction / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"Repair transaction is incomplete: {transaction}")
+    target_payload = _read_object(transaction / "production_package.json")
+    if _json_payload_sha256(target_payload) != payload.get(
+        "target_package_sha256"
+    ):
+        raise ValueError(f"Repair transaction target changed: {transaction}")
+    active_payload = _read_object(transaction / "active.json")
+    if (
+        _json_payload_sha256(active_payload) != payload.get("active_sha256")
+        or active_payload.get("plan_id") != payload.get("plan_id")
+    ):
+        raise ValueError(f"Repair transaction active state changed: {transaction}")
+    return payload
+
+
+def _remove_repair_transaction(transaction: Path) -> None:
+    if transaction.is_symlink() or not transaction.is_dir():
+        raise ValueError(f"Repair transaction is invalid: {transaction}")
+    shutil.rmtree(transaction, ignore_errors=False)
+
+
+def _finish_repair_transaction(root: Path, transaction: Path) -> None:
+    active = _read_object(transaction / "active.json")
+    if active.get("schema_version") != ACTIVE_REPAIR_SCHEMA:
+        raise ValueError(f"Repair active state is invalid: {transaction}")
+    active_path = root / "impact_plans" / "active.json"
+    if active_path.is_symlink():
+        raise ValueError("Active repair state cannot be a symlink")
+    write_json_atomic(active_path, active)
+    _remove_repair_transaction(transaction)
+
+
+def _recover_repair_transactions_locked(root: Path) -> None:
+    transactions = root / "impact_plans" / ".transactions"
+    if not transactions.exists():
+        return
+    if transactions.is_symlink() or not transactions.is_dir():
+        raise ValueError("Repair transaction directory is invalid")
+    package_path = root / PACKAGE_FILENAME
+    if package_path.is_symlink() or not package_path.is_file():
+        raise ValueError("Production package is invalid during repair recovery")
+    for transaction in sorted(transactions.iterdir()):
+        if transaction.name.startswith(".") and transaction.name.endswith(".tmp"):
+            if transaction.is_symlink() or not transaction.is_dir():
+                raise ValueError(f"Repair transaction is invalid: {transaction}")
+            shutil.rmtree(transaction, ignore_errors=False)
+            continue
+        payload = _read_repair_transaction(transaction)
+        current_sha256 = hashlib.sha256(package_path.read_bytes()).hexdigest()
+        if current_sha256 == payload["target_package_sha256"]:
+            _finish_repair_transaction(root, transaction)
+        elif current_sha256 == payload["source_package_sha256"]:
+            _remove_repair_transaction(transaction)
+        else:
+            raise RuntimeError(
+                "Repair transaction package state is neither source nor target"
+            )
+
+
+def recover_repair_transactions(
+    project_dir: str | Path, *, pipeline_lock_held: bool = False
+) -> None:
+    root = _require_safe_project_dir(project_dir)
+    transactions = root / "impact_plans" / ".transactions"
+    if not transactions.exists():
+        return
+    if transactions.is_symlink() or not transactions.is_dir():
+        raise ValueError("Repair transaction directory is invalid")
+    if not any(transactions.iterdir()):
+        return
+    if pipeline_lock_held:
+        with _approval_lock(root):
+            _recover_repair_transactions_locked(root)
+        return
+    with _pipeline_lock(root):
+        with _approval_lock(root):
+            _recover_repair_transactions_locked(root)
 
 
 def apply_repair_state(
@@ -120,56 +298,77 @@ def apply_repair_state(
     expected_package_sha256: str,
 ) -> ProductionPackage:
     root = _require_safe_project_dir(project_dir)
-    with _approval_lock(root):
-        _recover_review_transactions_locked(root)
-        package_path = root / PACKAGE_FILENAME
-        current_sha256 = hashlib.sha256(package_path.read_bytes()).hexdigest()
-        if current_sha256 != expected_package_sha256:
-            raise ValueError("Impact plan is stale relative to production package")
-        package = load_production_package(root)
-        target_index = PIPELINE_STAGES.index(StageName(request_stage))
-        records: list[StageRecord] = []
-        for index, record in enumerate(package.stages):
-            if index < target_index or record.state is StageState.PENDING:
-                records.append(record)
-                continue
-            records.append(
-                replace(
-                    record,
-                    state=StageState.STALE,
-                    blocked_reasons=(
-                        (f"Impact plan {plan_id} applied.",)
-                        if index == target_index
-                        else ()
-                    ),
-                    error="",
-                    revision=None,
-                    review_state=ReviewState.NOT_READY,
-                    review_blocks_progress=False,
-                    review_transaction_id="",
+    with _pipeline_lock(root):
+        with _approval_lock(root):
+            _recover_repair_transactions_locked(root)
+            _recover_review_transactions_locked(root)
+            package_path = root / PACKAGE_FILENAME
+            current_sha256 = hashlib.sha256(package_path.read_bytes()).hexdigest()
+            if current_sha256 != expected_package_sha256:
+                active = load_active_repair_state(root)
+                if (
+                    active.get("plan_id") == plan_id
+                    and active.get("target_package_sha256") == current_sha256
+                ):
+                    return load_production_package(root)
+                raise ValueError("Impact plan is stale relative to production package")
+            package = load_production_package(root)
+            target_index = PIPELINE_STAGES.index(StageName(request_stage))
+            records: list[StageRecord] = []
+            for index, record in enumerate(package.stages):
+                if index < target_index or record.state is StageState.PENDING:
+                    records.append(record)
+                    continue
+                records.append(
+                    replace(
+                        record,
+                        state=StageState.STALE,
+                        blocked_reasons=(
+                            (f"Impact plan {plan_id} applied.",)
+                            if index == target_index
+                            else ()
+                        ),
+                        error="",
+                        revision=None,
+                        review_state=ReviewState.NOT_READY,
+                        review_blocks_progress=False,
+                        review_transaction_id="",
+                    )
                 )
+            updated = _refresh_output_indexes(package.with_stages(records))
+            target_sha256 = _json_payload_sha256(updated.to_dict())
+            state = {
+                "schema_version": ACTIVE_REPAIR_SCHEMA,
+                "plan_id": plan_id,
+                "request_stage": StageName(request_stage).value,
+                "affected": {
+                    str(stage): list(map(str, item_ids))
+                    for stage, item_ids in affected.items()
+                },
+                "preserved_artifacts": list(map(str, preserved_artifacts)),
+                "source_package_sha256": expected_package_sha256,
+                "target_package_sha256": target_sha256,
+            }
+            transaction, staged_target_sha256 = _initialize_repair_transaction(
+                root,
+                plan_id=plan_id,
+                source_package_sha256=expected_package_sha256,
+                target_package=updated,
+                active_state=state,
             )
-        updated = _refresh_output_indexes(package.with_stages(records))
-        state = {
-            "schema_version": ACTIVE_REPAIR_SCHEMA,
-            "plan_id": plan_id,
-            "request_stage": StageName(request_stage).value,
-            "affected": {
-                str(stage): list(map(str, item_ids))
-                for stage, item_ids in affected.items()
-            },
-            "preserved_artifacts": list(map(str, preserved_artifacts)),
-            "source_package_sha256": expected_package_sha256,
-        }
-        active_path = root / "impact_plans" / "active.json"
-        active_path.parent.mkdir(parents=True, exist_ok=True)
-        write_json_atomic(active_path, state)
-        try:
-            save_production_package(root, updated)
-        except BaseException:
-            active_path.unlink(missing_ok=True)
-            raise
-        return updated
+            if staged_target_sha256 != target_sha256:
+                raise RuntimeError("Repair transaction target hash changed")
+            try:
+                save_production_package(root, updated)
+                _finish_repair_transaction(root, transaction)
+            except BaseException:
+                durable_sha256 = hashlib.sha256(package_path.read_bytes()).hexdigest()
+                if durable_sha256 == target_sha256:
+                    _finish_repair_transaction(root, transaction)
+                elif durable_sha256 == expected_package_sha256:
+                    _remove_repair_transaction(transaction)
+                raise
+            return updated
 
 
 def _refresh_output_indexes(package: ProductionPackage) -> ProductionPackage:
@@ -635,6 +834,7 @@ def _discard_uncommitted_review_transaction(
 
 
 def _recover_review_transactions_locked(root: Path) -> None:
+    _recover_repair_transactions_locked(root)
     transactions = root / "reviews" / ".transactions"
     if not transactions.exists():
         return

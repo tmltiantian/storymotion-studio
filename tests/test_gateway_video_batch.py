@@ -704,6 +704,7 @@ def test_gateway_video_batch_repair_submits_only_changed_shot(tmp_path):
         tmp_path / "run/gateway_video_batch.json",
         allow_network=True,
         replace_stale=True,
+        repair_shot_ids=("shot_002",),
     )
 
     assert first["completed_count"] == 2
@@ -712,6 +713,44 @@ def test_gateway_video_batch_repair_submits_only_changed_shot(tmp_path):
     assert repaired["completed_count"] == 1
     assert unchanged.read_bytes() == unchanged_bytes
     assert unchanged_state.read_bytes() == unchanged_state_bytes
+
+
+def test_gateway_video_batch_repair_rejects_unusable_preserved_job_before_submit(
+    tmp_path,
+):
+    handoff, package, _, _ = _write_inputs(tmp_path)
+    first = render_gateway_video_batch(
+        handoff,
+        package,
+        FakeClient(),
+        tmp_path / "run/gateway_video_batch.json",
+        allow_network=True,
+        replace_stale=True,
+    )
+    assert first["success"] is True
+    preserved_state = tmp_path / "run/clips/shot_001.mp4.gateway.json"
+    preserved_state.write_text('{"status":"corrupt"}', encoding="utf-8")
+    handoff_payload = json.loads(handoff.read_text(encoding="utf-8"))
+    handoff_payload["script_like"]["frames"][1][
+        "video_prompt"
+    ] = "revised ticket close-up"
+    handoff.write_text(json.dumps(handoff_payload), encoding="utf-8")
+    repair_client = FakeClient()
+
+    repaired = render_gateway_video_batch(
+        handoff,
+        package,
+        repair_client,
+        tmp_path / "run/gateway_video_batch.json",
+        allow_network=True,
+        replace_stale=True,
+        repair_shot_ids=("shot_002",),
+    )
+
+    assert repaired["success"] is False
+    assert repaired["failed_count"] == 1
+    assert repaired["errors"][0]["shot_id"] == "shot_001"
+    assert repair_client.calls == []
 
 
 def test_gateway_video_batch_overwrite_regenerates_existing_clips(tmp_path):

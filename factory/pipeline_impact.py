@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -11,9 +13,10 @@ from typing import Any, Mapping
 from .file_io import read_json_object
 from .pipeline_contracts import ProductionPackage, StageName
 from .pipeline_store import (
+    _require_safe_project_dir,
     apply_repair_state,
     load_active_repair_state,
-    load_production_package,
+    recover_repair_transactions,
 )
 
 
@@ -48,6 +51,19 @@ DEFAULT_DEPENDENCIES = {
         StageName.EVAL: "full",
         StageName.DELIVER: "full",
     },
+}
+
+_ORIGIN_STAGE = {
+    ChangeScope.DIALOGUE: StageName.SCRIPT,
+    ChangeScope.CHARACTER: StageName.ASSETS,
+    ChangeScope.SHOT: StageName.STORYBOARD,
+    ChangeScope.SUBTITLE_STYLE: StageName.EDIT,
+}
+
+_ITEM_SCOPE_FIELD = {
+    ChangeScope.DIALOGUE: "dialogue_ids",
+    ChangeScope.CHARACTER: "character_ids",
+    ChangeScope.SHOT: "shot_ids",
 }
 
 
@@ -87,7 +103,17 @@ class ChangeRequest:
             raise ValueError("Change request must select exactly one scope")
         if explicit is not None and inferred and inferred != (explicit,):
             raise ValueError("Explicit change scope conflicts with selected items")
-        object.__setattr__(self, "scope", explicit or inferred[0])
+        selected_scope = explicit or inferred[0]
+        item_field = _ITEM_SCOPE_FIELD.get(selected_scope)
+        if item_field is not None and not getattr(self, item_field):
+            raise ValueError(f"{selected_scope.value} change requests require item IDs")
+        expected_stage = _ORIGIN_STAGE[selected_scope]
+        if self.stage is not expected_stage:
+            raise ValueError(
+                f"{selected_scope.value} changes must originate at "
+                f"{expected_stage.value}"
+            )
+        object.__setattr__(self, "scope", selected_scope)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -153,9 +179,6 @@ class ImpactPlan:
             "plan_id": self.plan_id,
             "request": self.request.to_dict(),
             "entries": [entry.to_dict() for entry in self.entries],
-            "affected": {
-                entry.stage.value: list(entry.item_ids) for entry in self.entries
-            },
             "preserved_artifacts": list(self.preserved_artifacts),
             "package_sha256": self.package_sha256,
         }
@@ -178,21 +201,52 @@ class ImpactPlan:
         )
 
 
-def _package_sha256(root: Path) -> str:
-    return hashlib.sha256((root / "production_package.json").read_bytes()).hexdigest()
+def _path_uses_symlink(path: Path) -> bool:
+    expanded = path.expanduser()
+    current = expanded if expanded.is_absolute() else Path.cwd() / expanded
+    return any(candidate.is_symlink() for candidate in (current, *current.parents))
 
 
-def _episode_payload(root: Path) -> dict[str, Any]:
+def _safe_registered_file(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"Registered artifact path must be absolute: {path}")
+    if _path_uses_symlink(path):
+        raise ValueError(f"Registered artifact path cannot use a symlink: {path}")
+    if not path.is_file():
+        raise FileNotFoundError(f"Registered artifact is missing: {path}")
+    return path.resolve()
+
+
+def _read_episode_candidate(path: Path) -> dict[str, Any]:
+    payload = read_json_object(path)
+    nested = payload.get("episode_draft")
+    return dict(nested) if isinstance(nested, dict) else payload
+
+
+def _episode_payload(
+    root: Path, package: ProductionPackage
+) -> dict[str, Any]:
+    records = {record.stage: record for record in package.stages}
+    for stage, names in (
+        (StageName.STORYBOARD, ("episode.json",)),
+        (StageName.SCRIPT, ("episode.json", "script.json")),
+    ):
+        for raw_path in records[stage].artifacts:
+            path = Path(raw_path).expanduser()
+            if path.name not in names:
+                continue
+            return _read_episode_candidate(_safe_registered_file(path))
     candidates = (
-        root / "stages" / "storyboard" / "episode.json",
-        root / "stages" / "script" / "script.json",
+        root / "stages" / StageName.STORYBOARD.value / "episode.json",
+        root / "stages" / StageName.SCRIPT.value / "script.json",
     )
     for path in candidates:
         if not path.is_file():
             continue
-        payload = read_json_object(path)
-        nested = payload.get("episode_draft")
-        return dict(nested) if isinstance(nested, dict) else payload
+        if _path_uses_symlink(path):
+            raise ValueError(f"Episode snapshot path cannot use a symlink: {path}")
+        return _read_episode_candidate(path)
     raise FileNotFoundError("Impact preview requires a storyboard episode snapshot")
 
 
@@ -238,19 +292,22 @@ def _expand_request(
 ) -> tuple[ImpactEntry, ...]:
     shots = _shot_rows(episode)
     ordered_shot_ids = tuple(str(shot["id"]) for shot in shots)
+    selector_values: dict[str, tuple[str, ...]] = {
+        "dialogue_ids": request.dialogue_ids,
+        "character_ids": request.character_ids,
+        "shot_ids": request.shot_ids,
+        "timeline": ("timeline",),
+        "subtitles": ("subtitles",),
+        "full": ("full",),
+    }
     if request.scope is ChangeScope.DIALOGUE:
         bindings = _dialogue_bindings(shots)
         _require_known(request.dialogue_ids, set(bindings), "dialogue IDs")
-        bound = tuple(
+        selector_values["bound_shot_ids"] = tuple(
             shot_id
             for shot_id in ordered_shot_ids
             if any(bindings[item] == shot_id for item in request.dialogue_ids)
         )
-        affected = {
-            StageName.AUDIO: request.dialogue_ids,
-            StageName.VIDEO: bound,
-            StageName.EDIT: ("timeline",),
-        }
     elif request.scope is ChangeScope.CHARACTER:
         characters = episode.get("characters") or ()
         known = {
@@ -259,34 +316,37 @@ def _expand_request(
             if isinstance(item, dict)
         }
         _require_known(request.character_ids, known, "character IDs")
-        character_shots = tuple(
+        legacy_character_ids = tuple(
+            str(item.get("id") or "")
+            for item in characters
+            if isinstance(item, dict)
+        )
+        selector_values["character_shot_ids"] = tuple(
             str(shot["id"])
             for shot in shots
-            if set(map(str, shot.get("character_ids") or ()))
+            if set(
+                map(
+                    str,
+                    shot.get("character_ids")
+                    if "character_ids" in shot
+                    else legacy_character_ids,
+                )
+            )
             & set(request.character_ids)
         )
-        affected = {
-            StageName.ASSETS: request.character_ids,
-            StageName.VIDEO: character_shots,
-            StageName.EDIT: ("timeline",),
-        }
     elif request.scope is ChangeScope.SHOT:
         _require_known(request.shot_ids, set(ordered_shot_ids), "shot IDs")
-        selected = tuple(
+        selector_values["shot_ids"] = tuple(
             shot_id for shot_id in ordered_shot_ids if shot_id in request.shot_ids
         )
-        affected = {
-            StageName.STORYBOARD: selected,
-            StageName.VIDEO: selected,
-            StageName.EDIT: ("timeline",),
-        }
-    else:
-        affected = {
-            StageName.EDIT: ("subtitles",),
-            StageName.EVAL: ("full",),
-            StageName.DELIVER: ("full",),
-        }
-    return tuple(ImpactEntry(stage, item_ids) for stage, item_ids in affected.items())
+    dependencies = DEFAULT_DEPENDENCIES[request.scope.value]
+    try:
+        return tuple(
+            ImpactEntry(stage, selector_values[selector])
+            for stage, selector in dependencies.items()
+        )
+    except KeyError as exc:
+        raise ValueError(f"Unknown impact dependency selector: {exc.args[0]}") from exc
 
 
 def _preserved_video_artifacts(
@@ -325,6 +385,9 @@ def _preserved_video_artifacts(
         path = Path(str(raw_path)).expanduser().resolve()
         if path.is_file() and str(path) in registered:
             preserved.append(str(path))
+            state_path = Path(f"{path}.gateway.json")
+            if state_path.is_file() and str(state_path.resolve()) in registered:
+                preserved.append(str(state_path.resolve()))
     return tuple(preserved)
 
 
@@ -343,36 +406,80 @@ def _plan_payload_without_id(
     }
 
 
+def _canonical_json(value: Mapping[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def _safe_plans_dir(root: Path, *, create: bool) -> Path:
+    plans_dir = root / "impact_plans"
+    if plans_dir.is_symlink():
+        raise ValueError("Impact plan directory cannot be a symlink")
+    if create:
+        plans_dir.mkdir(parents=True, exist_ok=True)
+    if plans_dir.is_symlink():
+        raise ValueError("Impact plan directory cannot be a symlink")
+    if not plans_dir.is_dir():
+        raise ValueError("Impact plan directory is invalid")
+    return plans_dir
+
+
+def _persist_immutable_plan(path: Path, serialized: str) -> None:
+    if path.is_symlink():
+        raise ValueError(f"Impact plan cannot be a symlink: {path}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.is_symlink():
+                raise ValueError(f"Impact plan cannot be a symlink: {path}")
+            if path.read_text(encoding="utf-8") != serialized:
+                raise ValueError(f"Impact plan identity collision: {path.stem}")
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def preview_impact(project_dir: str | Path, request: ChangeRequest) -> ImpactPlan:
-    root = Path(project_dir).expanduser().resolve()
-    package = load_production_package(root)
-    episode = _episode_payload(root)
+    root = _require_safe_project_dir(project_dir)
+    package_path = _safe_registered_file(root / "production_package.json")
+    package_bytes = package_path.read_bytes()
+    package_value = json.loads(package_bytes)
+    if not isinstance(package_value, dict):
+        raise ValueError(f"Expected a JSON object: {package_path}")
+    package = ProductionPackage.from_dict(package_value)
+    episode = _episode_payload(root, package)
     entries = _expand_request(request, episode)
-    package_sha256 = _package_sha256(root)
+    package_sha256 = hashlib.sha256(package_bytes).hexdigest()
     preserved = _preserved_video_artifacts(root, package, episode, entries)
     seed = _plan_payload_without_id(request, entries, preserved, package_sha256)
     encoded = json.dumps(seed, sort_keys=True, separators=(",", ":")).encode()
-    plan_id = hashlib.sha256(encoded).hexdigest()[:24]
+    plan_id = hashlib.sha256(encoded).hexdigest()
     plan = ImpactPlan(plan_id, request, entries, preserved, package_sha256)
-    plans_dir = root / "impact_plans"
-    plans_dir.mkdir(parents=True, exist_ok=True)
+    plans_dir = _safe_plans_dir(root, create=True)
     path = plans_dir / f"{plan_id}.json"
-    serialized = json.dumps(
-        plan.to_dict(), ensure_ascii=False, indent=2, sort_keys=True
-    ) + "\n"
-    if path.exists():
-        if path.read_text(encoding="utf-8") != serialized:
-            raise ValueError(f"Impact plan identity collision: {plan_id}")
-    else:
-        path.write_text(serialized, encoding="utf-8")
+    _persist_immutable_plan(path, _canonical_json(plan.to_dict()))
     return plan
 
 
 def _load_plan(root: Path, plan_id: str) -> ImpactPlan:
     if not plan_id or Path(plan_id).name != plan_id:
         raise ValueError("Impact plan ID must be a safe path component")
-    path = root / "impact_plans" / f"{plan_id}.json"
-    plan = ImpactPlan.from_dict(read_json_object(path))
+    path = _safe_plans_dir(root, create=False) / f"{plan_id}.json"
+    if path.is_symlink():
+        raise ValueError(f"Impact plan cannot be a symlink: {path}")
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    payload = read_json_object(path)
+    plan = ImpactPlan.from_dict(payload)
+    if payload != plan.to_dict():
+        raise ValueError("Impact plan content has changed")
     if plan.plan_id != plan_id:
         raise ValueError("Impact plan identity does not match its file")
     seed = _plan_payload_without_id(
@@ -382,13 +489,13 @@ def _load_plan(root: Path, plan_id: str) -> ImpactPlan:
         plan.package_sha256,
     )
     encoded = json.dumps(seed, sort_keys=True, separators=(",", ":")).encode()
-    if hashlib.sha256(encoded).hexdigest()[:24] != plan.plan_id:
+    if hashlib.sha256(encoded).hexdigest() != plan.plan_id:
         raise ValueError("Impact plan content has changed")
     return plan
 
 
 def apply_impact_plan(project_dir: str | Path, plan_id: str) -> ProductionPackage:
-    root = Path(project_dir).expanduser().resolve()
+    root = _require_safe_project_dir(project_dir)
     plan = _load_plan(root, plan_id)
     return apply_repair_state(
         root,
@@ -403,6 +510,7 @@ def apply_impact_plan(project_dir: str | Path, plan_id: str) -> ProductionPackag
 def load_active_repair_scope(
     project_dir: str | Path,
 ) -> Mapping[str, tuple[str, ...]]:
+    recover_repair_transactions(project_dir)
     state = load_active_repair_state(project_dir)
     affected = state.get("affected") or {}
     if not isinstance(affected, dict):
@@ -413,6 +521,7 @@ def load_active_repair_scope(
 
 
 def registered_preserved_artifacts(project_dir: str | Path) -> tuple[Path, ...]:
+    recover_repair_transactions(project_dir)
     state = load_active_repair_state(project_dir)
     return tuple(
         Path(value).expanduser().resolve()

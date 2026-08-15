@@ -33,6 +33,7 @@ from .pipeline_store import (
     invalidate_stage_and_downstream,
     load_production_package,
     load_project_spec,
+    recover_repair_transactions,
     update_stage,
 )
 
@@ -250,6 +251,7 @@ def run_pipeline(
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise RuntimeError("Unified project is already running") from exc
+        recover_repair_transactions(root, pipeline_lock_held=True)
         spec = load_project_spec(root)
         package = load_production_package(root)
         adapter = get_mode_adapter(spec.mode)

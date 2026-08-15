@@ -7,7 +7,10 @@ from typing import Any
 
 from .character_assets import write_character_asset_manifest
 from .file_io import read_json_object, sha256_file, write_json_atomic
-from .gateway_video_batch import render_gateway_video_batch
+from .gateway_video_batch import (
+    gateway_video_clip_state_path,
+    render_gateway_video_batch,
+)
 from .local_voiceover import render_voiceover_preview
 from .media_validation import probe_media
 from .media_assembly import assemble_visual_track, mux_final_audio
@@ -301,6 +304,9 @@ def execute_video(context: StageContext) -> StageExecution:
             replace_stale=bool(
                 context.repair_scope.get(StageName.VIDEO.value, ())
             ),
+            repair_shot_ids=tuple(
+                context.repair_scope.get(StageName.VIDEO.value, ())
+            ),
         )
         if not report.get("success"):
             detail = report.get("errors") or report.get("blocked_reasons")
@@ -316,7 +322,22 @@ def execute_video(context: StageContext) -> StageExecution:
         missing = [str(path) for path in clips if not path.is_file()]
         if missing:
             raise RuntimeError(f"Cloud video clips are missing: {missing}")
-        artifacts.extend((handoff, package, report_path, *shot_audio.values(), *clips))
+        clip_states = [gateway_video_clip_state_path(path) for path in clips]
+        missing_states = [str(path) for path in clip_states if not path.is_file()]
+        if missing_states:
+            raise RuntimeError(
+                f"Cloud video clip states are missing: {missing_states}"
+            )
+        artifacts.extend(
+            (
+                handoff,
+                package,
+                report_path,
+                *shot_audio.values(),
+                *clips,
+                *clip_states,
+            )
+        )
         generation_mode = f"{profile.video.provider}_video"
     else:
         render_card_preview_video(
@@ -335,7 +356,11 @@ def execute_video(context: StageContext) -> StageExecution:
             "schema_version": "motion-comic-factory.video.v1",
             "project_id": context.spec.project_id,
             "generation_mode": generation_mode,
-            "primary_video": str(output.resolve()) if output.is_file() else "",
+            "primary_video": (
+                str(output.resolve())
+                if not context.enable_live and output.is_file()
+                else ""
+            ),
             "clips": [str(path.resolve()) for path in clips],
             "clip_by_shot": {
                 shot.id: str(clip_by_shot[shot.id].resolve())
