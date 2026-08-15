@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from factory.pipeline_store import (
     load_project_spec,
     update_stage,
 )
-from factory.pipeline_review import ApprovalPreset, ReviewConfig
+from factory.pipeline_review import ApprovalPreset, ReviewConfig, validate_stage_review
 from factory.pipeline_runner import StageExecution, resume_pipeline, run_pipeline
 
 
@@ -74,20 +75,19 @@ def test_grouped_approval_failure_rolls_back_partial_review_files(
     project_dir, grouped_stages = _grouped_review_project(tmp_path)
     evidence = tmp_path / "group-review.json"
     evidence.write_text('{"approved":true}', encoding="utf-8")
-    real_approve = pipeline_store.approve_stage_revision
-    writes = 0
+    real_write = pipeline_store.write_json_atomic
+    staged_writes = 0
 
-    def fail_after_first_write(*args, **kwargs):
-        nonlocal writes
-        if writes == 1:
-            raise OSError("forced grouped review write failure")
-        review = real_approve(*args, **kwargs)
-        writes += 1
-        return review
+    def fail_second_staged_review(path, payload):
+        nonlocal staged_writes
+        target = Path(path)
+        if target.parent.name == "staged" and target.name.endswith(".review.json"):
+            staged_writes += 1
+            if staged_writes == 2:
+                raise OSError("forced grouped review write failure")
+        return real_write(path, payload)
 
-    monkeypatch.setattr(
-        pipeline_store, "approve_stage_revision", fail_after_first_write
-    )
+    monkeypatch.setattr(pipeline_store, "write_json_atomic", fail_second_staged_review)
 
     with pytest.raises(OSError, match="forced grouped review write failure"):
         approve_review_bundle(
@@ -104,6 +104,8 @@ def test_grouped_approval_failure_rolls_back_partial_review_files(
         not (project_dir / "reviews" / f"{stage.value}.review.json").exists()
         for stage in grouped_stages
     )
+    transactions = project_dir / "reviews" / ".transactions"
+    assert not transactions.exists() or not any(transactions.iterdir())
 
 
 def test_grouped_approval_retry_recovers_interrupted_transaction(
@@ -112,25 +114,29 @@ def test_grouped_approval_retry_recovers_interrupted_transaction(
     project_dir, grouped_stages = _grouped_review_project(tmp_path)
     evidence = tmp_path / "group-review.json"
     evidence.write_text('{"approved":true}', encoding="utf-8")
-    real_approve = pipeline_store.approve_stage_revision
-    writes = 0
+    real_publish = getattr(
+        pipeline_store,
+        "_publish_staged_review",
+        lambda source, destination: pipeline_store.os.replace(source, destination),
+    )
+    publications = 0
 
     class SimulatedProcessInterruption(BaseException):
         pass
 
-    def interrupt_after_first_write(*args, **kwargs):
-        nonlocal writes
-        if writes == 1:
+    def interrupt_after_first_publication(source, destination):
+        nonlocal publications
+        if publications == 1:
             raise SimulatedProcessInterruption
-        review = real_approve(*args, **kwargs)
-        writes += 1
-        return review
+        real_publish(source, destination)
+        publications += 1
 
     with monkeypatch.context() as interrupted:
         interrupted.setattr(
             pipeline_store,
-            "approve_stage_revision",
-            interrupt_after_first_write,
+            "_publish_staged_review",
+            interrupt_after_first_publication,
+            raising=False,
         )
         with pytest.raises(SimulatedProcessInterruption):
             approve_review_bundle(
@@ -142,10 +148,148 @@ def test_grouped_approval_retry_recovers_interrupted_transaction(
 
     interrupted_package = load_production_package(project_dir)
     assert all(
-        record.review_state is ReviewState.AWAITING_REVIEW
+        record.review_state is ReviewState.APPROVED
         for record in interrupted_package.stages[1:5]
     )
     assert (project_dir / "reviews" / "script.review.json").is_file()
+    assert not (project_dir / "reviews" / "storyboard.review.json").exists()
+
+    validation = validate_stage_review(project_dir, StageName.SCRIPT)
+
+    assert validation.valid is True
+    assert all(
+        (project_dir / "reviews" / f"{stage.value}.review.json").is_file()
+        for stage in grouped_stages
+    )
+    transactions = project_dir / "reviews" / ".transactions"
+    assert not any(transactions.iterdir())
+
+
+def test_grouped_approval_rejects_concurrent_approver(
+    tmp_path: Path,
+) -> None:
+    project_dir, grouped_stages = _grouped_review_project(tmp_path)
+    evidence = tmp_path / "group-review.json"
+    evidence.write_text('{"approved":true}', encoding="utf-8")
+    lock_path = project_dir / ".approval.lock"
+
+    with lock_path.open("a+", encoding="utf-8") as held_lock:
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(RuntimeError, match="approval.*already in progress"):
+            approve_review_bundle(
+                project_dir,
+                grouped_stages,
+                note="group approved",
+                evidence=(evidence,),
+            )
+
+    package = load_production_package(project_dir)
+    assert all(
+        record.review_state is ReviewState.AWAITING_REVIEW
+        for record in package.stages[1:5]
+    )
+    assert all(
+        not (project_dir / "reviews" / f"{stage.value}.review.json").exists()
+        for stage in grouped_stages
+    )
+
+
+def test_review_validation_rejects_approval_in_progress_before_journal_publish(
+    tmp_path: Path,
+) -> None:
+    project_dir, grouped_stages = _grouped_review_project(tmp_path)
+    evidence = tmp_path / "group-review.json"
+    evidence.write_text('{"approved":true}', encoding="utf-8")
+    approve_review_bundle(
+        project_dir,
+        grouped_stages,
+        note="group approved",
+        evidence=(evidence,),
+    )
+
+    with (project_dir / ".approval.lock").open("a+", encoding="utf-8") as held_lock:
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        validation = validate_stage_review(project_dir, StageName.SCRIPT)
+
+    assert validation.valid is False
+    assert "already in progress" in validation.reason
+
+
+def test_review_recovery_requires_matching_transaction_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_dir, grouped_stages = _grouped_review_project(tmp_path)
+    evidence = tmp_path / "group-review.json"
+    evidence.write_text('{"approved":true}', encoding="utf-8")
+
+    class SimulatedProcessInterruption(BaseException):
+        pass
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(
+            pipeline_store,
+            "_publish_staged_review",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                SimulatedProcessInterruption
+            ),
+            raising=False,
+        )
+        with pytest.raises(SimulatedProcessInterruption):
+            approve_review_bundle(
+                project_dir,
+                grouped_stages,
+                note="group approved",
+                evidence=(evidence,),
+            )
+
+    package_path = project_dir / "production_package.json"
+    payload = json.loads(package_path.read_text(encoding="utf-8"))
+    for stage in grouped_stages:
+        payload["stages"][PIPELINE_STAGES.index(stage)][
+            "review_transaction_id"
+        ] = "different-transaction-owner"
+    package_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    validation = validate_stage_review(project_dir, StageName.SCRIPT)
+
+    assert validation.valid is False
+    assert all(
+        not (project_dir / "reviews" / f"{stage.value}.review.json").exists()
+        for stage in grouped_stages
+    )
+    transactions = project_dir / "reviews" / ".transactions"
+    assert not any(transactions.iterdir())
+
+
+def test_grouped_approval_discards_failed_journal_initialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_dir, grouped_stages = _grouped_review_project(tmp_path)
+    evidence = tmp_path / "group-review.json"
+    evidence.write_text('{"approved":true}', encoding="utf-8")
+    real_write = pipeline_store.write_json_atomic
+
+    def fail_transaction_journal(path, payload):
+        if Path(path).name == "transaction.json":
+            raise OSError("forced transaction journal failure")
+        return real_write(path, payload)
+
+    with monkeypatch.context() as failed:
+        failed.setattr(pipeline_store, "write_json_atomic", fail_transaction_journal)
+        with pytest.raises(OSError, match="forced transaction journal failure"):
+            approve_review_bundle(
+                project_dir,
+                grouped_stages,
+                note="group approved",
+                evidence=(evidence,),
+            )
+
+    transactions = project_dir / "reviews" / ".transactions"
+    assert not transactions.exists() or not any(transactions.iterdir())
+    assert all(
+        record.review_state is ReviewState.AWAITING_REVIEW
+        for record in load_production_package(project_dir).stages[1:5]
+    )
 
     package = approve_review_bundle(
         project_dir,
@@ -153,12 +297,56 @@ def test_grouped_approval_retry_recovers_interrupted_transaction(
         note="group approved",
         evidence=(evidence,),
     )
-
     assert all(
         record.review_state is ReviewState.APPROVED for record in package.stages[1:5]
     )
+
+
+def test_grouped_approval_discards_failed_journal_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_dir, grouped_stages = _grouped_review_project(tmp_path)
+    evidence = tmp_path / "group-review.json"
+    evidence.write_text('{"approved":true}', encoding="utf-8")
+    real_replace = pipeline_store.os.replace
+
+    def fail_transaction_publication(source, destination):
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            source_path.name.startswith(".")
+            and source_path.name.endswith(".tmp")
+            and destination_path.parent.name == ".transactions"
+        ):
+            raise OSError("forced transaction publication failure")
+        return real_replace(source, destination)
+
+    with monkeypatch.context() as failed:
+        failed.setattr(pipeline_store.os, "replace", fail_transaction_publication)
+        with pytest.raises(OSError, match="forced transaction publication failure"):
+            approve_review_bundle(
+                project_dir,
+                grouped_stages,
+                note="group approved",
+                evidence=(evidence,),
+            )
+
     transactions = project_dir / "reviews" / ".transactions"
-    assert not any(transactions.iterdir())
+    assert not transactions.exists() or not any(transactions.iterdir())
+    assert all(
+        record.review_state is ReviewState.AWAITING_REVIEW
+        for record in load_production_package(project_dir).stages[1:5]
+    )
+
+    package = approve_review_bundle(
+        project_dir,
+        grouped_stages,
+        note="group approved",
+        evidence=(evidence,),
+    )
+    assert all(
+        record.review_state is ReviewState.APPROVED for record in package.stages[1:5]
+    )
 
 
 def test_create_project_writes_spec_and_full_pending_package(tmp_path: Path) -> None:

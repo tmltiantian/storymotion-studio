@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,13 +28,15 @@ from .pipeline_review import (
     REVISIONS_SCHEMA,
     StageReview,
     approve_stage_revision,
+    prepare_stage_review,
     write_stage_revision,
 )
 
 
 SPEC_FILENAME = "project.json"
 PACKAGE_FILENAME = "production_package.json"
-REVIEW_TRANSACTION_SCHEMA = "motion-comic-factory.review-transaction.v1"
+LEGACY_REVIEW_TRANSACTION_SCHEMA = "motion-comic-factory.review-transaction.v1"
+REVIEW_TRANSACTION_SCHEMA = "motion-comic-factory.review-transaction.v2"
 
 
 def _require_safe_project_dir(project_dir: str | Path) -> Path:
@@ -136,6 +140,7 @@ def update_stage(
     review_policy: ReviewPolicy | None = None,
     review_state: ReviewState | None = None,
     review_blocks_progress: bool | None = None,
+    review_transaction_id: str | None = None,
 ) -> ProductionPackage:
     root = _require_safe_project_dir(project_dir)
     spec = load_project_spec(root)
@@ -196,6 +201,15 @@ def update_stage(
                             review_blocks_progress
                             if review_blocks_progress is not None
                             else current.review_blocks_progress
+                        )
+                    ),
+                    review_transaction_id=(
+                        ""
+                        if reset_review
+                        else (
+                            review_transaction_id
+                            if review_transaction_id is not None
+                            else current.review_transaction_id
                         )
                     ),
                 )
@@ -274,6 +288,22 @@ def _review_record_path(root: Path, stage: StageName) -> Path:
     return root / "reviews" / f"{stage.value}.review.json"
 
 
+@contextmanager
+def _approval_lock(root: Path):
+    lock_path = root / ".approval.lock"
+    if lock_path.is_symlink():
+        raise ValueError("Approval lock cannot be a symlink")
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("Project approval is already in progress") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def _review_transaction_entries(
     root: Path, records: tuple[StageRecord, ...]
 ) -> tuple[dict[str, Any], ...]:
@@ -286,26 +316,62 @@ def _review_transaction_entries(
             {
                 "stage": record.stage.value,
                 "revision": record.revision,
-                "had_review": target.is_file(),
             }
         )
     return tuple(entries)
 
 
-def _review_transaction_path(root: Path) -> Path:
+def _review_transactions_path(root: Path) -> Path:
     transactions = root / "reviews" / ".transactions"
     transactions.mkdir(parents=True, exist_ok=True)
     if transactions.is_symlink():
         raise ValueError("Review transaction directory cannot be a symlink")
-    transaction = transactions / uuid4().hex
-    transaction.mkdir()
+    return transactions
+
+
+def _initialize_review_transaction(
+    root: Path,
+    transaction_id: str,
+    entries: tuple[dict[str, Any], ...],
+    reviews: tuple[StageReview, ...],
+) -> Path:
+    transactions = _review_transactions_path(root)
+    temporary = transactions / f".{transaction_id}.tmp"
+    transaction = transactions / transaction_id
+    temporary.mkdir()
+    try:
+        staged = temporary / "staged"
+        staged.mkdir()
+        for review in reviews:
+            write_json_atomic(
+                staged / f"{review.stage.value}.review.json",
+                {"schema_version": REVIEW_SCHEMA, **review.to_dict()},
+            )
+        write_json_atomic(
+            temporary / "transaction.json",
+            {
+                "schema_version": REVIEW_TRANSACTION_SCHEMA,
+                "transaction_id": transaction_id,
+                "entries": list(entries),
+            },
+        )
+        os.replace(temporary, transaction)
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
     return transaction
 
 
-def _read_review_transaction(transaction: Path) -> tuple[dict[str, Any], ...]:
+def _read_review_transaction(
+    transaction: Path,
+) -> tuple[str, str, tuple[dict[str, Any], ...]]:
     payload = _read_object(transaction / "transaction.json")
-    if payload.get("schema_version") != REVIEW_TRANSACTION_SCHEMA:
+    schema = str(payload.get("schema_version") or "")
+    if schema not in (LEGACY_REVIEW_TRANSACTION_SCHEMA, REVIEW_TRANSACTION_SCHEMA):
         raise ValueError(f"Review transaction is invalid: {transaction}")
+    transaction_id = str(payload.get("transaction_id") or "")
+    if schema == REVIEW_TRANSACTION_SCHEMA and transaction_id != transaction.name:
+        raise ValueError(f"Review transaction identity is invalid: {transaction}")
     raw_entries = payload.get("entries")
     if not isinstance(raw_entries, list) or not raw_entries:
         raise ValueError(f"Review transaction has no entries: {transaction}")
@@ -315,17 +381,19 @@ def _read_review_transaction(transaction: Path) -> tuple[dict[str, Any], ...]:
             raise ValueError(f"Review transaction entry is invalid: {transaction}")
         stage = StageName(str(raw_entry.get("stage")))
         revision = int(raw_entry.get("revision"))
-        had_review = raw_entry.get("had_review")
-        if not isinstance(had_review, bool):
-            raise ValueError(f"Review transaction entry is invalid: {transaction}")
-        entries.append(
-            {
-                "stage": stage.value,
-                "revision": revision,
-                "had_review": had_review,
-            }
-        )
-    return tuple(entries)
+        entry: dict[str, Any] = {
+            "stage": stage.value,
+            "revision": revision,
+        }
+        if schema == LEGACY_REVIEW_TRANSACTION_SCHEMA:
+            had_review = raw_entry.get("had_review")
+            if not isinstance(had_review, bool):
+                raise ValueError(f"Review transaction entry is invalid: {transaction}")
+            entry["had_review"] = had_review
+        entries.append(entry)
+    if len({entry["stage"] for entry in entries}) != len(entries):
+        raise ValueError(f"Review transaction has duplicate stages: {transaction}")
+    return schema, transaction_id, tuple(entries)
 
 
 def _review_backup_path(transaction: Path, stage: StageName) -> Path:
@@ -364,7 +432,7 @@ def _rollback_review_transaction(
 
 
 def _review_transaction_committed(
-    root: Path, entries: tuple[dict[str, Any], ...]
+    root: Path, transaction_id: str, entries: tuple[dict[str, Any], ...]
 ) -> bool:
     package_path = root / PACKAGE_FILENAME
     if not package_path.is_file() or package_path.is_symlink():
@@ -374,11 +442,68 @@ def _review_transaction_committed(
     return all(
         by_stage[StageName(str(entry["stage"]))].review_state is ReviewState.APPROVED
         and by_stage[StageName(str(entry["stage"]))].revision == int(entry["revision"])
+        and by_stage[StageName(str(entry["stage"]))].review_transaction_id
+        == transaction_id
         for entry in entries
     )
 
 
-def _recover_review_transactions(root: Path) -> None:
+def _staged_review_path(transaction: Path, stage: StageName) -> Path:
+    return transaction / "staged" / f"{stage.value}.review.json"
+
+
+def _canonical_review_transaction_id(path: Path) -> str:
+    if path.is_symlink() or not path.is_file():
+        return ""
+    try:
+        payload = _read_object(path)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    return str(payload.get("transaction_id") or "")
+
+
+def _publish_staged_review(source: Path, destination: Path) -> None:
+    if source.is_symlink() or not source.is_file():
+        raise ValueError(f"Staged review is missing: {source}")
+    if destination.is_symlink():
+        raise ValueError(f"Review record cannot be a symlink: {destination}")
+    os.replace(source, destination)
+
+
+def _finish_committed_review_transaction(
+    root: Path,
+    transaction: Path,
+    transaction_id: str,
+    entries: tuple[dict[str, Any], ...],
+) -> None:
+    for entry in entries:
+        stage = StageName(str(entry["stage"]))
+        staged = _staged_review_path(transaction, stage)
+        canonical = _review_record_path(root, stage)
+        if staged.is_file() and not staged.is_symlink():
+            _publish_staged_review(staged, canonical)
+        elif _canonical_review_transaction_id(canonical) != transaction_id:
+            raise RuntimeError(
+                f"Committed review transaction is missing {stage.value}"
+            )
+    shutil.rmtree(transaction, ignore_errors=False)
+
+
+def _discard_uncommitted_review_transaction(
+    root: Path,
+    transaction: Path,
+    transaction_id: str,
+    entries: tuple[dict[str, Any], ...],
+) -> None:
+    for entry in entries:
+        stage = StageName(str(entry["stage"]))
+        canonical = _review_record_path(root, stage)
+        if _canonical_review_transaction_id(canonical) == transaction_id:
+            canonical.unlink()
+    shutil.rmtree(transaction, ignore_errors=False)
+
+
+def _recover_review_transactions_locked(root: Path) -> None:
     transactions = root / "reviews" / ".transactions"
     if not transactions.exists():
         return
@@ -387,15 +512,41 @@ def _recover_review_transactions(root: Path) -> None:
     for transaction in sorted(transactions.iterdir()):
         if transaction.is_symlink() or not transaction.is_dir():
             raise ValueError(f"Review transaction is invalid: {transaction}")
-        entries = _read_review_transaction(transaction)
-        if _review_transaction_committed(root, entries):
+        if transaction.name.startswith(".") and transaction.name.endswith(".tmp"):
             shutil.rmtree(transaction, ignore_errors=False)
             continue
-        rollback_errors = _rollback_review_transaction(root, transaction, entries)
-        if rollback_errors:
-            raise RuntimeError(
-                "Review transaction recovery failed: " + " | ".join(rollback_errors)
+        schema, transaction_id, entries = _read_review_transaction(transaction)
+        if schema == LEGACY_REVIEW_TRANSACTION_SCHEMA:
+            if all(
+                ProductionPackage.from_dict(
+                    _read_object(root / PACKAGE_FILENAME)
+                ).stages[PIPELINE_STAGES.index(StageName(str(entry["stage"])))].review_state
+                is ReviewState.APPROVED
+                for entry in entries
+            ):
+                shutil.rmtree(transaction, ignore_errors=False)
+                continue
+            rollback_errors = _rollback_review_transaction(root, transaction, entries)
+            if rollback_errors:
+                raise RuntimeError(
+                    "Review transaction recovery failed: "
+                    + " | ".join(rollback_errors)
+                )
+            continue
+        if _review_transaction_committed(root, transaction_id, entries):
+            _finish_committed_review_transaction(
+                root, transaction, transaction_id, entries
             )
+        else:
+            _discard_uncommitted_review_transaction(
+                root, transaction, transaction_id, entries
+            )
+
+
+def recover_review_transactions(project_dir: str | Path) -> None:
+    root = _require_safe_project_dir(project_dir)
+    with _approval_lock(root):
+        _recover_review_transactions_locked(root)
 
 
 def approve_review_bundle(
@@ -405,7 +556,17 @@ def approve_review_bundle(
     evidence: tuple[str | Path, ...],
 ) -> ProductionPackage:
     root = _require_safe_project_dir(project_dir)
-    _recover_review_transactions(root)
+    with _approval_lock(root):
+        _recover_review_transactions_locked(root)
+        return _approve_review_bundle_locked(root, stages, note, evidence)
+
+
+def _approve_review_bundle_locked(
+    root: Path,
+    stages: tuple[StageName, ...],
+    note: str,
+    evidence: tuple[str | Path, ...],
+) -> ProductionPackage:
     package = load_production_package(root)
     targets = tuple(StageName(stage) for stage in stages)
     if not targets or len(set(targets)) != len(targets):
@@ -468,6 +629,7 @@ def approve_review_bundle(
         if integrity_issue:
             raise ValueError(integrity_issue)
 
+    transaction_id = uuid4().hex
     target_set = set(targets)
     records = tuple(
         replace(
@@ -475,6 +637,7 @@ def approve_review_bundle(
             review_state=ReviewState.APPROVED,
             review_blocks_progress=False,
             blocked_reasons=(),
+            review_transaction_id=transaction_id,
         )
         if record.stage in target_set
         else record
@@ -482,43 +645,35 @@ def approve_review_bundle(
     )
     updated = _refresh_output_indexes(package.with_stages(records))
     entries = _review_transaction_entries(root, target_records)
-    transaction = _review_transaction_path(root)
-    write_json_atomic(
-        transaction / "transaction.json",
-        {
-            "schema_version": REVIEW_TRANSACTION_SCHEMA,
-            "entries": list(entries),
-        },
+    reviews = tuple(
+        prepare_stage_review(
+            root,
+            record.stage,
+            record.revision,
+            review_note,
+            evidence,
+            transaction_id=transaction_id,
+        )
+        for record in target_records
+    )
+    transaction = _initialize_review_transaction(
+        root, transaction_id, entries, reviews
     )
     try:
-        for entry in entries:
-            if not bool(entry["had_review"]):
-                continue
-            stage = StageName(str(entry["stage"]))
-            os.replace(
-                _review_record_path(root, stage),
-                _review_backup_path(transaction, stage),
-            )
-        for record in target_records:
-            approve_stage_revision(
-                root,
-                record.stage,
-                record.revision,
-                review_note,
-                evidence,
-            )
         save_production_package(root, updated)
+        _finish_committed_review_transaction(
+            root, transaction, transaction_id, entries
+        )
     except Exception:
-        if _review_transaction_committed(root, entries):
-            shutil.rmtree(transaction, ignore_errors=False)
-            return updated
-        rollback_errors = _rollback_review_transaction(root, transaction, entries)
-        if rollback_errors:
-            raise RuntimeError(
-                "Grouped review rollback failed: " + " | ".join(rollback_errors)
+        if _review_transaction_committed(root, transaction_id, entries):
+            _finish_committed_review_transaction(
+                root, transaction, transaction_id, entries
             )
+            return updated
+        _discard_uncommitted_review_transaction(
+            root, transaction, transaction_id, entries
+        )
         raise
-    shutil.rmtree(transaction, ignore_errors=False)
     return updated
 
 
@@ -563,6 +718,7 @@ def request_stage_changes(
             review_state=ReviewState.CHANGES_REQUESTED,
             review_blocks_progress=True,
             blocked_reasons=(review_reason,),
+            review_transaction_id="",
         )
         if record.stage is target
         else record
