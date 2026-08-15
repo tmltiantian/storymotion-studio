@@ -58,8 +58,12 @@ export interface ApiClient {
     request: CreateProjectRequest,
     signal?: AbortSignal,
   ): Promise<JobAccepted>;
-  getProject(projectId: string): Promise<ProjectDetail>;
-  getStage(projectId: string, stage: StageName): Promise<StageDetail>;
+  getProject(projectId: string, signal?: AbortSignal): Promise<ProjectDetail>;
+  getStage(
+    projectId: string,
+    stage: StageName,
+    signal?: AbortSignal,
+  ): Promise<StageDetail>;
   runStage(
     projectId: string,
     stage: StageName,
@@ -69,14 +73,24 @@ export interface ApiClient {
     projectId: string,
     stage: StageName,
     request: ApproveStageRequest,
+    signal?: AbortSignal,
   ): Promise<StageDetail>;
   requestStageChanges(
     projectId: string,
     stage: StageName,
     request: RequestChangesRequest,
+    signal?: AbortSignal,
   ): Promise<StageDetail>;
-  previewImpact(projectId: string, request: ImpactRequest): Promise<ImpactPlan>;
-  applyImpact(projectId: string, planId: string): Promise<ProjectDetail>;
+  previewImpact(
+    projectId: string,
+    request: ImpactRequest,
+    signal?: AbortSignal,
+  ): Promise<ImpactPlan>;
+  applyImpact(
+    projectId: string,
+    planId: string,
+    signal?: AbortSignal,
+  ): Promise<ProjectDetail>;
   preflightVideo(projectId: string, shotIds: string[]): Promise<VideoPreflight>;
   confirmVideo(
     projectId: string,
@@ -164,28 +178,31 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       request<ProjectDetail[]>("/api/projects", { signal }),
     createProject: (body, signal) =>
       post<JobAccepted>("/api/projects", body, signal),
-    getProject: (projectId) =>
-      request<ProjectDetail>(`/api/projects/${identifier(projectId)}`),
-    getStage: (projectId, stage) =>
+    getProject: (projectId, signal) =>
+      request<ProjectDetail>(`/api/projects/${identifier(projectId)}`, { signal }),
+    getStage: (projectId, stage, signal) =>
       request<StageDetail>(
         `/api/projects/${identifier(projectId)}/stages/${identifier(stage)}`,
+        { signal },
       ),
     runStage: (projectId, stage, body = {}) =>
       post<JobAccepted>(
         `/api/projects/${identifier(projectId)}/stages/${identifier(stage)}/run`,
         { enable_live: body.enable_live ?? false },
       ),
-    approveStage: (projectId, stage, body) =>
+    approveStage: (projectId, stage, body, signal) =>
       post<StageDetail>(
         `/api/projects/${identifier(projectId)}/stages/${identifier(stage)}/approve`,
         body,
+        signal,
       ),
-    requestStageChanges: (projectId, stage, body) =>
+    requestStageChanges: (projectId, stage, body, signal) =>
       post<StageDetail>(
         `/api/projects/${identifier(projectId)}/stages/${identifier(stage)}/request-changes`,
         body,
+        signal,
       ),
-    previewImpact: (projectId, body) =>
+    previewImpact: (projectId, body, signal) =>
       post<ImpactPlan>(
         `/api/projects/${identifier(projectId)}/impact-plan`,
         {
@@ -195,10 +212,13 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
           subtitle_style: false,
           ...body,
         },
+        signal,
       ),
-    applyImpact: (projectId, planId) =>
+    applyImpact: (projectId, planId, signal) =>
       post<ProjectDetail>(
         `/api/projects/${identifier(projectId)}/impact-plan/${identifier(planId)}/apply`,
+        undefined,
+        signal,
       ),
     preflightVideo: (projectId, shotIds) =>
       post<VideoPreflight>(`/api/projects/${identifier(projectId)}/video/preflight`, {
