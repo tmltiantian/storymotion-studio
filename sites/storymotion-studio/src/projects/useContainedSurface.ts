@@ -1,6 +1,7 @@
 import {
   type RefObject,
   useLayoutEffect,
+  useRef,
 } from "react";
 
 const FOCUSABLE = [
@@ -31,6 +32,12 @@ export function useContainedSurface({
   busyRef: RefObject<boolean>;
   onClose: () => void;
 }) {
+  const onCloseRef = useRef(onClose);
+
+  useLayoutEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
   useLayoutEffect(() => {
     const surface = surfaceRef.current;
     const background = document.querySelector<HTMLElement>(".app-shell");
@@ -49,7 +56,7 @@ export function useContainedSurface({
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
-        if (!busyRef.current) onClose();
+        if (!busyRef.current) onCloseRef.current();
         return;
       }
       if (event.key !== "Tab") return;
@@ -85,5 +92,5 @@ export function useContainedSurface({
       }
       returnFocus?.focus();
     };
-  }, [busyRef, initialFocusRef, onClose, returnFocusRef, surfaceRef]);
+  }, [busyRef, initialFocusRef, returnFocusRef, surfaceRef]);
 }

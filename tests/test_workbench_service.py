@@ -146,6 +146,49 @@ def test_project_detail_contains_execution_review_and_opaque_artifacts(
     assert "/runs/" not in json.dumps(payload)
 
 
+def test_impact_preview_exposes_path_free_authoritative_summary(
+    service: WorkbenchService,
+    project_workspace: tuple[Path, Path],
+) -> None:
+    workspace, _artifact = project_workspace
+    storyboard = workspace / "runs" / "episode_01" / "stages" / "storyboard"
+    storyboard.mkdir(parents=True, exist_ok=True)
+    (storyboard / "episode.json").write_text(
+        json.dumps(
+            {
+                "shots": [
+                    {"id": "shot_01", "index": 1, "dialogue": []},
+                    {"id": "shot_02", "index": 2, "dialogue": []},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = service.preview_impact(
+        "episode_01",
+        {
+            "stage": "edit",
+            "scope": "subtitle_style",
+            "dialogue_ids": [],
+            "character_ids": [],
+            "shot_ids": [],
+            "subtitle_style": True,
+        },
+    )
+
+    assert payload["summary"] == {
+        "schema_version": "motion-comic-factory.impact-summary.v1",
+        "regenerated_video_shot_ids": [],
+        "reused_video_shot_ids": ["shot_01", "shot_02"],
+        "regenerated_audio_item_ids": [],
+        "affected_stages": ["edit", "eval", "deliver"],
+        "estimate": {"available": False},
+    }
+    assert payload["preserved_artifacts"] == []
+    assert str(workspace) not in json.dumps(payload)
+
+
 def test_artifact_ids_are_stable_and_only_registered_files_are_readable(
     service: WorkbenchService,
     project_workspace: tuple[Path, Path],

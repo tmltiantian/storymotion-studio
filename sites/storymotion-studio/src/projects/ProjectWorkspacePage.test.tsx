@@ -10,7 +10,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -110,8 +110,24 @@ function impactFixture(overrides: Partial<ImpactPlan> = {}): ImpactPlan {
       { stage: "video", item_ids: ["shot_03"] },
       { stage: "edit", item_ids: ["timeline"] },
     ],
+    summary: {
+      schema_version: "motion-comic-factory.impact-summary.v1",
+      regenerated_video_shot_ids: ["shot_03"],
+      reused_video_shot_ids: [
+        "shot_01",
+        "shot_02",
+        "shot_04",
+        "shot_05",
+        "shot_06",
+        "shot_07",
+        "shot_08",
+      ],
+      regenerated_audio_item_ids: [],
+      affected_stages: ["storyboard", "video", "edit"],
+      estimate: { available: false },
+    },
     preserved_artifacts: Array.from(
-      { length: 7 },
+      { length: 14 },
       (_, index) => `art_reused_${index + 1}`,
     ),
     package_sha256: "b".repeat(64),
@@ -140,14 +156,22 @@ function workspaceApi(
   };
 }
 
-function renderWorkspace(
-  api: ProjectWorkspaceApi = workspaceApi(),
-  route = "/projects/episode_01/stages/storyboard",
-  strict = false,
-) {
-  const content = (
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="workspace-location">{location.pathname}</output>;
+}
+
+function WorkspaceTestTree({
+  api,
+  route,
+}: {
+  api: ProjectWorkspaceApi;
+  route: string;
+}) {
+  return (
     <div className="app-shell">
       <MemoryRouter initialEntries={[route]}>
+        <LocationProbe />
         <Routes>
           <Route
             path="/projects/:id"
@@ -161,6 +185,14 @@ function renderWorkspace(
       </MemoryRouter>
     </div>
   );
+}
+
+function renderWorkspace(
+  api: ProjectWorkspaceApi = workspaceApi(),
+  route = "/projects/episode_01/stages/storyboard",
+  strict = false,
+) {
+  const content = <WorkspaceTestTree api={api} route={route} />;
   return render(strict ? <StrictMode>{content}</StrictMode> : content);
 }
 
@@ -270,6 +302,7 @@ describe("project review workspace", () => {
     await user.click(screen.getByRole("button", { name: "确认通过" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("成果修订已变化");
+    expect(screen.getByRole("alert")).toHaveClass("message-neutral");
     expect(screen.getByText("修订 5")).toBeVisible();
     expect(screen.getByRole("button", { name: "确认通过" })).toBeDisabled();
   });
@@ -310,6 +343,7 @@ describe("project review workspace", () => {
 
     expect(await screen.findByText("将重做 1 个视频镜头")).toBeVisible();
     expect(screen.getByText("其他 7 个镜头继续复用")).toBeVisible();
+    expect(screen.getByText("保留 14 个现有文件")).toBeVisible();
     expect(screen.getByText("费用预估：后端未提供")).toBeVisible();
     expect(screen.getByText("视频 · shot_03")).toBeVisible();
     expect(api.applyImpact).not.toHaveBeenCalled();
@@ -323,6 +357,96 @@ describe("project review workspace", () => {
     expect(api.applyImpact).toHaveBeenCalledTimes(1);
     expect(api.requestStageChanges).not.toHaveBeenCalled();
     expect(onApplied).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows every video shot reused for a subtitle-only impact", async () => {
+    const api = workspaceApi();
+    vi.mocked(api.previewImpact).mockResolvedValue(impactFixture({
+      request: {
+        stage: "edit",
+        scope: "subtitle_style",
+        dialogue_ids: [],
+        character_ids: [],
+        shot_ids: [],
+        subtitle_style: true,
+      },
+      entries: [
+        { stage: "edit", item_ids: ["subtitles"] },
+        { stage: "eval", item_ids: ["full"] },
+        { stage: "deliver", item_ids: ["full"] },
+      ],
+      summary: {
+        schema_version: "motion-comic-factory.impact-summary.v1",
+        regenerated_video_shot_ids: [],
+        reused_video_shot_ids: Array.from(
+          { length: 8 },
+          (_, index) => `shot_${String(index + 1).padStart(2, "0")}`,
+        ),
+        regenerated_audio_item_ids: [],
+        affected_stages: ["edit", "eval", "deliver"],
+        estimate: { available: false },
+      },
+      preserved_artifacts: [],
+    }));
+    render(
+      <>
+        <div className="app-shell" />
+        <ImpactDialog
+          api={api}
+          projectId="episode_01"
+          request={{
+            stage: "edit",
+            scope: "subtitle_style",
+            dialogue_ids: [],
+            character_ids: [],
+            shot_ids: [],
+            subtitle_style: true,
+          }}
+          issueLabel="字幕样式有误"
+          description="字幕需要调整。"
+          returnFocusRef={{ current: document.createElement("button") }}
+          onClose={() => undefined}
+          onApplied={vi.fn().mockResolvedValue(undefined)}
+        />
+      </>,
+    );
+
+    expect(await screen.findByText("将重做 0 个视频镜头")).toBeVisible();
+    expect(screen.getByText("其他 8 个镜头继续复用")).toBeVisible();
+    expect(screen.getByText("保留 0 个现有文件")).toBeVisible();
+  });
+
+  it("discards a stale apply plan and requires a fresh preview", async () => {
+    const api = workspaceApi();
+    vi.mocked(api.applyImpact)
+      .mockRejectedValueOnce({ code: "stale_confirmation" })
+      .mockResolvedValueOnce(projectFixture());
+    const user = userEvent.setup();
+    render(
+      <>
+        <div className="app-shell" />
+        <ImpactDialog
+          api={api}
+          projectId="episode_01"
+          request={impactFixture().request}
+          issueLabel="动作不连贯"
+          description="第三镜动作接不上。"
+          returnFocusRef={{ current: document.createElement("button") }}
+          onClose={() => undefined}
+          onApplied={vi.fn().mockResolvedValue(undefined)}
+        />
+      </>,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "应用返修计划" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("影响计划已过期");
+    expect(screen.queryByRole("button", { name: "应用返修计划" })).not.toBeInTheDocument();
+    expect(api.applyImpact).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "重新预览" }));
+    await user.click(await screen.findByRole("button", { name: "应用返修计划" }));
+    expect(api.previewImpact).toHaveBeenCalledTimes(2);
+    expect(api.applyImpact).toHaveBeenCalledTimes(2);
   });
 
   it("refuses a mismatched or malformed impact preview without enabling apply", async () => {
@@ -409,6 +533,7 @@ describe("project review workspace", () => {
     await user.click(submit);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("项目正在处理");
+    expect(screen.getByRole("alert")).toHaveClass("message-operation");
     expect(submit).toBeEnabled();
     await user.click(submit);
     expect(api.requestStageChanges).toHaveBeenCalledTimes(2);
@@ -436,6 +561,169 @@ describe("project review workspace", () => {
     expect(screen.queryByRole("dialog", { name: "项目与阶段导航" })).not.toBeInTheDocument();
     expect(shell).not.toHaveAttribute("inert");
     expect(trigger).toHaveFocus();
+  });
+
+  it("keeps drawer containment stable across parent rerenders", async () => {
+    const api = workspaceApi();
+    const view = renderWorkspace(api);
+    const trigger = await screen.findByRole("button", {
+      name: "打开项目与阶段导航",
+    });
+    fireEvent.click(trigger);
+    const close = screen.getByRole("button", { name: "关闭项目与阶段导航" });
+    const focusSpy = vi.spyOn(trigger, "focus");
+    focusSpy.mockClear();
+
+    view.rerender(
+      <WorkspaceTestTree
+        api={api}
+        route="/projects/episode_01/stages/storyboard"
+      />,
+    );
+
+    expect(document.querySelector(".app-shell")).toHaveAttribute("inert");
+    expect(close).toHaveFocus();
+    expect(focusSpy).not.toHaveBeenCalled();
+  });
+
+  it("keeps impact containment while apply is busy and the parent rerenders", async () => {
+    let resolveApply: (project: ProjectDetail) => void = () => undefined;
+    const api = workspaceApi();
+    vi.mocked(api.applyImpact).mockImplementation(
+      () => new Promise((resolve) => { resolveApply = resolve; }),
+    );
+    const returnFocus = document.createElement("button");
+    const focusSpy = vi.spyOn(returnFocus, "focus");
+    const props = {
+      api,
+      projectId: "episode_01",
+      request: impactFixture().request,
+      issueLabel: "动作不连贯",
+      description: "第三镜动作接不上。",
+      returnFocusRef: { current: returnFocus },
+      onApplied: vi.fn().mockResolvedValue(undefined),
+    };
+    const view = render(
+      <>
+        <div className="app-shell" />
+        <ImpactDialog {...props} onClose={() => undefined} />
+      </>,
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "应用返修计划" }));
+    focusSpy.mockClear();
+
+    view.rerender(
+      <>
+        <div className="app-shell" />
+        <ImpactDialog {...props} onClose={() => window.clearTimeout(0)} />
+      </>,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "修改影响预览" });
+    expect(document.querySelector(".app-shell")).toHaveAttribute("inert");
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    expect(focusSpy).not.toHaveBeenCalled();
+    await act(async () => resolveApply(projectFixture()));
+  });
+
+  it("aborts impact previews and restores containment on StrictMode unmount", async () => {
+    const previewSignals: AbortSignal[] = [];
+    const api = workspaceApi();
+    vi.mocked(api.previewImpact).mockImplementation((_id, _request, signal) => {
+      if (signal) previewSignals.push(signal);
+      return new Promise(() => undefined);
+    });
+    const returnFocus = document.createElement("button");
+    const view = render(
+      <StrictMode>
+        <div className="app-shell" />
+        <ImpactDialog
+          api={api}
+          projectId="episode_01"
+          request={impactFixture().request}
+          issueLabel="动作不连贯"
+          description="第三镜动作接不上。"
+          returnFocusRef={{ current: returnFocus }}
+          onApplied={vi.fn().mockResolvedValue(undefined)}
+          onClose={() => undefined}
+        />
+      </StrictMode>,
+    );
+
+    await waitFor(() => expect(previewSignals.length).toBeGreaterThanOrEqual(2));
+    const mountedShell = document.querySelector<HTMLElement>(".app-shell");
+    expect(mountedShell).toHaveAttribute("inert");
+
+    view.unmount();
+
+    expect(previewSignals.every((signal) => signal.aborted)).toBe(true);
+    expect(mountedShell).not.toHaveAttribute("inert");
+    expect(mountedShell).not.toHaveAttribute("aria-hidden");
+  });
+
+  it("redirects an invalid stage route before requesting that stage", async () => {
+    const api = workspaceApi();
+    renderWorkspace(api, "/projects/episode_01/stages/not-a-stage");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-location")).toHaveTextContent(
+        "/projects/episode_01",
+      );
+    });
+    expect(api.getStage).not.toHaveBeenCalledWith(
+      "episode_01",
+      "not-a-stage",
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("does not let an old mutation completion disturb a newer route mutation", async () => {
+    let resolveOld: (stage: StageDetail) => void = () => undefined;
+    let resolveNew: (stage: StageDetail) => void = () => undefined;
+    let newSignal: AbortSignal | undefined;
+    const storyboard = stageFixture();
+    const assets = stageFixture({ stage: "assets", revision: 6 });
+    const api = workspaceApi(storyboard, projectFixture(storyboard));
+    vi.mocked(api.getProject).mockImplementation((_id, signal) => {
+      return Promise.resolve(
+        signal?.aborted ? projectFixture(storyboard) : projectFixture(assets),
+      );
+    });
+    vi.mocked(api.getProject).mockResolvedValueOnce(projectFixture(storyboard));
+    vi.mocked(api.getStage).mockImplementation((_id, stage) => {
+      return Promise.resolve(stage === "assets" ? assets : storyboard);
+    });
+    vi.mocked(api.approveStage)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
+      .mockImplementationOnce((_id, _stage, _request, signal) => {
+        newSignal = signal;
+        return new Promise((resolve) => { resolveNew = resolve; });
+      });
+    const user = userEvent.setup();
+    renderWorkspace(api);
+
+    await user.type(await screen.findByRole("textbox", { name: "确认说明" }), "确认分镜。" );
+    await user.click(screen.getByRole("button", { name: "确认通过" }));
+    await user.click(screen.getByRole("link", {
+      name: "04 资产：待开始；审核尚未开始",
+    }));
+    await screen.findByText("修订 6");
+    await user.type(screen.getByRole("textbox", { name: "确认说明" }), "确认资产。" );
+    const newApproval = screen.getByRole("button", { name: "确认通过" });
+    expect(newApproval).toBeEnabled();
+    await user.click(newApproval);
+    expect(api.approveStage).toHaveBeenCalledTimes(2);
+
+    await act(async () => resolveOld(storyboard));
+    expect(newSignal?.aborted).toBe(false);
+    expect(newApproval).toBeDisabled();
+    expect(api.getStage).toHaveBeenCalledWith(
+      "episode_01",
+      "assets",
+      expect.any(AbortSignal),
+    );
+    await act(async () => resolveNew(assets));
   });
 
   it("aborts current loads and a pending mutation on real unmount under StrictMode", async () => {

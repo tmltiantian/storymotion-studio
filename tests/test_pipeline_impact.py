@@ -19,6 +19,7 @@ from factory.pipeline_impact import (
     ChangeRequest,
     DEFAULT_DEPENDENCIES,
     apply_impact_plan,
+    build_impact_summary,
     load_active_repair_scope,
     preview_impact,
     registered_preserved_artifacts,
@@ -293,6 +294,51 @@ def test_apply_impact_keeps_unaffected_video_artifacts(tmp_path: Path) -> None:
     assert str(shot_02.resolve()) in video.artifacts
 
 
+def test_impact_summary_counts_reused_shots_without_sidecar_inflation(
+    tmp_path: Path,
+) -> None:
+    root = _project(tmp_path)
+    _register_video_artifacts(root)
+    plan = preview_impact(
+        root,
+        ChangeRequest(stage=StageName.STORYBOARD, shot_ids=("shot_03",)),
+    )
+
+    summary = build_impact_summary(root, plan)
+
+    assert len(plan.preserved_artifacts) == 4
+    assert summary.to_dict() == {
+        "schema_version": "motion-comic-factory.impact-summary.v1",
+        "regenerated_video_shot_ids": ["shot_03"],
+        "reused_video_shot_ids": ["shot_01", "shot_02"],
+        "regenerated_audio_item_ids": [],
+        "affected_stages": ["storyboard", "video", "edit"],
+        "estimate": {"available": False},
+    }
+
+
+def test_subtitle_impact_summary_reuses_every_authoritative_video_shot(
+    tmp_path: Path,
+) -> None:
+    root = _project(tmp_path)
+    plan = preview_impact(
+        root,
+        ChangeRequest(stage=StageName.EDIT, scope=ChangeScope.SUBTITLE_STYLE),
+    )
+
+    summary = build_impact_summary(root, plan)
+
+    assert plan.preserved_artifacts == ()
+    assert summary.to_dict() == {
+        "schema_version": "motion-comic-factory.impact-summary.v1",
+        "regenerated_video_shot_ids": [],
+        "reused_video_shot_ids": ["shot_01", "shot_02", "shot_03"],
+        "regenerated_audio_item_ids": [],
+        "affected_stages": ["edit", "eval", "deliver"],
+        "estimate": {"available": False},
+    }
+
+
 def test_stage_context_loads_applied_repair_scope(tmp_path: Path) -> None:
     root = _project(tmp_path)
     _register_video_artifacts(root)
@@ -388,7 +434,9 @@ def test_plan_io_rejects_project_ancestor_symlink_swap(
     project_parent = tmp_path / "project-parent"
     project_parent.mkdir()
     root = _project(project_parent)
-    request = ChangeRequest(stage=StageName.STORYBOARD, shot_ids=("shot_03",))
+    request = ChangeRequest(
+        stage=StageName.STORYBOARD, shot_ids=("shot_03",)
+    )
     plan = preview_impact(root, request) if operation == "load" else None
 
     outside_parent = tmp_path / "outside-parent"
@@ -480,9 +528,7 @@ def test_preview_and_apply_reject_symlinked_project_and_plan_paths(
     root = _project(tmp_path)
     alias = tmp_path / "project-alias"
     alias.symlink_to(root, target_is_directory=True)
-    request = ChangeRequest(
-        stage=StageName.STORYBOARD, shot_ids=("shot_03",)
-    )
+    request = ChangeRequest(stage=StageName.STORYBOARD, shot_ids=("shot_03",))
 
     with pytest.raises(ValueError, match="symlink"):
         preview_impact(alias, request)
