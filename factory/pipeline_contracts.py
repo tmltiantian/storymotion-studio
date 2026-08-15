@@ -177,6 +177,7 @@ class StageRecord:
     review_policy: ReviewPolicy = ReviewPolicy.AUTOMATIC
     review_state: ReviewState = ReviewState.NOT_READY
     review_blocks_progress: bool = False
+    review_transaction_id: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "stage", StageName(self.stage))
@@ -191,6 +192,7 @@ class StageRecord:
         object.__setattr__(
             self, "review_blocks_progress", bool(self.review_blocks_progress)
         )
+        object.__setattr__(self, "review_transaction_id", str(self.review_transaction_id))
         object.__setattr__(self, "artifacts", tuple(map(str, self.artifacts)))
         object.__setattr__(
             self, "blocked_reasons", tuple(map(str, self.blocked_reasons))
@@ -209,6 +211,7 @@ class StageRecord:
             "review_policy": self.review_policy.value,
             "review_state": self.review_state.value,
             "review_blocks_progress": self.review_blocks_progress,
+            "review_transaction_id": self.review_transaction_id,
         }
 
     @classmethod
@@ -252,6 +255,7 @@ class StageRecord:
             review_blocks_progress=bool(
                 value.get("review_blocks_progress", state is StageState.BLOCKED)
             ),
+            review_transaction_id=str(value.get("review_transaction_id", "")),
         )
 
 

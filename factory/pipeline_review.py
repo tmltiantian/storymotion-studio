@@ -93,6 +93,7 @@ class StageReview:
     note: str
     evidence: tuple[ArtifactRevision, ...]
     created_at: str
+    transaction_id: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "stage", StageName(self.stage))
@@ -100,6 +101,7 @@ class StageReview:
         if self.revision < 1:
             raise ValueError("review revision must be positive")
         object.__setattr__(self, "evidence", tuple(self.evidence))
+        object.__setattr__(self, "transaction_id", str(self.transaction_id))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -109,6 +111,7 @@ class StageReview:
             "note": self.note,
             "evidence": [artifact.to_dict() for artifact in self.evidence],
             "created_at": self.created_at,
+            "transaction_id": self.transaction_id,
         }
 
     @classmethod
@@ -122,6 +125,7 @@ class StageReview:
                 ArtifactRevision.from_dict(item) for item in value.get("evidence", ())
             ),
             created_at=str(value["created_at"]),
+            transaction_id=str(value.get("transaction_id", "")),
         )
 
 
@@ -296,12 +300,14 @@ def _artifact_integrity_issue(artifacts: tuple[ArtifactRevision, ...]) -> str:
     return ""
 
 
-def approve_stage_revision(
+def prepare_stage_review(
     project_dir: str | Path,
     stage: StageName,
     revision: int,
     note: str,
     evidence: tuple[str | Path, ...],
+    *,
+    transaction_id: str = "",
 ) -> StageReview:
     target = StageName(stage)
     revisions = _load_revisions(project_dir, target)
@@ -321,16 +327,63 @@ def approve_stage_revision(
         note=review_note,
         evidence=_snapshot_artifacts(evidence),
         created_at=datetime.now(timezone.utc).isoformat(),
+        transaction_id=transaction_id,
     )
+    return review
+
+
+def approve_stage_revision(
+    project_dir: str | Path,
+    stage: StageName,
+    revision: int,
+    note: str,
+    evidence: tuple[str | Path, ...],
+) -> StageReview:
+    review = prepare_stage_review(project_dir, stage, revision, note, evidence)
     write_json_atomic(
-        _review_path(project_dir, target),
+        _review_path(project_dir, review.stage),
         {"schema_version": REVIEW_SCHEMA, **review.to_dict()},
     )
     return review
 
 
+def _transaction_ownership_issue(
+    project_dir: str | Path, review: StageReview
+) -> str:
+    if not review.transaction_id:
+        return ""
+    package_path = Path(project_dir).expanduser().resolve() / "production_package.json"
+    package = _read_object(package_path)
+    raw_stages = package.get("stages")
+    if not isinstance(raw_stages, list):
+        return "Production package has no stage records"
+    record = next(
+        (
+            item
+            for item in raw_stages
+            if isinstance(item, dict) and item.get("stage") == review.stage.value
+        ),
+        None,
+    )
+    if record is None:
+        return "Production package has no matching stage record"
+    if str(record.get("review_transaction_id") or "") != review.transaction_id:
+        return "Review transaction does not own the package approval"
+    if int(record.get("revision")) != review.revision:
+        return "Review transaction does not match the package revision"
+    if record.get("review_state") != ReviewState.APPROVED.value:
+        return "Review transaction is not committed by the package"
+    return ""
+
+
 def validate_stage_review(project_dir: str | Path, stage: StageName) -> ReviewValidation:
     target = StageName(stage)
+    try:
+        from .pipeline_store import recover_review_transactions
+
+        recover_review_transactions(project_dir)
+    except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return ReviewValidation(False, f"Review transaction is unreadable: {exc}")
     path = _review_path(project_dir, target)
     if not path.exists():
         return ReviewValidation(False, "No approved review exists")
@@ -341,6 +394,9 @@ def validate_stage_review(project_dir: str | Path, stage: StageName) -> ReviewVa
         review = StageReview.from_dict(payload)
         if review.stage is not target or review.state is not ReviewState.APPROVED:
             return ReviewValidation(False, "Review record is not an approval")
+        ownership_issue = _transaction_ownership_issue(project_dir, review)
+        if ownership_issue:
+            return ReviewValidation(False, ownership_issue, review)
         revisions = _load_revisions(project_dir, target)
         if not revisions or review.revision != revisions[-1].number:
             return ReviewValidation(False, "Review does not apply to the latest revision")

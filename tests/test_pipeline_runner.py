@@ -216,6 +216,21 @@ def test_grouped_bundle_approval_updates_every_bound_revision(
     assert all(record.review_state is ReviewState.APPROVED for record in records)
     assert all(record.review_blocks_progress is False for record in records)
     assert all(record.revision == 1 for record in records)
+    transaction_ids = {record.review_transaction_id for record in records}
+    assert len(transaction_ids) == 1
+    assert "" not in transaction_ids
+    transaction_id = transaction_ids.pop()
+    persisted_reviews = [
+        json.loads(
+            (root / "reviews" / f"{stage.value}.review.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        for stage in grouped_stages
+    ]
+    assert {review["transaction_id"] for review in persisted_reviews} == {
+        transaction_id
+    }
 
 
 def test_grouped_bundle_rejects_partial_span_before_updating_reviews(

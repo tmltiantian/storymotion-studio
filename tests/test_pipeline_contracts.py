@@ -110,3 +110,4 @@ def test_legacy_passed_record_migrates_as_approved() -> None:
     assert record.review_state is ReviewState.APPROVED
     assert record.review_policy is ReviewPolicy.AUTOMATIC
     assert record.review_blocks_progress is False
+    assert record.review_transaction_id == ""
