@@ -9,6 +9,8 @@ from factory.pipeline_contracts import (
     ProductionPackage,
     ProjectMode,
     ProjectSpec,
+    ReviewPolicy,
+    ReviewState,
     StageName,
     StageRecord,
     StageState,
@@ -100,3 +102,11 @@ def test_production_package_reports_first_incomplete_stage(tmp_path: Path) -> No
 
     assert package.next_stage is StageName.STORYBOARD
     assert ProductionPackage.from_dict(package.to_dict()) == package
+
+
+def test_legacy_passed_record_migrates_as_approved() -> None:
+    record = StageRecord.from_dict({"stage": "script", "state": "passed"})
+
+    assert record.review_state is ReviewState.APPROVED
+    assert record.review_policy is ReviewPolicy.AUTOMATIC
+    assert record.review_blocks_progress is False
