@@ -21,6 +21,7 @@ class StageContext:
     stage: StageName
     step: ModeStep
     enable_live: bool
+    repair_scope: Mapping[str, tuple[str, ...]] | None = None
 
     def __post_init__(self) -> None:
         root = Path(self.project_dir).expanduser()
@@ -29,6 +30,19 @@ class StageContext:
         root.mkdir(parents=True, exist_ok=True)
         object.__setattr__(self, "project_dir", root.resolve())
         object.__setattr__(self, "stage", StageName(self.stage))
+        repair_scope = self.repair_scope
+        if repair_scope is None:
+            from .pipeline_store import load_active_repair_state
+
+            state = load_active_repair_state(root)
+            raw_scope = state.get("affected") or {}
+            if not isinstance(raw_scope, Mapping):
+                raise ValueError("Active repair scope is invalid")
+            repair_scope = {
+                str(stage): tuple(map(str, item_ids))
+                for stage, item_ids in raw_scope.items()
+            }
+        object.__setattr__(self, "repair_scope", dict(repair_scope))
 
     @property
     def stage_dir(self) -> Path:
