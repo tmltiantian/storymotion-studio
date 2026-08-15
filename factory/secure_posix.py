@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import os
 import stat
+from collections import deque
 from pathlib import Path
 from uuid import uuid4
 
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_MUTABLE_BY_OTHERS = stat.S_IWGRP | stat.S_IWOTH
+_MAX_SYMLINKS = 40
 
 
 def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
@@ -23,25 +26,107 @@ def _safe_parts(value: str | Path) -> tuple[str, ...]:
     return parts
 
 
-def _open_canonical_directory(path: Path) -> int:
+def _trusted_system_directory(metadata: os.stat_result) -> bool:
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid == 0
+        and not metadata.st_mode & _MUTABLE_BY_OTHERS
+    )
+
+
+def _trusted_system_symlink(
+    metadata: os.stat_result,
+    parent_metadata: os.stat_result,
+    *,
+    parent_path_is_trusted: bool,
+) -> bool:
+    return (
+        stat.S_ISLNK(metadata.st_mode)
+        and metadata.st_uid == 0
+        and parent_path_is_trusted
+        and _trusted_system_directory(parent_metadata)
+    )
+
+
+def _open_trusted_directory(path: Path, *, label: str) -> tuple[Path, int]:
     if not path.is_absolute() or path.anchor != os.sep:
-        raise ValueError("Canonical directory must be an absolute POSIX path")
-    descriptor = os.open(path.anchor, _DIRECTORY_FLAGS)
+        raise ValueError(f"{label} must be an absolute POSIX path")
+    descriptors = [os.open(os.sep, _DIRECTORY_FLAGS)]
+    canonical_parts: list[str] = []
+    root_metadata = os.fstat(descriptors[0])
+    trusted_paths = [_trusted_system_directory(root_metadata)]
+    pending = deque(path.parts[1:])
+    followed_symlinks = 0
     try:
-        for component in path.parts[1:]:
-            if component in {"", ".", ".."}:
-                raise ValueError("Canonical directory contains an unsafe component")
+        while pending:
+            component = pending.popleft()
+            if component in {"", "."}:
+                continue
+            if component == "..":
+                if len(descriptors) > 1:
+                    os.close(descriptors.pop())
+                    canonical_parts.pop()
+                    trusted_paths.pop()
+                continue
+            parent = descriptors[-1]
+            metadata = os.stat(component, dir_fd=parent, follow_symlinks=False)
+            if stat.S_ISLNK(metadata.st_mode):
+                if not _trusted_system_symlink(
+                    metadata,
+                    os.fstat(parent),
+                    parent_path_is_trusted=trusted_paths[-1],
+                ):
+                    raise ValueError(f"{label} has an untrusted symlink ancestor")
+                followed_symlinks += 1
+                if followed_symlinks > _MAX_SYMLINKS:
+                    raise ValueError(f"{label} has too many symlink ancestors")
+                target = os.readlink(component, dir_fd=parent)
+                confirmed = os.stat(
+                    component,
+                    dir_fd=parent,
+                    follow_symlinks=False,
+                )
+                if (
+                    not _same_file(metadata, confirmed)
+                    or metadata.st_uid != confirmed.st_uid
+                    or metadata.st_mode != confirmed.st_mode
+                ):
+                    raise ValueError(f"{label} symlink identity changed")
+                target_path = Path(target)
+                if target_path.is_absolute():
+                    while len(descriptors) > 1:
+                        os.close(descriptors.pop())
+                    canonical_parts.clear()
+                    trusted_paths[:] = [trusted_paths[0]]
+                    target_parts = target_path.parts[1:]
+                else:
+                    target_parts = target_path.parts
+                pending.extendleft(reversed(target_parts))
+                continue
             next_descriptor = os.open(
                 component,
                 _DIRECTORY_FLAGS,
-                dir_fd=descriptor,
+                dir_fd=parent,
             )
+            opened = os.fstat(next_descriptor)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or not stat.S_ISDIR(opened.st_mode)
+                or not _same_file(metadata, opened)
+            ):
+                os.close(next_descriptor)
+                raise ValueError(f"{label} identity changed")
+            descriptors.append(next_descriptor)
+            canonical_parts.append(component)
+            trusted_paths.append(
+                trusted_paths[-1] and _trusted_system_directory(opened)
+            )
+        canonical = Path(os.sep).joinpath(*canonical_parts)
+        descriptor = descriptors.pop()
+        return canonical, descriptor
+    finally:
+        for descriptor in descriptors:
             os.close(descriptor)
-            descriptor = next_descriptor
-        return descriptor
-    except Exception:
-        os.close(descriptor)
-        raise
 
 
 class AnchoredDirectory:
@@ -64,16 +149,18 @@ class AnchoredDirectory:
     @classmethod
     def open(cls, path: str | Path, *, label: str) -> AnchoredDirectory:
         supplied = Path(path).expanduser().absolute()
-        try:
-            final_component = os.stat(supplied, follow_symlinks=False)
-        except OSError as exc:
-            raise ValueError(f"{label} cannot be opened safely") from exc
-        if stat.S_ISLNK(final_component.st_mode):
-            raise ValueError(f"{label} cannot be a symlink")
-        canonical = Path(os.path.realpath(supplied))
         descriptor = -1
         try:
-            descriptor = _open_canonical_directory(canonical)
+            canonical, descriptor = _open_trusted_directory(supplied, label=label)
+            final_component = os.stat(supplied, follow_symlinks=False)
+        except OSError as exc:
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise ValueError(f"{label} cannot be opened safely") from exc
+        if stat.S_ISLNK(final_component.st_mode):
+            os.close(descriptor)
+            raise ValueError(f"{label} cannot be a symlink")
+        try:
             identity = os.fstat(descriptor)
             if (
                 not stat.S_ISDIR(final_component.st_mode)
@@ -140,12 +227,7 @@ class AnchoredDirectory:
             except ValueError:
                 continue
             return Path(*_safe_parts(relative))
-        canonical = Path(os.path.realpath(absolute))
-        try:
-            relative = canonical.relative_to(self.canonical_path)
-        except ValueError as exc:
-            raise ValueError(f"Path is outside {self.label}") from exc
-        return Path(*_safe_parts(relative))
+        raise ValueError(f"Path is outside {self.label}")
 
     def child(
         self,
