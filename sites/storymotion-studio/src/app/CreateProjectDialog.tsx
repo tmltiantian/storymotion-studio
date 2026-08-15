@@ -1,5 +1,13 @@
 import { AlertCircle, CheckCircle2, LoaderCircle, X } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type RefObject,
+} from "react";
+import { createPortal } from "react-dom";
 
 import type {
   ApprovalPreset,
@@ -24,19 +32,108 @@ function isBusyError(error: unknown): boolean {
   );
 }
 
+const focusableSelector = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+  '[contenteditable="true"]',
+].join(",");
+
+function focusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(focusableSelector)).filter(
+    (element) => !element.hidden && element.getAttribute("aria-hidden") !== "true",
+  );
+}
+
 export function CreateProjectDialog({
   createProject,
   onClose,
+  returnFocusRef,
 }: {
-  createProject: (request: CreateProjectRequest) => Promise<JobAccepted>;
+  createProject: (
+    request: CreateProjectRequest,
+    signal?: AbortSignal,
+  ) => Promise<JobAccepted>;
   onClose: () => void;
+  returnFocusRef: RefObject<HTMLButtonElement | null>;
 }) {
   const [mode, setMode] = useState<ProjectMode>("original");
   const [state, setState] = useState<CreateState>({ status: "idle" });
   const busy = state.status === "submitting";
+  const dialogRef = useRef<HTMLElement>(null);
+  const initialFocusRef = useRef<HTMLInputElement>(null);
+  const mountedRef = useRef(true);
+  const submissionGeneration = useRef(0);
+  const submissionController = useRef<AbortController | null>(null);
+  const submittingRef = useRef(false);
+
+  useLayoutEffect(() => {
+    const shell = document.querySelector<HTMLElement>(".app-shell");
+    const hadInert = shell?.hasAttribute("inert") ?? false;
+    const previousAriaHidden = shell?.getAttribute("aria-hidden") ?? null;
+    const returnFocusElement = returnFocusRef.current;
+
+    shell?.setAttribute("inert", "");
+    shell?.setAttribute("aria-hidden", "true");
+    initialFocusRef.current?.focus();
+
+    return () => {
+      mountedRef.current = false;
+      submissionGeneration.current += 1;
+      submissionController.current?.abort();
+      if (shell) {
+        if (!hadInert) shell.removeAttribute("inert");
+        if (previousAriaHidden === null) {
+          shell.removeAttribute("aria-hidden");
+        } else {
+          shell.setAttribute("aria-hidden", previousAriaHidden);
+        }
+      }
+      returnFocusElement?.focus();
+    };
+  }, [returnFocusRef]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (!submittingRef.current) onClose();
+        return;
+      }
+
+      if (event.key !== "Tab") return;
+      const focusable = focusableElements(dialog);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !dialog.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     const form = new FormData(event.currentTarget);
     const request: CreateProjectRequest = {
       project_id: String(form.get("project_id") ?? "").trim(),
@@ -54,22 +151,35 @@ export function CreateProjectDialog({
     };
 
     setState({ status: "submitting" });
+    const controller = new AbortController();
+    const generation = ++submissionGeneration.current;
+    submissionController.current = controller;
     try {
-      const job = await createProject(request);
-      setState({ status: "success", job });
+      const job = await createProject(request, controller.signal);
+      if (mountedRef.current && generation === submissionGeneration.current) {
+        submittingRef.current = false;
+        submissionController.current = null;
+        setState({ status: "success", job });
+      }
     } catch (error) {
-      setState({ status: isBusyError(error) ? "busy" : "error" });
+      if (mountedRef.current && generation === submissionGeneration.current) {
+        submittingRef.current = false;
+        submissionController.current = null;
+        setState({ status: isBusyError(error) ? "busy" : "error" });
+      }
     }
   }
 
-  return (
+  return createPortal(
     <div className="dialog-backdrop">
       <section
+        ref={dialogRef}
         className="create-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="create-project-title"
         aria-busy={busy}
+        tabIndex={-1}
       >
         <div className="dialog-heading">
           <div>
@@ -103,11 +213,11 @@ export function CreateProjectDialog({
             <label>
               <span>项目 ID</span>
               <input
+                ref={initialFocusRef}
                 name="project_id"
                 required
                 maxLength={128}
                 pattern="[A-Za-z0-9][A-Za-z0-9._:-]*"
-                autoFocus
               />
             </label>
             <label>
@@ -173,6 +283,7 @@ export function CreateProjectDialog({
           </form>
         )}
       </section>
-    </div>
+    </div>,
+    document.body,
   );
 }

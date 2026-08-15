@@ -201,6 +201,7 @@ function ProjectsPage({ api }: { api: ProjectsApi }) {
   const [filterOpen, setFilterOpen] = useState(false);
   const [filter, setFilter] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
+  const createTriggerRef = useRef<HTMLButtonElement>(null);
   const requestGeneration = useRef(0);
   const requestController = useRef<AbortController | null>(null);
 
@@ -292,7 +293,12 @@ function ProjectsPage({ api }: { api: ProjectsApi }) {
           >
             <RefreshCw aria-hidden="true" size={17} />
           </button>
-          <button className="command-button" type="button" onClick={() => setCreateOpen(true)}>
+          <button
+            ref={createTriggerRef}
+            className="command-button"
+            type="button"
+            onClick={() => setCreateOpen(true)}
+          >
             <Plus aria-hidden="true" size={17} />
             新建项目
           </button>
@@ -411,6 +417,7 @@ function ProjectsPage({ api }: { api: ProjectsApi }) {
         <CreateProjectDialog
           createProject={api.createProject}
           onClose={() => setCreateOpen(false)}
+          returnFocusRef={createTriggerRef}
         />
       )}
     </div>
