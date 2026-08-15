@@ -25,6 +25,7 @@ from factory.gateway_video_batch import (
     render_gateway_video_batch,
     render_gateway_video_single,
 )
+from factory.video_preflight import GenerationTokenError
 from tests.media_fixtures import VALID_VIDEO_MP4
 
 
@@ -1578,6 +1579,70 @@ def test_gateway_video_batch_resumes_from_persistent_job_task_without_clip_state
     assert resumed.submit_count == 0
     assert resumed.completed_task_ids == ["persisted-task-1"]
 
+
+def test_gateway_video_batch_clip_state_only_resume_polls_without_confirmation(
+    tmp_path,
+):
+    handoff, package, _, _ = _write_inputs(tmp_path)
+    report_path = tmp_path / "run/gateway_video_batch.json"
+
+    class InterruptedClient(FakeClient):
+        def complete_task(self, task, output_path, **kwargs):
+            self.complete_count += 1
+            raise GatewayVideoError("poll interrupted")
+
+    interrupted = InterruptedClient()
+    first = render_gateway_video_batch(
+        handoff,
+        package,
+        interrupted,
+        report_path,
+        limit=1,
+        allow_network=True,
+    )
+    assert first["success"] is False
+    assert interrupted.submit_count == 1
+
+    resumed = FakeClient()
+    resumed.requires_generation_confirmation = True
+    second = render_gateway_video_batch(
+        handoff,
+        package,
+        resumed,
+        report_path,
+        limit=1,
+        allow_network=True,
+        generation_token="",
+        provider_tasks={},
+    )
+
+    assert second["success"] is True
+    assert second["resumed_count"] == 1
+    assert resumed.submit_count == 0
+    assert resumed.completed_task_ids == ["task-1"]
+
+
+def test_gateway_video_batch_no_state_resume_cannot_submit_without_confirmation(
+    tmp_path,
+):
+    handoff, package, _, _ = _write_inputs(tmp_path)
+    client = FakeClient()
+    client.requires_generation_confirmation = True
+
+    with pytest.raises(GenerationTokenError, match="confirmation token"):
+        render_gateway_video_batch(
+            handoff,
+            package,
+            client,
+            tmp_path / "run/gateway_video_batch.json",
+            limit=1,
+            allow_network=True,
+            generation_token="",
+            provider_tasks={},
+        )
+
+    assert client.submit_count == 0
+    assert client.complete_count == 0
 
 def test_gateway_video_batch_selects_exact_requested_shot_ids(tmp_path):
     handoff, package, _, _ = _write_inputs(tmp_path)

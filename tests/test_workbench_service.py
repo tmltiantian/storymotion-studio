@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -60,6 +63,30 @@ def _video_request(project_id: str = "episode_01") -> dict[str, object]:
         "estimated_cost_yuan": 1.0,
         "price_yuan_per_second": 0.2,
     }
+
+
+def _failed_video_job(
+    manager: JobManager,
+    *,
+    request_project: str = "episode_01",
+    with_provider_task: bool = True,
+) -> str:
+    job_id = manager.submit(
+        project_id="episode_01",
+        operation="video_generate",
+        payload={"generation_request": _video_request(request_project)},
+    )
+    manager.start(job_id)
+    if with_provider_task:
+        manager.record_provider_task(
+            job_id,
+            shot_id="shot-1",
+            provider="gateway",
+            task_id="task-123",
+            status="submitted",
+        )
+    manager.fail(job_id, error="interrupted")
+    return job_id
 
 
 @pytest.fixture
@@ -489,32 +516,179 @@ def test_resume_does_not_dispatch_duplicate_for_live_worker(
     assert manager.get(submitted["job_id"]).status == "running"
 
 
-@pytest.mark.parametrize(
-    ("request_project", "with_provider_task"),
-    (("other_project", True), ("episode_01", False)),
-)
-def test_resume_validates_project_ownership_and_provider_state_before_mutation(
+def test_cross_process_worker_lease_blocks_duplicate_and_releases_on_sigkill(
     project_workspace: tuple[Path, Path],
-    request_project: str,
-    with_provider_task: bool,
+) -> None:
+    workspace, _artifact = project_workspace
+    manager = JobManager(workspace)
+    job_id = _failed_video_job(manager)
+    ready = workspace / "child-worker-ready"
+    script = """
+import sys
+import time
+from pathlib import Path
+
+from factory.pipeline_jobs import JobManager
+from factory.workbench_service import WorkbenchService
+
+workspace, job_id, ready = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+pending = []
+service = WorkbenchService(
+    workspace,
+    job_manager=JobManager(workspace),
+    provider_profile_loader=lambda: None,
+    video_renderer=lambda **_kwargs: {"success": True},
+    dispatch=pending.append,
+)
+service.resume_job(job_id)
+ready.write_text(str(len(pending)), encoding="utf-8")
+while True:
+    time.sleep(1)
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", script, str(workspace), job_id, str(ready)],
+        cwd=Path(__file__).parents[1],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    pending: list[object] = []
+    service = WorkbenchService(
+        workspace,
+        job_manager=manager,
+        provider_profile_loader=_provider_profile,
+        video_renderer=lambda **_kwargs: {"success": True},
+        dispatch=pending.append,
+    )
+    blocked = False
+    try:
+        deadline = time.monotonic() + 10
+        while (
+            not ready.exists() and child.poll() is None and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        if not ready.exists():
+            _stdout, stderr = child.communicate(timeout=1)
+            pytest.fail(f"child worker did not start: {stderr}")
+        assert ready.read_text(encoding="utf-8") == "1"
+
+        try:
+            service.resume_job(job_id)
+        except RuntimeError as exc:
+            blocked = "active worker" in str(exc)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=10)
+
+    if pending:
+        pending.pop()()
+    assert blocked is True
+    assert pending == []
+
+    service.resume_job(job_id)
+    assert len(pending) == 1
+    pending.pop()()
+    assert manager.get(job_id).status == "completed"
+
+
+@pytest.mark.parametrize("outcome", ("completed", "failed", "base_exception"))
+def test_worker_lease_releases_for_every_worker_exit(
+    project_workspace: tuple[Path, Path],
+    outcome: str,
 ) -> None:
     workspace, _artifact = project_workspace
     manager = JobManager(workspace)
     job_id = manager.submit(
         project_id="episode_01",
-        operation="video_generate",
-        payload={"generation_request": _video_request(request_project)},
+        operation="run_stage",
+        payload={},
     )
-    manager.start(job_id)
-    if with_provider_task:
-        manager.record_provider_task(
-            job_id,
-            shot_id="shot-1",
-            provider="gateway",
-            task_id="task-123",
-            status="submitted",
-        )
-    manager.fail(job_id, error="interrupted")
+    service = WorkbenchService(
+        workspace,
+        job_manager=manager,
+        provider_profile_loader=_provider_profile,
+        dispatch=lambda callback: callback(),
+    )
+
+    def operation():
+        if outcome == "failed":
+            raise RuntimeError("operation failed")
+        if outcome == "base_exception":
+            raise KeyboardInterrupt("operation interrupted")
+        return {"success": True}
+
+    if outcome == "base_exception":
+        with pytest.raises(KeyboardInterrupt):
+            service._execute_job(job_id, operation)
+    else:
+        service._execute_job(job_id, operation)
+
+    lease = JobManager(workspace).acquire_worker_lease(job_id)
+    lease.release()
+
+
+def test_worker_lease_releases_when_dispatch_fails(
+    project_workspace: tuple[Path, Path],
+) -> None:
+    workspace, _artifact = project_workspace
+    manager = JobManager(workspace)
+    job_id = manager.submit(
+        project_id="episode_01",
+        operation="run_stage",
+        payload={},
+    )
+
+    def fail_dispatch(_callback):
+        raise SystemExit("dispatcher stopped")
+
+    service = WorkbenchService(
+        workspace,
+        job_manager=manager,
+        provider_profile_loader=_provider_profile,
+        dispatch=fail_dispatch,
+    )
+
+    with pytest.raises(SystemExit):
+        service._execute_job(job_id, lambda: {"success": True})
+
+    lease = JobManager(workspace).acquire_worker_lease(job_id)
+    lease.release()
+
+
+def test_resume_allows_renderer_to_validate_clip_state_without_job_task_record(
+    project_workspace: tuple[Path, Path],
+) -> None:
+    workspace, _artifact = project_workspace
+    manager = JobManager(workspace)
+    job_id = _failed_video_job(manager, with_provider_task=False)
+    calls: list[dict[str, object]] = []
+
+    def render_video(**kwargs):
+        calls.append(kwargs)
+        return {"success": True, "resumed_count": 1}
+
+    service = WorkbenchService(
+        workspace,
+        job_manager=manager,
+        provider_profile_loader=_provider_profile,
+        video_renderer=render_video,
+        dispatch=lambda callback: callback(),
+    )
+
+    service.resume_job(job_id)
+
+    assert calls[0]["generation_token"] == ""
+    assert calls[0]["provider_tasks"] == {}
+    assert manager.get(job_id).status == "completed"
+
+
+def test_resume_validates_project_ownership_before_mutation(
+    project_workspace: tuple[Path, Path],
+) -> None:
+    workspace, _artifact = project_workspace
+    manager = JobManager(workspace)
+    job_id = _failed_video_job(manager, request_project="other_project")
     record_path = manager.jobs_dir / f"{job_id}.json"
     before = record_path.read_bytes()
     service = WorkbenchService(
@@ -524,7 +698,7 @@ def test_resume_validates_project_ownership_and_provider_state_before_mutation(
         dispatch=lambda callback: callback(),
     )
 
-    with pytest.raises(ValueError, match="Stored generation|provider task"):
+    with pytest.raises(ValueError, match="Stored generation"):
         service.resume_job(job_id)
 
     assert record_path.read_bytes() == before
@@ -581,6 +755,57 @@ def test_review_and_repair_mutations_respect_persistent_project_owner(
             operation()
 
     assert called == []
+
+
+@pytest.mark.parametrize("fatal_error", (KeyboardInterrupt, SystemExit))
+def test_reservation_baseexception_releases_project_and_reraises(
+    service: WorkbenchService,
+    fatal_error: type[BaseException],
+) -> None:
+    def interrupt():
+        raise fatal_error("mutation interrupted")
+
+    with pytest.raises(fatal_error, match="mutation interrupted"):
+        service._reserved_mutation("episode_01", "request_changes", interrupt)
+
+    assert (
+        service._reserved_mutation(
+            "episode_01",
+            "request_changes",
+            lambda: "next mutation",
+        )
+        == "next mutation"
+    )
+
+
+def test_reservation_fallback_releases_project_when_failure_persistence_errors(
+    service: WorkbenchService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fail_calls = 0
+
+    def interrupted_failure_persistence(*_args, **_kwargs):
+        nonlocal fail_calls
+        fail_calls += 1
+        raise OSError("failure persistence interrupted")
+
+    monkeypatch.setattr(service.jobs, "fail", interrupted_failure_persistence)
+
+    def interrupt():
+        raise KeyboardInterrupt("mutation interrupted")
+
+    with pytest.raises(KeyboardInterrupt, match="mutation interrupted"):
+        service._reserved_mutation("episode_01", "apply_impact", interrupt)
+
+    assert fail_calls == 1
+    assert (
+        service._reserved_mutation(
+            "episode_01",
+            "request_changes",
+            lambda: "next mutation",
+        )
+        == "next mutation"
+    )
 
 
 def test_exact_loaded_secrets_are_redacted_from_status_and_errors(
