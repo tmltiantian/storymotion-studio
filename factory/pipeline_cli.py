@@ -202,7 +202,9 @@ def _migrate_command(args: argparse.Namespace) -> dict[str, Any]:
 
 def _run_result(result) -> dict[str, Any]:
     next_stage = result.next_stage.value if result.next_stage else "complete"
-    if result.success:
+    if result.review_in_progress:
+        run_state = "review_in_progress"
+    elif result.success:
         run_state = "complete" if result.next_stage is None else "paused"
     else:
         run_state = "failed" if result.stopped_state is StageState.FAILED else "blocked"
@@ -212,6 +214,10 @@ def _run_result(result) -> dict[str, Any]:
         "stopped_at": result.stopped_at.value if result.stopped_at else None,
         "next_stage": next_stage,
         "completed_stages": [stage.value for stage in result.completed_stages],
+        "review_in_progress": result.review_in_progress,
+        "required_action": (
+            "retry_review_validation" if result.review_in_progress else None
+        ),
     }
 
 

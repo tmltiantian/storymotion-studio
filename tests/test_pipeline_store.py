@@ -23,6 +23,8 @@ from factory.pipeline_store import (
     invalidate_stage_and_downstream,
     load_production_package,
     load_project_spec,
+    recover_review_transactions,
+    request_stage_changes,
     update_stage,
 )
 from factory.pipeline_review import ApprovalPreset, ReviewConfig, validate_stage_review
@@ -165,6 +167,68 @@ def test_grouped_approval_retry_recovers_interrupted_transaction(
     assert not any(transactions.iterdir())
 
 
+def test_grouped_approval_cleanup_interruption_leaves_recoverable_tombstone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_dir, grouped_stages = _grouped_review_project(tmp_path)
+    evidence = tmp_path / "group-review.json"
+    evidence.write_text('{"approved":true}', encoding="utf-8")
+
+    class SimulatedProcessInterruption(BaseException):
+        pass
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(
+            pipeline_store,
+            "_delete_review_transaction_tombstone",
+            lambda _path: (_ for _ in ()).throw(SimulatedProcessInterruption),
+            raising=False,
+        )
+        with pytest.raises(SimulatedProcessInterruption):
+            approve_review_bundle(
+                project_dir,
+                grouped_stages,
+                note="group approved",
+                evidence=(evidence,),
+            )
+
+    transactions = project_dir / "reviews" / ".transactions"
+    tombstones = tuple(transactions.iterdir())
+    assert len(tombstones) == 1
+    assert tombstones[0].name.startswith(".")
+    assert tombstones[0].name.endswith(".tombstone")
+
+    assert validate_stage_review(project_dir, StageName.SCRIPT).valid is True
+    assert not any(transactions.iterdir())
+
+    policies = {stage: ReviewPolicy.AUTOMATIC for stage in PIPELINE_STAGES}
+    policies[StageName.VIDEO] = ReviewPolicy.MANUAL
+
+    def execute(context):
+        artifact = context.stage_dir / f"{context.stage.value}.json"
+        artifact.write_text("{}", encoding="utf-8")
+        return StageExecution.passed(
+            executor=context.step.executor_id,
+            artifacts=(artifact,),
+        )
+
+    result = resume_pipeline(
+        project_dir,
+        through=StageName.VIDEO,
+        executor=execute,
+        review_config=ReviewConfig(ApprovalPreset.QUICK, policies),
+    )
+    assert result.next_stage is StageName.VIDEO
+    package = approve_stage(
+        project_dir,
+        StageName.VIDEO,
+        revision=1,
+        note="video approved",
+        evidence=(evidence,),
+    )
+    assert package.stages[PIPELINE_STAGES.index(StageName.VIDEO)].review_state is ReviewState.APPROVED
+
+
 def test_grouped_approval_rejects_concurrent_approver(
     tmp_path: Path,
 ) -> None:
@@ -212,6 +276,7 @@ def test_review_validation_rejects_approval_in_progress_before_journal_publish(
         validation = validate_stage_review(project_dir, StageName.SCRIPT)
 
     assert validation.valid is False
+    assert validation.busy is True
     assert "already in progress" in validation.reason
 
 
@@ -347,6 +412,109 @@ def test_grouped_approval_discards_failed_journal_publication(
     assert all(
         record.review_state is ReviewState.APPROVED for record in package.stages[1:5]
     )
+
+
+def test_request_changes_recovers_interrupted_committed_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_dir, grouped_stages = _grouped_review_project(tmp_path)
+    evidence = tmp_path / "group-review.json"
+    evidence.write_text('{"approved":true}', encoding="utf-8")
+
+    class SimulatedProcessInterruption(BaseException):
+        pass
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(
+            pipeline_store,
+            "_publish_staged_review",
+            lambda *_args: (_ for _ in ()).throw(SimulatedProcessInterruption),
+        )
+        with pytest.raises(SimulatedProcessInterruption):
+            approve_review_bundle(
+                project_dir,
+                grouped_stages,
+                note="group approved",
+                evidence=(evidence,),
+            )
+
+    package = request_stage_changes(
+        project_dir,
+        StageName.SCRIPT,
+        revision=1,
+        reason="revise the opening",
+    )
+
+    assert package.stages[1].state is StageState.PASSED
+    assert package.stages[1].review_state is ReviewState.CHANGES_REQUESTED
+    assert all(
+        (project_dir / "reviews" / f"{stage.value}.review.json").is_file()
+        for stage in grouped_stages
+    )
+    transactions = project_dir / "reviews" / ".transactions"
+    assert not any(transactions.iterdir())
+
+
+def test_request_changes_rejects_concurrent_approval(
+    tmp_path: Path,
+) -> None:
+    project_dir, _grouped_stages = _grouped_review_project(tmp_path)
+
+    with (project_dir / ".approval.lock").open("a+", encoding="utf-8") as held_lock:
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(RuntimeError, match="approval.*already in progress"):
+            request_stage_changes(
+                project_dir,
+                StageName.SCRIPT,
+                revision=1,
+                reason="revise the opening",
+            )
+
+    package = load_production_package(project_dir)
+    assert package.stages[1].review_state is ReviewState.AWAITING_REVIEW
+    assert not (project_dir / "reviews" / "script.review.json").exists()
+
+
+def test_v1_recovery_does_not_commit_a_stale_approved_revision(
+    tmp_path: Path,
+) -> None:
+    project_dir, _grouped_stages = _grouped_review_project(tmp_path)
+    update_stage(
+        project_dir,
+        StageName.SCRIPT,
+        StageState.PASSED,
+        executor="original.script",
+        input_signature="script-signature",
+        artifacts=load_production_package(project_dir).stages[1].artifacts,
+        revision=1,
+        review_policy=ReviewPolicy.GROUPED,
+        review_state=ReviewState.APPROVED,
+        review_blocks_progress=False,
+    )
+    review_path = project_dir / "reviews" / "script.review.json"
+    review_path.write_text('{"stale":true}', encoding="utf-8")
+    transaction = project_dir / "reviews" / ".transactions" / "legacy-stale"
+    transaction.mkdir(parents=True)
+    (transaction / "transaction.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "motion-comic-factory.review-transaction.v1",
+                "entries": [
+                    {
+                        "stage": StageName.SCRIPT.value,
+                        "revision": 2,
+                        "had_review": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    recover_review_transactions(project_dir)
+
+    assert not review_path.exists()
+    assert not transaction.exists()
 
 
 def test_create_project_writes_spec_and_full_pending_package(tmp_path: Path) -> None:
@@ -538,6 +706,39 @@ def test_approve_stage_requires_bound_evidence_and_marks_stage_passed(
     assert record.review_state is ReviewState.APPROVED
     assert Path(record.artifacts[0]).name == "eval.approval.json"
     assert record.artifacts[1] == str(evidence.resolve())
+
+
+def test_legacy_blocked_approval_rejects_concurrent_approval(
+    tmp_path: Path,
+) -> None:
+    project_dir = tmp_path / "projects" / "episode_01"
+    create_project(project_dir, _spec(tmp_path))
+    for stage in PIPELINE_STAGES[:3]:
+        update_stage(project_dir, stage, StageState.PASSED, executor="fixture")
+    prepared = tmp_path / "prepared-assets.json"
+    prepared.write_text("{}", encoding="utf-8")
+    update_stage(
+        project_dir,
+        StageName.ASSETS,
+        StageState.BLOCKED,
+        executor="generic.assets",
+        artifacts=(str(prepared),),
+    )
+    evidence = tmp_path / "asset-review.json"
+    evidence.write_text('{"approved":true}', encoding="utf-8")
+    before = load_production_package(project_dir)
+
+    with (project_dir / ".approval.lock").open("a+", encoding="utf-8") as held_lock:
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(RuntimeError, match="approval.*already in progress"):
+            approve_stage(
+                project_dir,
+                StageName.ASSETS,
+                note="assets approved",
+                evidence=(evidence,),
+            )
+
+    assert load_production_package(project_dir) == before
 
 
 def test_approve_stage_preserves_and_hashes_prepared_stage_artifacts(

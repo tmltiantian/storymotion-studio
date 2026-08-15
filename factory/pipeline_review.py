@@ -134,6 +134,7 @@ class ReviewValidation:
     valid: bool
     reason: str = ""
     review: StageReview | None = None
+    busy: bool = False
 
 
 @dataclass(frozen=True)
@@ -379,9 +380,14 @@ def _transaction_ownership_issue(
 def validate_stage_review(project_dir: str | Path, stage: StageName) -> ReviewValidation:
     target = StageName(stage)
     try:
-        from .pipeline_store import recover_review_transactions
+        from .pipeline_store import (
+            ApprovalInProgressError,
+            recover_review_transactions,
+        )
 
         recover_review_transactions(project_dir)
+    except ApprovalInProgressError as exc:
+        return ReviewValidation(False, str(exc), busy=True)
     except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return ReviewValidation(False, f"Review transaction is unreadable: {exc}")
     path = _review_path(project_dir, target)
