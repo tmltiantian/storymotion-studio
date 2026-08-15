@@ -22,6 +22,11 @@ from .gateway_video import (
     prepare_gateway_video_output_target,
     validate_gateway_video_generation_settings,
 )
+from .video_preflight import (
+    GenerationTokenError,
+    VideoGenerationRequest,
+    consume_generation_token,
+)
 
 
 class GatewayVideoBatchError(RuntimeError):
@@ -919,6 +924,10 @@ def _execute_gateway_video_jobs(
     audio: str | Path | None = None,
     reference_audio: dict[str, str] | None = None,
     report_sanitizer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    project_dir: str | Path | None = None,
+    generation_token: str = "",
+    generation_request: VideoGenerationRequest | None = None,
+    provider_task_persisted: Callable[[str, str, str], None] | None = None,
 ) -> dict[str, Any]:
     _validate_replacement_mode(
         overwrite=overwrite,
@@ -927,6 +936,31 @@ def _execute_gateway_video_jobs(
     if not allow_network:
         report["blocked_reasons"] = ["Live gateway video generation is disabled."]
         return _write_report(destination, report, report_sanitizer)
+
+    confirmation_required = bool(
+        getattr(client, "requires_generation_confirmation", False)
+    )
+    generation_authorized = False
+
+    def authorize_fresh_submit() -> None:
+        nonlocal generation_authorized
+        if not confirmation_required or generation_authorized:
+            return
+        if project_dir is None or not generation_token or generation_request is None:
+            raise GenerationTokenError(
+                "Paid video generation requires a confirmation token."
+            )
+        requested_jobs = tuple(
+            job.shot_id
+            for job in jobs
+            if not repair_shot_ids or job.shot_id in set(repair_shot_ids)
+        )
+        if requested_jobs != generation_request.shot_ids:
+            raise GenerationTokenError(
+                "Generation confirmation does not match requested shots."
+            )
+        consume_generation_token(project_dir, generation_token, generation_request)
+        generation_authorized = True
 
     repair_targets = set(repair_shot_ids)
     if repair_targets:
@@ -1121,6 +1155,7 @@ def _execute_gateway_video_jobs(
                     overwrite=True,
                 )
             else:
+                authorize_fresh_submit()
                 submission = client.prepare_submission(
                     job.prompt,
                     images=list(job.images),
@@ -1200,6 +1235,12 @@ def _execute_gateway_video_jobs(
                         job_reference_audio or reference_audio or {},
                     ),
                 )
+                if provider_task_persisted is not None and task.task_id:
+                    provider_task_persisted(
+                        job.shot_id,
+                        task.task_id,
+                        task.status,
+                    )
                 result = client.complete_task(
                     task,
                     job.output_path,
@@ -1273,6 +1314,10 @@ def render_gateway_video_batch(
     overwrite: bool = False,
     replace_stale: bool = False,
     repair_shot_ids: tuple[str, ...] = (),
+    project_dir: str | Path | None = None,
+    generation_token: str = "",
+    generation_request: VideoGenerationRequest | None = None,
+    provider_task_persisted: Callable[[str, str, str], None] | None = None,
 ) -> dict[str, Any]:
     _validate_replacement_mode(
         overwrite=overwrite,
@@ -1344,6 +1389,10 @@ def render_gateway_video_batch(
         overwrite=overwrite,
         replace_stale=replace_stale,
         repair_shot_ids=normalized_repair_ids,
+        project_dir=project_dir,
+        generation_token=generation_token,
+        generation_request=generation_request,
+        provider_task_persisted=provider_task_persisted,
     )
 
 
@@ -1363,6 +1412,10 @@ def render_gateway_video_single(
     overwrite: bool = False,
     replace_stale: bool = False,
     report_sanitizer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    project_dir: str | Path | None = None,
+    generation_token: str = "",
+    generation_request: VideoGenerationRequest | None = None,
+    provider_task_persisted: Callable[[str, str, str], None] | None = None,
 ) -> dict[str, Any]:
     _validate_replacement_mode(
         overwrite=overwrite,
@@ -1389,8 +1442,14 @@ def render_gateway_video_single(
         image_values_list.append(str(source))
         image_roles.append(str(role))
     image_values = tuple(image_values_list)
+    single_shot_id = (
+        generation_request.shot_ids[0]
+        if generation_request is not None
+        and len(generation_request.shot_ids) == 1
+        else "single"
+    )
     job = GatewayVideoJob(
-        shot_id="single",
+        shot_id=single_shot_id,
         index=1,
         prompt=normalized_prompt,
         images=image_values,
@@ -1446,6 +1505,10 @@ def render_gateway_video_single(
         audio=audio,
         reference_audio=reference_audio,
         report_sanitizer=report_sanitizer,
+        project_dir=project_dir,
+        generation_token=generation_token,
+        generation_request=generation_request,
+        provider_task_persisted=provider_task_persisted,
     )
     if result["errors"]:
         result["error"] = str(result["errors"][0].get("error") or "")
