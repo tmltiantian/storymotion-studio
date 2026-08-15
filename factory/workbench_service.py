@@ -27,6 +27,7 @@ from .pipeline_impact import (
     ChangeRequest,
     ImpactPlan,
     apply_impact_plan,
+    build_impact_summary,
     preview_impact,
 )
 from .pipeline_jobs import JobEvent, JobManager, JobRecord, JobWorkerLease
@@ -858,6 +859,10 @@ class WorkbenchService:
 
     def _impact_public(self, project_id: str, plan: ImpactPlan) -> dict[str, Any]:
         payload = plan.to_dict()
+        payload["summary"] = build_impact_summary(
+            self._project_dir(project_id),
+            plan,
+        ).to_dict()
         payload["preserved_artifacts"] = [
             ref.artifact_id
             for path in plan.preserved_artifacts

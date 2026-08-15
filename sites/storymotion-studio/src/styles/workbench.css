@@ -1208,7 +1208,18 @@
 
 .workspace-message svg {
   flex: 0 0 auto;
+}
+
+.workspace-message.message-error svg {
   color: var(--failed);
+}
+
+.workspace-message.message-operation svg {
+  color: var(--operation);
+}
+
+.workspace-message.message-neutral svg {
+  color: var(--steel);
 }
 
 .artifact-workspace {

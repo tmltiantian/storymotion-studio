@@ -15,7 +15,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { Link, useParams } from "react-router";
+import { Link, Navigate, useParams } from "react-router";
 
 import type { ApiClient } from "../api/client";
 import type {
@@ -55,6 +55,20 @@ type ImpactDraft = {
   trigger: HTMLButtonElement;
 };
 
+type MessageTone = "error" | "neutral" | "operation";
+
+type WorkspaceMessage = {
+  text: string;
+  tone: MessageTone;
+};
+
+type MutationOwner = {
+  token: symbol;
+  routeGeneration: number;
+  routeIdentity: string;
+  controller: AbortController;
+};
+
 const STAGE_SET = new Set<StageName>(STAGES.map((item) => item.name));
 
 function isStageName(value: string | undefined): value is StageName {
@@ -67,11 +81,15 @@ function errorCode(error: unknown): string {
     : "";
 }
 
-function mutationMessage(error: unknown): string {
+function mutationMessage(error: unknown): WorkspaceMessage {
   const code = errorCode(error);
-  if (code === "busy") return "项目正在处理，当前操作完成后再试。";
-  if (code === "stale_confirmation") return "成果修订已变化，已重新载入当前版本。";
-  return "审核操作未能完成，请检查制作服务后重试。";
+  if (code === "busy") {
+    return { text: "项目正在处理，当前操作完成后再试。", tone: "operation" };
+  }
+  if (code === "stale_confirmation") {
+    return { text: "成果修订已变化，已重新载入当前版本。", tone: "neutral" };
+  }
+  return { text: "审核操作未能完成，请检查制作服务后重试。", tone: "error" };
 }
 
 function ArtifactWorkspace({ stage }: { stage: StageDetail }) {
@@ -197,7 +215,7 @@ function NavigationDrawer({
 export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
   const { id, stage: routeStage } = useParams();
   const [state, setState] = useState<WorkspaceState>({ status: "loading" });
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState<WorkspaceMessage | null>(null);
   const [mutationPending, setMutationPending] = useState(false);
   const [impactDraft, setImpactDraft] = useState<ImpactDraft | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -205,14 +223,17 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
   const impactTriggerRef = useRef<HTMLElement>(null);
   const loadGeneration = useRef(0);
   const loadController = useRef<AbortController | null>(null);
-  const mutationController = useRef<AbortController | null>(null);
-  const mutationLock = useRef(false);
+  const mutationOwnerRef = useRef<MutationOwner | null>(null);
+  const routeGenerationRef = useRef(0);
+  const routeIdentityRef = useRef("");
   const mountedRef = useRef(true);
 
+  const invalidStageRoute = routeStage !== undefined && !isStageName(routeStage);
   const selectedRouteStage = isStageName(routeStage) ? routeStage : undefined;
+  const routeIdentity = `${id ?? ""}:${routeStage ?? ""}`;
 
   const load = useCallback(async (showLoading = true) => {
-    if (!id) {
+    if (!id || invalidStageRoute) {
       setState({ status: "error" });
       return;
     }
@@ -244,48 +265,79 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
       if (!mountedRef.current || generation !== loadGeneration.current) return;
       setState({ status: errorCode(error) === "busy" ? "busy" : "error" });
     }
-  }, [api, id, selectedRouteStage]);
+  }, [api, id, invalidStageRoute, selectedRouteStage]);
 
   useEffect(() => {
     mountedRef.current = true;
+    const routeGeneration = ++routeGenerationRef.current;
+    routeIdentityRef.current = routeIdentity;
     let active = true;
     queueMicrotask(() => {
-      if (active) void load(false);
+      if (!active) return;
+      setMutationPending(false);
+      setMessage(null);
+      setImpactDraft(null);
+      setDrawerOpen(false);
+      if (!invalidStageRoute) void load(false);
     });
     return () => {
       active = false;
       mountedRef.current = false;
       loadGeneration.current += 1;
       loadController.current?.abort();
-      mutationController.current?.abort();
+      const owner = mutationOwnerRef.current;
+      if (owner?.routeGeneration === routeGeneration) {
+        owner.controller.abort();
+        mutationOwnerRef.current = null;
+      }
     };
-  }, [load]);
+  }, [invalidStageRoute, load, routeIdentity]);
 
   const runMutation = useCallback(async (
     operation: (signal: AbortSignal) => Promise<unknown>,
   ) => {
-    if (mutationLock.current) return;
-    mutationLock.current = true;
+    if (mutationOwnerRef.current) return;
+    const owner: MutationOwner = {
+      token: Symbol("workspace-mutation"),
+      routeGeneration: routeGenerationRef.current,
+      routeIdentity: routeIdentityRef.current,
+      controller: new AbortController(),
+    };
+    mutationOwnerRef.current = owner;
     setMutationPending(true);
-    setMessage("");
-    const controller = new AbortController();
-    mutationController.current = controller;
+    setMessage(null);
+    const isCurrentOwner = () => (
+      mountedRef.current &&
+      mutationOwnerRef.current?.token === owner.token &&
+      routeGenerationRef.current === owner.routeGeneration &&
+      routeIdentityRef.current === owner.routeIdentity
+    );
     try {
-      await operation(controller.signal);
-      if (!mountedRef.current) return;
+      await operation(owner.controller.signal);
+      if (!isCurrentOwner()) return;
       await load(false);
+      if (!isCurrentOwner()) return;
     } catch (error) {
-      if (!mountedRef.current || controller.signal.aborted) return;
+      if (!isCurrentOwner() || owner.controller.signal.aborted) return;
       if (errorCode(error) === "stale_confirmation") await load(false);
-      if (mountedRef.current) setMessage(mutationMessage(error));
+      if (isCurrentOwner()) setMessage(mutationMessage(error));
     } finally {
-      if (mountedRef.current) {
-        mutationLock.current = false;
-        mutationController.current = null;
-        setMutationPending(false);
+      if (mutationOwnerRef.current?.token === owner.token) {
+        mutationOwnerRef.current = null;
+        if (
+          mountedRef.current &&
+          routeGenerationRef.current === owner.routeGeneration &&
+          routeIdentityRef.current === owner.routeIdentity
+        ) {
+          setMutationPending(false);
+        }
       }
     }
   }, [load]);
+
+  if (invalidStageRoute) {
+    return <Navigate to={id ? `/projects/${encodeURIComponent(id)}` : "/projects"} replace />;
+  }
 
   if (
     state.status === "loading" ||
@@ -351,9 +403,9 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
 
       <div className="workspace-artifact-column">
         {message ? (
-          <div className="workspace-message" role="alert">
+          <div className={`workspace-message message-${message.tone}`} role="alert">
             <AlertCircle aria-hidden="true" size={16} />
-            <span>{message}</span>
+            <span>{message.text}</span>
           </div>
         ) : null}
         <ArtifactWorkspace stage={stage} />

@@ -119,11 +119,21 @@ export interface ImpactEntry {
   item_ids: string[];
 }
 
+export interface ImpactSummary {
+  schema_version: "motion-comic-factory.impact-summary.v1";
+  regenerated_video_shot_ids: string[];
+  reused_video_shot_ids: string[];
+  regenerated_audio_item_ids: string[];
+  affected_stages: StageName[];
+  estimate: { available: false };
+}
+
 export interface ImpactPlan {
   schema_version: "motion-comic-factory.impact-plan.v1";
   plan_id: string;
   request: Required<ImpactRequest>;
   entries: ImpactEntry[];
+  summary: ImpactSummary;
   preserved_artifacts: string[];
   package_sha256: string;
 }

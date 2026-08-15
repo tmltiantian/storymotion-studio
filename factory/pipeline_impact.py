@@ -24,6 +24,7 @@ from .pipeline_store import (
 
 
 IMPACT_PLAN_SCHEMA = "motion-comic-factory.impact-plan.v1"
+IMPACT_SUMMARY_SCHEMA = "motion-comic-factory.impact-summary.v1"
 
 
 class ChangeScope(str, Enum):
@@ -207,6 +208,52 @@ class ImpactPlan:
         )
 
 
+@dataclass(frozen=True)
+class ImpactSummary:
+    regenerated_video_shot_ids: tuple[str, ...]
+    reused_video_shot_ids: tuple[str, ...]
+    regenerated_audio_item_ids: tuple[str, ...]
+    affected_stages: tuple[StageName, ...]
+    estimate_available: bool = False
+    schema_version: str = IMPACT_SUMMARY_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema_version != IMPACT_SUMMARY_SCHEMA:
+            raise ValueError(
+                f"Unsupported impact summary schema: {self.schema_version}"
+            )
+        object.__setattr__(
+            self,
+            "regenerated_video_shot_ids",
+            _ids(self.regenerated_video_shot_ids),
+        )
+        object.__setattr__(
+            self,
+            "reused_video_shot_ids",
+            _ids(self.reused_video_shot_ids),
+        )
+        object.__setattr__(
+            self,
+            "regenerated_audio_item_ids",
+            _ids(self.regenerated_audio_item_ids),
+        )
+        object.__setattr__(
+            self,
+            "affected_stages",
+            tuple(StageName(stage) for stage in self.affected_stages),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "regenerated_video_shot_ids": list(self.regenerated_video_shot_ids),
+            "reused_video_shot_ids": list(self.reused_video_shot_ids),
+            "regenerated_audio_item_ids": list(self.regenerated_audio_item_ids),
+            "affected_stages": [stage.value for stage in self.affected_stages],
+            "estimate": {"available": self.estimate_available},
+        }
+
+
 def _path_uses_symlink(path: Path) -> bool:
     expanded = path.expanduser()
     current = expanded if expanded.is_absolute() else Path.cwd() / expanded
@@ -265,6 +312,48 @@ def _shot_rows(episode: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
     if not all(shot_ids) or len(set(shot_ids)) != len(shot_ids):
         raise ValueError("Storyboard shot IDs must be non-empty and unique")
     return tuple(ordered)
+
+
+def build_impact_summary(
+    project_dir: str | Path,
+    plan: ImpactPlan,
+) -> ImpactSummary:
+    root = _require_safe_project_dir(project_dir)
+    package_path = _safe_registered_file(root / "production_package.json")
+    package_value = json.loads(package_path.read_bytes())
+    if not isinstance(package_value, dict):
+        raise ValueError(f"Expected a JSON object: {package_path}")
+    package = ProductionPackage.from_dict(package_value)
+    shots = _shot_rows(_episode_payload(root, package))
+    ordered_shot_ids = tuple(str(shot["id"]) for shot in shots)
+
+    video_entry = next(
+        (entry for entry in plan.entries if entry.stage is StageName.VIDEO),
+        None,
+    )
+    regenerated_set = set(video_entry.item_ids if video_entry else ())
+    unknown_video_ids = regenerated_set.difference(ordered_shot_ids)
+    if unknown_video_ids:
+        raise ValueError(
+            "Impact plan contains unknown video shot IDs: "
+            + ", ".join(sorted(unknown_video_ids))
+        )
+    regenerated_video = tuple(
+        shot_id for shot_id in ordered_shot_ids if shot_id in regenerated_set
+    )
+    reused_video = tuple(
+        shot_id for shot_id in ordered_shot_ids if shot_id not in regenerated_set
+    )
+    audio_entry = next(
+        (entry for entry in plan.entries if entry.stage is StageName.AUDIO),
+        None,
+    )
+    return ImpactSummary(
+        regenerated_video_shot_ids=regenerated_video,
+        reused_video_shot_ids=reused_video,
+        regenerated_audio_item_ids=(audio_entry.item_ids if audio_entry else ()),
+        affected_stages=tuple(entry.stage for entry in plan.entries),
+    )
 
 
 def _require_known(requested: tuple[str, ...], known: set[str], label: str) -> None:
