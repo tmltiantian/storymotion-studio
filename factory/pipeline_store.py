@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .file_io import sha256_file, write_json_atomic
 from .pipeline_contracts import (
@@ -29,6 +32,7 @@ from .pipeline_review import (
 
 SPEC_FILENAME = "project.json"
 PACKAGE_FILENAME = "production_package.json"
+REVIEW_TRANSACTION_SCHEMA = "motion-comic-factory.review-transaction.v1"
 
 
 def _require_safe_project_dir(project_dir: str | Path) -> Path:
@@ -266,6 +270,134 @@ def _current_revision_integrity_issue(
     return ""
 
 
+def _review_record_path(root: Path, stage: StageName) -> Path:
+    return root / "reviews" / f"{stage.value}.review.json"
+
+
+def _review_transaction_entries(
+    root: Path, records: tuple[StageRecord, ...]
+) -> tuple[dict[str, Any], ...]:
+    entries: list[dict[str, Any]] = []
+    for record in records:
+        target = _review_record_path(root, record.stage)
+        if target.is_symlink():
+            raise ValueError(f"Review record cannot be a symlink: {target}")
+        entries.append(
+            {
+                "stage": record.stage.value,
+                "revision": record.revision,
+                "had_review": target.is_file(),
+            }
+        )
+    return tuple(entries)
+
+
+def _review_transaction_path(root: Path) -> Path:
+    transactions = root / "reviews" / ".transactions"
+    transactions.mkdir(parents=True, exist_ok=True)
+    if transactions.is_symlink():
+        raise ValueError("Review transaction directory cannot be a symlink")
+    transaction = transactions / uuid4().hex
+    transaction.mkdir()
+    return transaction
+
+
+def _read_review_transaction(transaction: Path) -> tuple[dict[str, Any], ...]:
+    payload = _read_object(transaction / "transaction.json")
+    if payload.get("schema_version") != REVIEW_TRANSACTION_SCHEMA:
+        raise ValueError(f"Review transaction is invalid: {transaction}")
+    raw_entries = payload.get("entries")
+    if not isinstance(raw_entries, list) or not raw_entries:
+        raise ValueError(f"Review transaction has no entries: {transaction}")
+    entries: list[dict[str, Any]] = []
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            raise ValueError(f"Review transaction entry is invalid: {transaction}")
+        stage = StageName(str(raw_entry.get("stage")))
+        revision = int(raw_entry.get("revision"))
+        had_review = raw_entry.get("had_review")
+        if not isinstance(had_review, bool):
+            raise ValueError(f"Review transaction entry is invalid: {transaction}")
+        entries.append(
+            {
+                "stage": stage.value,
+                "revision": revision,
+                "had_review": had_review,
+            }
+        )
+    return tuple(entries)
+
+
+def _review_backup_path(transaction: Path, stage: StageName) -> Path:
+    return transaction / f"{stage.value}.review.backup.json"
+
+
+def _rollback_review_transaction(
+    root: Path, transaction: Path, entries: tuple[dict[str, Any], ...]
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    for entry in reversed(entries):
+        stage = StageName(str(entry["stage"]))
+        target = _review_record_path(root, stage)
+        backup = _review_backup_path(transaction, stage)
+        try:
+            if bool(entry["had_review"]):
+                if backup.is_file():
+                    if target.exists() or target.is_symlink():
+                        if target.is_symlink() or not target.is_file():
+                            raise ValueError(
+                                f"Cannot roll back invalid review record: {target}"
+                            )
+                        target.unlink()
+                    os.replace(backup, target)
+            elif target.exists() or target.is_symlink():
+                if target.is_symlink() or not target.is_file():
+                    raise ValueError(
+                        f"Cannot roll back invalid review record: {target}"
+                    )
+                target.unlink()
+        except Exception as exc:
+            errors.append(str(exc))
+    if not errors:
+        shutil.rmtree(transaction, ignore_errors=False)
+    return tuple(errors)
+
+
+def _review_transaction_committed(
+    root: Path, entries: tuple[dict[str, Any], ...]
+) -> bool:
+    package_path = root / PACKAGE_FILENAME
+    if not package_path.is_file() or package_path.is_symlink():
+        return False
+    package = ProductionPackage.from_dict(_read_object(package_path))
+    by_stage = {record.stage: record for record in package.stages}
+    return all(
+        by_stage[StageName(str(entry["stage"]))].review_state is ReviewState.APPROVED
+        and by_stage[StageName(str(entry["stage"]))].revision == int(entry["revision"])
+        for entry in entries
+    )
+
+
+def _recover_review_transactions(root: Path) -> None:
+    transactions = root / "reviews" / ".transactions"
+    if not transactions.exists():
+        return
+    if transactions.is_symlink() or not transactions.is_dir():
+        raise ValueError("Review transaction directory is invalid")
+    for transaction in sorted(transactions.iterdir()):
+        if transaction.is_symlink() or not transaction.is_dir():
+            raise ValueError(f"Review transaction is invalid: {transaction}")
+        entries = _read_review_transaction(transaction)
+        if _review_transaction_committed(root, entries):
+            shutil.rmtree(transaction, ignore_errors=False)
+            continue
+        rollback_errors = _rollback_review_transaction(root, transaction, entries)
+        if rollback_errors:
+            raise RuntimeError(
+                "Review transaction recovery failed: " + " | ".join(rollback_errors)
+            )
+
+
 def approve_review_bundle(
     project_dir: str | Path,
     stages: tuple[StageName, ...],
@@ -273,6 +405,7 @@ def approve_review_bundle(
     evidence: tuple[str | Path, ...],
 ) -> ProductionPackage:
     root = _require_safe_project_dir(project_dir)
+    _recover_review_transactions(root)
     package = load_production_package(root)
     targets = tuple(StageName(stage) for stage in stages)
     if not targets or len(set(targets)) != len(targets):
@@ -335,15 +468,6 @@ def approve_review_bundle(
         if integrity_issue:
             raise ValueError(integrity_issue)
 
-    for record in target_records:
-        approve_stage_revision(
-            root,
-            record.stage,
-            record.revision,
-            review_note,
-            evidence,
-        )
-
     target_set = set(targets)
     records = tuple(
         replace(
@@ -357,7 +481,44 @@ def approve_review_bundle(
         for record in package.stages
     )
     updated = _refresh_output_indexes(package.with_stages(records))
-    save_production_package(root, updated)
+    entries = _review_transaction_entries(root, target_records)
+    transaction = _review_transaction_path(root)
+    write_json_atomic(
+        transaction / "transaction.json",
+        {
+            "schema_version": REVIEW_TRANSACTION_SCHEMA,
+            "entries": list(entries),
+        },
+    )
+    try:
+        for entry in entries:
+            if not bool(entry["had_review"]):
+                continue
+            stage = StageName(str(entry["stage"]))
+            os.replace(
+                _review_record_path(root, stage),
+                _review_backup_path(transaction, stage),
+            )
+        for record in target_records:
+            approve_stage_revision(
+                root,
+                record.stage,
+                record.revision,
+                review_note,
+                evidence,
+            )
+        save_production_package(root, updated)
+    except Exception:
+        if _review_transaction_committed(root, entries):
+            shutil.rmtree(transaction, ignore_errors=False)
+            return updated
+        rollback_errors = _rollback_review_transaction(root, transaction, entries)
+        if rollback_errors:
+            raise RuntimeError(
+                "Grouped review rollback failed: " + " | ".join(rollback_errors)
+            )
+        raise
+    shutil.rmtree(transaction, ignore_errors=False)
     return updated
 
 
