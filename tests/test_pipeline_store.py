@@ -9,6 +9,8 @@ from factory.pipeline_contracts import (
     PIPELINE_STAGES,
     ProjectMode,
     ProjectSpec,
+    ReviewPolicy,
+    ReviewState,
     StageName,
     StageState,
 )
@@ -118,6 +120,8 @@ def test_approve_stage_requires_bound_evidence_and_marks_stage_passed(
     record = package.stages[7]
     assert record.state is StageState.PASSED
     assert record.executor == "quality-eval:manual-approval"
+    assert record.review_policy is ReviewPolicy.MANUAL
+    assert record.review_state is ReviewState.APPROVED
     assert Path(record.artifacts[0]).name == "eval.approval.json"
     assert record.artifacts[1] == str(evidence.resolve())
 

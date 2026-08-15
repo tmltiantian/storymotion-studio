@@ -43,6 +43,22 @@ class StageState(str, Enum):
     STALE = "stale"
 
 
+class ReviewPolicy(str, Enum):
+    MANUAL = "manual"
+    AUTOMATIC = "automatic"
+    GROUPED = "grouped"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class ReviewState(str, Enum):
+    NOT_READY = "not_ready"
+    AWAITING_REVIEW = "awaiting_review"
+    APPROVED = "approved"
+    CHANGES_REQUESTED = "changes_requested"
+    AUTO_APPROVED = "auto_approved"
+    SKIPPED = "skipped"
+
+
 def _plain(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
@@ -157,10 +173,24 @@ class StageRecord:
     artifacts: tuple[str, ...] = ()
     blocked_reasons: tuple[str, ...] = ()
     error: str = ""
+    revision: int | None = None
+    review_policy: ReviewPolicy = ReviewPolicy.AUTOMATIC
+    review_state: ReviewState = ReviewState.NOT_READY
+    review_blocks_progress: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "stage", StageName(self.stage))
         object.__setattr__(self, "state", StageState(self.state))
+        object.__setattr__(self, "review_policy", ReviewPolicy(self.review_policy))
+        object.__setattr__(self, "review_state", ReviewState(self.review_state))
+        if self.revision is not None and int(self.revision) < 1:
+            raise ValueError("revision must be positive")
+        object.__setattr__(
+            self, "revision", int(self.revision) if self.revision is not None else None
+        )
+        object.__setattr__(
+            self, "review_blocks_progress", bool(self.review_blocks_progress)
+        )
         object.__setattr__(self, "artifacts", tuple(map(str, self.artifacts)))
         object.__setattr__(
             self, "blocked_reasons", tuple(map(str, self.blocked_reasons))
@@ -175,18 +205,53 @@ class StageRecord:
             "artifacts": list(self.artifacts),
             "blocked_reasons": list(self.blocked_reasons),
             "error": self.error,
+            "revision": self.revision,
+            "review_policy": self.review_policy.value,
+            "review_state": self.review_state.value,
+            "review_blocks_progress": self.review_blocks_progress,
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> StageRecord:
+        state = StageState(str(value.get("state", StageState.PENDING.value)))
+        legacy_review_state = (
+            ReviewState.APPROVED
+            if state is StageState.PASSED
+            else (
+                ReviewState.AWAITING_REVIEW
+                if state is StageState.BLOCKED
+                else ReviewState.NOT_READY
+            )
+        )
         return cls(
             stage=StageName(str(value["stage"])),
-            state=StageState(str(value.get("state", StageState.PENDING.value))),
+            state=state,
             executor=str(value.get("executor", "")),
             input_signature=str(value.get("input_signature", "")),
             artifacts=tuple(value.get("artifacts") or ()),
             blocked_reasons=tuple(value.get("blocked_reasons") or ()),
             error=str(value.get("error", "")),
+            revision=(
+                int(value["revision"])
+                if value.get("revision") is not None
+                else None
+            ),
+            review_policy=ReviewPolicy(
+                str(
+                    value.get(
+                        "review_policy",
+                        ReviewPolicy.MANUAL.value
+                        if state is StageState.BLOCKED
+                        else ReviewPolicy.AUTOMATIC.value,
+                    )
+                )
+            ),
+            review_state=ReviewState(
+                str(value.get("review_state", legacy_review_state.value))
+            ),
+            review_blocks_progress=bool(
+                value.get("review_blocks_progress", state is StageState.BLOCKED)
+            ),
         )
 
 

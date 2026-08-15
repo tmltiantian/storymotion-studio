@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -10,11 +11,14 @@ from .pipeline_contracts import (
     PIPELINE_STAGES,
     ProductionPackage,
     ProjectSpec,
+    ReviewPolicy,
+    ReviewState,
     StageName,
     StageRecord,
     StageState,
 )
 from .pipeline_modes import get_mode_adapter
+from .pipeline_review import approve_stage_revision, write_stage_revision
 
 
 SPEC_FILENAME = "project.json"
@@ -118,6 +122,10 @@ def update_stage(
     artifacts: tuple[str, ...] = (),
     blocked_reasons: tuple[str, ...] = (),
     error: str = "",
+    revision: int | None = None,
+    review_policy: ReviewPolicy | None = None,
+    review_state: ReviewState | None = None,
+    review_blocks_progress: bool | None = None,
 ) -> ProductionPackage:
     root = _require_safe_project_dir(project_dir)
     spec = load_project_spec(root)
@@ -144,18 +152,24 @@ def update_stage(
                     artifacts=artifacts,
                     blocked_reasons=blocked_reasons,
                     error=error,
+                    revision=revision if revision is not None else current.revision,
+                    review_policy=(
+                        review_policy
+                        if review_policy is not None
+                        else current.review_policy
+                    ),
+                    review_state=(
+                        review_state if review_state is not None else current.review_state
+                    ),
+                    review_blocks_progress=(
+                        review_blocks_progress
+                        if review_blocks_progress is not None
+                        else current.review_blocks_progress
+                    ),
                 )
             )
         elif changed and index > target_index and record.state is StageState.PASSED:
-            records.append(
-                StageRecord(
-                    stage=record.stage,
-                    state=StageState.STALE,
-                    executor=record.executor,
-                    input_signature=record.input_signature,
-                    artifacts=record.artifacts,
-                )
-            )
+            records.append(replace(record, state=StageState.STALE))
         else:
             records.append(record)
     updated = _refresh_output_indexes(package.with_stages(records))
@@ -178,12 +192,9 @@ def invalidate_stage_and_downstream(
             records.append(record)
             continue
         records.append(
-            StageRecord(
-                stage=record.stage,
+            replace(
+                record,
                 state=StageState.STALE,
-                executor=record.executor,
-                input_signature=record.input_signature,
-                artifacts=record.artifacts,
                 blocked_reasons=(reason,) if index == target_index else (),
             )
         )
@@ -253,6 +264,20 @@ def approve_stage(
             ],
         },
     )
+    revision = write_stage_revision(
+        root,
+        target,
+        tuple(bound_paths),
+        current.input_signature,
+        current.executor,
+    )
+    approve_stage_revision(
+        root,
+        target,
+        revision.number,
+        review_note,
+        tuple(supplied_evidence),
+    )
     return update_stage(
         root,
         target,
@@ -260,4 +285,8 @@ def approve_stage(
         executor=f"{current.executor}:manual-approval",
         input_signature=current.input_signature,
         artifacts=(str(approval_path.resolve()), *(str(path) for path in bound_paths)),
+        revision=revision.number,
+        review_policy=ReviewPolicy.MANUAL,
+        review_state=ReviewState.APPROVED,
+        review_blocks_progress=False,
     )
