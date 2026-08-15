@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from .file_io import sha256_file, write_json_atomic
@@ -296,10 +296,13 @@ def apply_repair_state(
     affected: dict[str, tuple[str, ...]],
     preserved_artifacts: tuple[str, ...],
     expected_package_sha256: str,
+    source_snapshot_validator: Callable[[], None] | None = None,
 ) -> ProductionPackage:
     root = _require_safe_project_dir(project_dir)
     with _pipeline_lock(root):
         with _approval_lock(root):
+            if source_snapshot_validator is not None:
+                source_snapshot_validator()
             _recover_repair_transactions_locked(root)
             _recover_review_transactions_locked(root)
             package_path = root / PACKAGE_FILENAME

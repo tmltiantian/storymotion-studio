@@ -28,7 +28,7 @@ type ImpactState =
   | { status: "apply_error"; plan: ImpactPlan; message: string }
   | { status: "plan_error"; message: string };
 
-const STAGE_NAMES = new Set<StageName>([
+const STAGE_ORDER: StageName[] = [
   "concept",
   "script",
   "storyboard",
@@ -38,8 +38,11 @@ const STAGE_NAMES = new Set<StageName>([
   "edit",
   "eval",
   "deliver",
-]);
+];
+const STAGE_NAMES = new Set<StageName>(STAGE_ORDER);
+const STAGE_INDEX = new Map(STAGE_ORDER.map((stage, index) => [stage, index]));
 const SHA256 = /^[0-9a-f]{64}$/;
+const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -49,12 +52,16 @@ function stringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string" && item.length > 0);
 }
 
-function uniqueStrings(value: unknown): value is string[] {
-  return stringArray(value) && new Set(value).size === value.length;
+function opaqueIdArray(value: unknown): value is string[] {
+  return stringArray(value) && value.every((item) => OPAQUE_ID.test(item));
 }
 
-function sameItems(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((item) => right.includes(item));
+function nonnegativeInteger(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 0;
+}
+
+function exactKeys(value: Record<string, unknown>, keys: string[]): boolean {
+  return Object.keys(value).length === keys.length && keys.every((key) => key in value);
 }
 
 function sameRequest(left: ImpactPlan["request"], right: ImpactRequest): boolean {
@@ -62,56 +69,82 @@ function sameRequest(left: ImpactPlan["request"], right: ImpactRequest): boolean
     left.stage === right.stage &&
     left.scope === right.scope &&
     left.subtitle_style === Boolean(right.subtitle_style) &&
-    JSON.stringify(left.dialogue_ids) === JSON.stringify(right.dialogue_ids ?? []) &&
-    JSON.stringify(left.character_ids) === JSON.stringify(right.character_ids ?? []) &&
-    JSON.stringify(left.shot_ids) === JSON.stringify(right.shot_ids ?? [])
+    left.selection_counts.dialogue === (right.dialogue_ids?.length ?? 0) &&
+    left.selection_counts.character === (right.character_ids?.length ?? 0) &&
+    left.selection_counts.shot === (right.shot_ids?.length ?? 0)
   );
 }
 
 function validPlan(value: unknown, request: ImpactRequest): value is ImpactPlan {
   if (!isObject(value)) return false;
-  if (value.schema_version !== "motion-comic-factory.impact-plan.v1") return false;
+  if (!exactKeys(value, [
+    "schema_version",
+    "plan_id",
+    "request",
+    "entries",
+    "summary",
+    "preserved_artifacts",
+    "package_sha256",
+    "episode_sha256",
+  ])) return false;
+  if (value.schema_version !== "motion-comic-factory.impact-plan.v2") return false;
   if (typeof value.plan_id !== "string" || !SHA256.test(value.plan_id)) return false;
   if (typeof value.package_sha256 !== "string" || !SHA256.test(value.package_sha256)) return false;
-  if (!isObject(value.request) || !sameRequest(value.request as unknown as ImpactPlan["request"], request)) return false;
+  if (typeof value.episode_sha256 !== "string" || !SHA256.test(value.episode_sha256)) return false;
+  if (!isObject(value.request) || !exactKeys(value.request, [
+    "stage",
+    "scope",
+    "subtitle_style",
+    "selection_counts",
+  ])) return false;
+  if (!isObject(value.request.selection_counts) || !exactKeys(
+    value.request.selection_counts,
+    ["dialogue", "character", "shot"],
+  )) return false;
+  if (!Object.values(value.request.selection_counts).every(nonnegativeInteger)) return false;
+  if (!sameRequest(value.request as unknown as ImpactPlan["request"], request)) return false;
   if (!Array.isArray(value.entries) || !value.entries.every((entry) => (
     isObject(entry) &&
+    exactKeys(entry, ["stage", "item_count"]) &&
     typeof entry.stage === "string" &&
     STAGE_NAMES.has(entry.stage as StageName) &&
-    stringArray(entry.item_ids)
+    nonnegativeInteger(entry.item_count)
   ))) return false;
-  if (!(stringArray(value.preserved_artifacts) || (
+  const entries = value.entries as ImpactPlan["entries"];
+  const entryStages = entries.map((entry) => entry.stage);
+  if (new Set(entryStages).size !== entryStages.length) return false;
+  if (entryStages.some((stage, index) => (
+    index > 0 && Number(STAGE_INDEX.get(stage)) <= Number(STAGE_INDEX.get(entryStages[index - 1]))
+  ))) return false;
+  if (!(opaqueIdArray(value.preserved_artifacts) || (
     Array.isArray(value.preserved_artifacts) && value.preserved_artifacts.length === 0
   ))) return false;
-  if (!isObject(value.summary)) return false;
+  if (!isObject(value.summary) || !exactKeys(value.summary, [
+    "schema_version",
+    "regenerated_video_shot_count",
+    "reused_video_shot_count",
+    "regenerated_audio_item_count",
+    "affected_stages",
+    "estimate",
+  ])) return false;
   const summary = value.summary;
-  const regeneratedVideo = summary.regenerated_video_shot_ids;
-  const reusedVideo = summary.reused_video_shot_ids;
-  const regeneratedAudio = summary.regenerated_audio_item_ids;
-  if (summary.schema_version !== "motion-comic-factory.impact-summary.v1") return false;
+  if (summary.schema_version !== "motion-comic-factory.impact-summary.v2") return false;
   if (
-    !uniqueStrings(regeneratedVideo) ||
-    !uniqueStrings(reusedVideo) ||
-    !uniqueStrings(regeneratedAudio) ||
+    !nonnegativeInteger(summary.regenerated_video_shot_count) ||
+    !nonnegativeInteger(summary.reused_video_shot_count) ||
+    !nonnegativeInteger(summary.regenerated_audio_item_count) ||
     !Array.isArray(summary.affected_stages) ||
     !summary.affected_stages.every((stage) => typeof stage === "string" && STAGE_NAMES.has(stage as StageName)) ||
-    new Set(summary.affected_stages).size !== summary.affected_stages.length ||
     !isObject(summary.estimate) ||
+    !exactKeys(summary.estimate, ["available"]) ||
     summary.estimate.available !== false
   ) return false;
-  if (regeneratedVideo.some((id) => reusedVideo.includes(id))) {
-    return false;
-  }
-  const entries = value.entries as ImpactPlan["entries"];
-  const videoItems = entries.find((entry) => entry.stage === "video")?.item_ids ?? [];
-  const audioItems = entries.find((entry) => entry.stage === "audio")?.item_ids ?? [];
+  const videoCount = entries.find((entry) => entry.stage === "video")?.item_count ?? 0;
+  const audioCount = entries.find((entry) => entry.stage === "audio")?.item_count ?? 0;
   return (
-    sameItems(regeneratedVideo, videoItems) &&
-    sameItems(regeneratedAudio, audioItems) &&
-    sameItems(
-      summary.affected_stages as string[],
-      Array.from(new Set(entries.map((entry) => entry.stage))),
-    )
+    summary.regenerated_video_shot_count === videoCount &&
+    summary.regenerated_audio_item_count === audioCount &&
+    JSON.stringify(summary.affected_stages) === JSON.stringify(entryStages)
   );
 }
 
@@ -257,9 +290,9 @@ export function ImpactDialog({
   const plan = state.status === "ready" || state.status === "applying" || state.status === "apply_error"
     ? state.plan
     : null;
-  const videoCount = plan?.summary.regenerated_video_shot_ids.length ?? 0;
-  const audioCount = plan?.summary.regenerated_audio_item_ids.length ?? 0;
-  const reusedVideoCount = plan?.summary.reused_video_shot_ids.length ?? 0;
+  const videoCount = plan?.summary.regenerated_video_shot_count ?? 0;
+  const audioCount = plan?.summary.regenerated_audio_item_count ?? 0;
+  const reusedVideoCount = plan?.summary.reused_video_shot_count ?? 0;
   const preservedArtifactCount = plan?.preserved_artifacts.length ?? 0;
   const busy = state.status === "applying";
 
@@ -325,9 +358,9 @@ export function ImpactDialog({
                 <h3 id="impact-entries-title">受影响阶段与项目</h3>
                 <ul>
                   {plan.entries.map((entry) => (
-                    <li key={`${entry.stage}-${entry.item_ids.join("-")}`}>
+                    <li key={entry.stage}>
                       <strong>{stageLabel(entry.stage)}</strong>
-                      <span>{stageLabel(entry.stage)} · {entry.item_ids.join("、")}</span>
+                      <span>{stageLabel(entry.stage)} · {entry.item_count} 个项目</span>
                     </li>
                   ))}
                 </ul>

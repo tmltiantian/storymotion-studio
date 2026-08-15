@@ -23,8 +23,9 @@ from .pipeline_store import (
 )
 
 
-IMPACT_PLAN_SCHEMA = "motion-comic-factory.impact-plan.v1"
-IMPACT_SUMMARY_SCHEMA = "motion-comic-factory.impact-summary.v1"
+LEGACY_IMPACT_PLAN_SCHEMA = "motion-comic-factory.impact-plan.v1"
+IMPACT_PLAN_SCHEMA = "motion-comic-factory.impact-plan.v2"
+IMPACT_SUMMARY_SCHEMA = "motion-comic-factory.impact-summary.v2"
 
 
 class ChangeScope(str, Enum):
@@ -164,10 +165,15 @@ class ImpactPlan:
     entries: tuple[ImpactEntry, ...]
     preserved_artifacts: tuple[str, ...]
     package_sha256: str
+    summary: ImpactSummary | None = None
+    episode_sha256: str = ""
     schema_version: str = IMPACT_PLAN_SCHEMA
 
     def __post_init__(self) -> None:
-        if self.schema_version != IMPACT_PLAN_SCHEMA:
+        if self.schema_version not in {
+            LEGACY_IMPACT_PLAN_SCHEMA,
+            IMPACT_PLAN_SCHEMA,
+        }:
             raise ValueError(f"Unsupported impact plan schema: {self.schema_version}")
         object.__setattr__(self, "entries", tuple(self.entries))
         object.__setattr__(
@@ -175,13 +181,37 @@ class ImpactPlan:
             "preserved_artifacts",
             tuple(dict.fromkeys(map(str, self.preserved_artifacts))),
         )
+        stages = tuple(entry.stage for entry in self.entries)
+        if len(set(stages)) != len(stages):
+            raise ValueError("Impact plan stages must be unique")
+        stage_index = {stage: index for index, stage in enumerate(StageName)}
+        if tuple(sorted(stages, key=stage_index.__getitem__)) != stages:
+            raise ValueError("Impact plan stages must use canonical order")
+        if self.schema_version == IMPACT_PLAN_SCHEMA:
+            if self.summary is None or not _is_sha256(self.episode_sha256):
+                raise ValueError("Current impact plans require summary and episode digest")
+            if self.summary.affected_stages != stages:
+                raise ValueError("Impact plan summary stages do not match entries")
+            by_stage = {entry.stage: entry for entry in self.entries}
+            video_entry = by_stage.get(StageName.VIDEO)
+            audio_entry = by_stage.get(StageName.AUDIO)
+            if self.summary.regenerated_video_shot_count != len(
+                video_entry.item_ids if video_entry else ()
+            ):
+                raise ValueError("Impact plan video summary does not match entries")
+            if self.summary.regenerated_audio_item_count != len(
+                audio_entry.item_ids if audio_entry else ()
+            ):
+                raise ValueError("Impact plan audio summary does not match entries")
+        elif self.summary is not None or self.episode_sha256:
+            raise ValueError("Legacy impact plans cannot contain unhashed summary data")
 
     @property
     def affected(self) -> Mapping[StageName, tuple[str, ...]]:
         return MappingProxyType({entry.stage: entry.item_ids for entry in self.entries})
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "plan_id": self.plan_id,
             "request": self.request.to_dict(),
@@ -189,9 +219,15 @@ class ImpactPlan:
             "preserved_artifacts": list(self.preserved_artifacts),
             "package_sha256": self.package_sha256,
         }
+        if self.schema_version == IMPACT_PLAN_SCHEMA:
+            assert self.summary is not None
+            payload["summary"] = self.summary.to_dict()
+            payload["episode_sha256"] = self.episode_sha256
+        return payload
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ImpactPlan:
+        schema_version = str(value.get("schema_version", ""))
         return cls(
             plan_id=str(value["plan_id"]),
             request=ChangeRequest.from_dict(dict(value["request"])),
@@ -204,15 +240,25 @@ class ImpactPlan:
             ),
             preserved_artifacts=tuple(value.get("preserved_artifacts") or ()),
             package_sha256=str(value["package_sha256"]),
-            schema_version=str(value.get("schema_version", "")),
+            summary=(
+                ImpactSummary.from_dict(dict(value["summary"]))
+                if schema_version == IMPACT_PLAN_SCHEMA
+                else None
+            ),
+            episode_sha256=(
+                str(value["episode_sha256"])
+                if schema_version == IMPACT_PLAN_SCHEMA
+                else ""
+            ),
+            schema_version=schema_version,
         )
 
 
 @dataclass(frozen=True)
 class ImpactSummary:
-    regenerated_video_shot_ids: tuple[str, ...]
-    reused_video_shot_ids: tuple[str, ...]
-    regenerated_audio_item_ids: tuple[str, ...]
+    regenerated_video_shot_count: int
+    reused_video_shot_count: int
+    regenerated_audio_item_count: int
     affected_stages: tuple[StageName, ...]
     estimate_available: bool = False
     schema_version: str = IMPACT_SUMMARY_SCHEMA
@@ -222,36 +268,46 @@ class ImpactSummary:
             raise ValueError(
                 f"Unsupported impact summary schema: {self.schema_version}"
             )
-        object.__setattr__(
-            self,
-            "regenerated_video_shot_ids",
-            _ids(self.regenerated_video_shot_ids),
-        )
-        object.__setattr__(
-            self,
-            "reused_video_shot_ids",
-            _ids(self.reused_video_shot_ids),
-        )
-        object.__setattr__(
-            self,
-            "regenerated_audio_item_ids",
-            _ids(self.regenerated_audio_item_ids),
-        )
+        for name in (
+            "regenerated_video_shot_count",
+            "reused_video_shot_count",
+            "regenerated_audio_item_count",
+        ):
+            if type(getattr(self, name)) is not int or getattr(self, name) < 0:
+                raise ValueError(f"Impact summary {name} must be nonnegative")
         object.__setattr__(
             self,
             "affected_stages",
             tuple(StageName(stage) for stage in self.affected_stages),
         )
+        if type(self.estimate_available) is not bool:
+            raise ValueError("Impact summary estimate availability must be boolean")
+        if len(set(self.affected_stages)) != len(self.affected_stages):
+            raise ValueError("Impact summary stages must be unique")
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
-            "regenerated_video_shot_ids": list(self.regenerated_video_shot_ids),
-            "reused_video_shot_ids": list(self.reused_video_shot_ids),
-            "regenerated_audio_item_ids": list(self.regenerated_audio_item_ids),
+            "regenerated_video_shot_count": self.regenerated_video_shot_count,
+            "reused_video_shot_count": self.reused_video_shot_count,
+            "regenerated_audio_item_count": self.regenerated_audio_item_count,
             "affected_stages": [stage.value for stage in self.affected_stages],
             "estimate": {"available": self.estimate_available},
         }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> ImpactSummary:
+        estimate = value.get("estimate")
+        if not isinstance(estimate, Mapping):
+            raise ValueError("Impact summary estimate must be an object")
+        return cls(
+            regenerated_video_shot_count=value["regenerated_video_shot_count"],
+            reused_video_shot_count=value["reused_video_shot_count"],
+            regenerated_audio_item_count=value["regenerated_audio_item_count"],
+            affected_stages=tuple(value.get("affected_stages") or ()),
+            estimate_available=estimate.get("available", False),
+            schema_version=str(value.get("schema_version", "")),
+        )
 
 
 def _path_uses_symlink(path: Path) -> bool:
@@ -314,21 +370,25 @@ def _shot_rows(episode: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
     return tuple(ordered)
 
 
+def _episode_payload_sha256(episode: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        episode,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def build_impact_summary(
-    project_dir: str | Path,
-    plan: ImpactPlan,
+    episode: Mapping[str, Any],
+    entries: tuple[ImpactEntry, ...],
 ) -> ImpactSummary:
-    root = _require_safe_project_dir(project_dir)
-    package_path = _safe_registered_file(root / "production_package.json")
-    package_value = json.loads(package_path.read_bytes())
-    if not isinstance(package_value, dict):
-        raise ValueError(f"Expected a JSON object: {package_path}")
-    package = ProductionPackage.from_dict(package_value)
-    shots = _shot_rows(_episode_payload(root, package))
+    shots = _shot_rows(episode)
     ordered_shot_ids = tuple(str(shot["id"]) for shot in shots)
 
     video_entry = next(
-        (entry for entry in plan.entries if entry.stage is StageName.VIDEO),
+        (entry for entry in entries if entry.stage is StageName.VIDEO),
         None,
     )
     regenerated_set = set(video_entry.item_ids if video_entry else ())
@@ -338,21 +398,15 @@ def build_impact_summary(
             "Impact plan contains unknown video shot IDs: "
             + ", ".join(sorted(unknown_video_ids))
         )
-    regenerated_video = tuple(
-        shot_id for shot_id in ordered_shot_ids if shot_id in regenerated_set
-    )
-    reused_video = tuple(
-        shot_id for shot_id in ordered_shot_ids if shot_id not in regenerated_set
-    )
     audio_entry = next(
-        (entry for entry in plan.entries if entry.stage is StageName.AUDIO),
+        (entry for entry in entries if entry.stage is StageName.AUDIO),
         None,
     )
     return ImpactSummary(
-        regenerated_video_shot_ids=regenerated_video,
-        reused_video_shot_ids=reused_video,
-        regenerated_audio_item_ids=(audio_entry.item_ids if audio_entry else ()),
-        affected_stages=tuple(entry.stage for entry in plan.entries),
+        regenerated_video_shot_count=len(regenerated_set),
+        reused_video_shot_count=len(ordered_shot_ids) - len(regenerated_set),
+        regenerated_audio_item_count=len(audio_entry.item_ids) if audio_entry else 0,
+        affected_stages=tuple(entry.stage for entry in entries),
     )
 
 
@@ -491,6 +545,8 @@ def _plan_payload_without_id(
     entries: tuple[ImpactEntry, ...],
     preserved_artifacts: tuple[str, ...],
     package_sha256: str,
+    summary: ImpactSummary,
+    episode_sha256: str,
 ) -> dict[str, Any]:
     return {
         "schema_version": IMPACT_PLAN_SCHEMA,
@@ -498,6 +554,18 @@ def _plan_payload_without_id(
         "entries": [entry.to_dict() for entry in entries],
         "preserved_artifacts": list(preserved_artifacts),
         "package_sha256": package_sha256,
+        "summary": summary.to_dict(),
+        "episode_sha256": episode_sha256,
+    }
+
+
+def _legacy_plan_payload_without_id(plan: ImpactPlan) -> dict[str, Any]:
+    return {
+        "schema_version": LEGACY_IMPACT_PLAN_SCHEMA,
+        "request": plan.request.to_dict(),
+        "entries": [entry.to_dict() for entry in plan.entries],
+        "preserved_artifacts": list(plan.preserved_artifacts),
+        "package_sha256": plan.package_sha256,
     }
 
 
@@ -725,31 +793,34 @@ def _is_sha256(value: str) -> bool:
     )
 
 
+def _require_nonnegative_int(value: Any, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"Impact plan {label} must be a nonnegative integer")
+    return value
+
+
 def _decode_canonical_plan(content: bytes) -> dict[str, Any]:
     try:
         decoded = content.decode("utf-8")
         value = json.loads(decoded)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("Impact plan is not valid UTF-8 JSON") from exc
-    payload = _require_exact_object(
-        value,
-        frozenset(
-            {
-                "schema_version",
-                "plan_id",
-                "request",
-                "entries",
-                "preserved_artifacts",
-                "package_sha256",
-            }
-        ),
-        "payload",
-    )
-    if (
-        _require_string(payload["schema_version"], "schema_version")
-        != IMPACT_PLAN_SCHEMA
-    ):
+    if type(value) is not dict:
+        raise ValueError("Impact plan payload must be a JSON object")
+    schema_version = _require_string(value.get("schema_version"), "schema_version")
+    if schema_version not in {LEGACY_IMPACT_PLAN_SCHEMA, IMPACT_PLAN_SCHEMA}:
         raise ValueError("Impact plan schema_version is unsupported")
+    keys = {
+        "schema_version",
+        "plan_id",
+        "request",
+        "entries",
+        "preserved_artifacts",
+        "package_sha256",
+    }
+    if schema_version == IMPACT_PLAN_SCHEMA:
+        keys.update({"summary", "episode_sha256"})
+    payload = _require_exact_object(value, frozenset(keys), "payload")
     plan_id = _require_string(payload["plan_id"], "plan_id")
     package_sha256 = _require_string(payload["package_sha256"], "package_sha256")
     if not _is_sha256(plan_id) or not _is_sha256(package_sha256):
@@ -791,7 +862,58 @@ def _decode_canonical_plan(content: bytes) -> dict[str, Any]:
         if entry_stage not in {item.value for item in StageName}:
             raise ValueError(f"Impact plan entries[{index}].stage is invalid")
         _require_string_list(entry["item_ids"], f"entries[{index}].item_ids")
+    entry_stages = [str(entry["stage"]) for entry in entries]
+    if len(set(entry_stages)) != len(entry_stages):
+        raise ValueError("Impact plan entry stages must be unique")
+    stage_order = {stage.value: index for index, stage in enumerate(StageName)}
+    if sorted(entry_stages, key=stage_order.__getitem__) != entry_stages:
+        raise ValueError("Impact plan entries must use canonical stage order")
     _require_string_list(payload["preserved_artifacts"], "preserved_artifacts")
+    if schema_version == IMPACT_PLAN_SCHEMA:
+        episode_sha256 = _require_string(payload["episode_sha256"], "episode_sha256")
+        if not _is_sha256(episode_sha256):
+            raise ValueError("Impact plan episode_sha256 must be lowercase SHA-256")
+        summary = _require_exact_object(
+            payload["summary"],
+            frozenset(
+                {
+                    "schema_version",
+                    "regenerated_video_shot_count",
+                    "reused_video_shot_count",
+                    "regenerated_audio_item_count",
+                    "affected_stages",
+                    "estimate",
+                }
+            ),
+            "summary",
+        )
+        if summary["schema_version"] != IMPACT_SUMMARY_SCHEMA:
+            raise ValueError("Impact plan summary schema_version is unsupported")
+        for name in (
+            "regenerated_video_shot_count",
+            "reused_video_shot_count",
+            "regenerated_audio_item_count",
+        ):
+            _require_nonnegative_int(summary[name], f"summary.{name}")
+        affected_stages = _require_string_list(
+            summary["affected_stages"], "summary.affected_stages"
+        )
+        if affected_stages != entry_stages:
+            raise ValueError("Impact plan summary stages do not match entries")
+        estimate = _require_exact_object(
+            summary["estimate"], frozenset({"available"}), "summary.estimate"
+        )
+        if type(estimate["available"]) is not bool:
+            raise ValueError("Impact plan summary estimate availability must be boolean")
+        by_stage = {str(entry["stage"]): entry for entry in entries}
+        if summary["regenerated_video_shot_count"] != len(
+            by_stage.get("video", {"item_ids": []})["item_ids"]
+        ):
+            raise ValueError("Impact plan video summary does not match entries")
+        if summary["regenerated_audio_item_count"] != len(
+            by_stage.get("audio", {"item_ids": []})["item_ids"]
+        ):
+            raise ValueError("Impact plan audio summary does not match entries")
     if content != _canonical_json(payload).encode("utf-8"):
         raise ValueError("Impact plan JSON is not in canonical form")
     return payload
@@ -808,11 +930,28 @@ def preview_impact(project_dir: str | Path, request: ChangeRequest) -> ImpactPla
     episode = _episode_payload(root, package)
     entries = _expand_request(request, episode)
     package_sha256 = hashlib.sha256(package_bytes).hexdigest()
+    episode_sha256 = _episode_payload_sha256(episode)
+    summary = build_impact_summary(episode, entries)
     preserved = _preserved_video_artifacts(root, package, episode, entries)
-    seed = _plan_payload_without_id(request, entries, preserved, package_sha256)
+    seed = _plan_payload_without_id(
+        request,
+        entries,
+        preserved,
+        package_sha256,
+        summary,
+        episode_sha256,
+    )
     encoded = json.dumps(seed, sort_keys=True, separators=(",", ":")).encode()
     plan_id = hashlib.sha256(encoded).hexdigest()
-    plan = ImpactPlan(plan_id, request, entries, preserved, package_sha256)
+    plan = ImpactPlan(
+        plan_id=plan_id,
+        request=request,
+        entries=entries,
+        preserved_artifacts=preserved,
+        package_sha256=package_sha256,
+        summary=summary,
+        episode_sha256=episode_sha256,
+    )
     with _open_plan_directory(root, create=True) as plans_fd:
         _persist_immutable_plan(
             plans_fd, f"{plan_id}.json", _canonical_json(plan.to_dict())
@@ -834,21 +973,50 @@ def _load_plan(root: Path, plan_id: str) -> ImpactPlan:
         raise ValueError("Impact plan content has changed")
     if plan.plan_id != plan_id:
         raise ValueError("Impact plan identity does not match its file")
-    seed = _plan_payload_without_id(
-        plan.request,
-        plan.entries,
-        plan.preserved_artifacts,
-        plan.package_sha256,
+    seed = (
+        _plan_payload_without_id(
+            plan.request,
+            plan.entries,
+            plan.preserved_artifacts,
+            plan.package_sha256,
+            plan.summary,
+            plan.episode_sha256,
+        )
+        if plan.summary is not None
+        else _legacy_plan_payload_without_id(plan)
     )
     encoded = json.dumps(seed, sort_keys=True, separators=(",", ":")).encode()
     if hashlib.sha256(encoded).hexdigest() != plan.plan_id:
         raise ValueError("Impact plan content has changed")
+    if plan.summary is not None:
+        _verify_episode_snapshot(root, plan.episode_sha256)
     return plan
+
+
+def _verify_episode_snapshot(root: Path, expected_sha256: str) -> None:
+    try:
+        package = ProductionPackage.from_dict(
+            json.loads(
+                _safe_registered_file(root / "production_package.json").read_bytes()
+            )
+        )
+        current_sha256 = _episode_payload_sha256(_episode_payload(root, package))
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise ValueError(
+            "Impact plan canonical episode snapshot changed; fresh preview required"
+        ) from exc
+    if current_sha256 != expected_sha256:
+        raise ValueError(
+            "Impact plan is stale relative to canonical episode snapshot; "
+            "fresh preview required"
+        )
 
 
 def apply_impact_plan(project_dir: str | Path, plan_id: str) -> ProductionPackage:
     root = _require_safe_project_dir(project_dir)
     plan = _load_plan(root, plan_id)
+    if plan.summary is None:
+        raise ValueError("Legacy impact plan requires a fresh preview before apply")
     return apply_repair_state(
         root,
         plan_id=plan.plan_id,
@@ -856,6 +1024,9 @@ def apply_impact_plan(project_dir: str | Path, plan_id: str) -> ProductionPackag
         affected={entry.stage.value: entry.item_ids for entry in plan.entries},
         preserved_artifacts=plan.preserved_artifacts,
         expected_package_sha256=plan.package_sha256,
+        source_snapshot_validator=lambda: _verify_episode_snapshot(
+            root, plan.episode_sha256
+        ),
     )
 
 
