@@ -1550,6 +1550,53 @@ def test_gateway_video_batch_resumes_submitted_task_without_duplicate_charge(tmp
     assert resumed.complete_count == 1
 
 
+def test_gateway_video_batch_resumes_from_persistent_job_task_without_clip_state(
+    tmp_path,
+):
+    handoff, package, _, _ = _write_inputs(tmp_path)
+    resumed = FakeClient()
+
+    report = render_gateway_video_batch(
+        handoff,
+        package,
+        resumed,
+        tmp_path / "run/gateway_video_batch.json",
+        limit=1,
+        allow_network=True,
+        provider_tasks={
+            "shot_001": {
+                "provider": "gateway",
+                "task_id": "persisted-task-1",
+                "status": "queued",
+                "updated_at": "2026-08-16T00:00:00+00:00",
+            }
+        },
+    )
+
+    assert report["success"] is True
+    assert report["resumed_count"] == 1
+    assert resumed.submit_count == 0
+    assert resumed.completed_task_ids == ["persisted-task-1"]
+
+
+def test_gateway_video_batch_selects_exact_requested_shot_ids(tmp_path):
+    handoff, package, _, _ = _write_inputs(tmp_path)
+    client = FakeClient()
+
+    report = render_gateway_video_batch(
+        handoff,
+        package,
+        client,
+        tmp_path / "run/gateway_video_batch.json",
+        selected_shot_ids=("shot_002",),
+        allow_network=True,
+    )
+
+    assert report["success"] is True
+    assert report["planned_count"] == 1
+    assert [call[0] for call in client.calls] == ["close-up of the ticket"]
+
+
 def test_gateway_video_batch_overwrite_submits_a_fresh_task_instead_of_resuming(tmp_path):
     handoff, package, _, _ = _write_inputs(tmp_path)
     report_path = tmp_path / "run/gateway_video_batch.json"
