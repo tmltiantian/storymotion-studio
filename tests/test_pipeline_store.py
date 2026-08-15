@@ -83,6 +83,52 @@ def test_update_stage_invalidates_only_passed_downstream_stages(
     assert states[StageName.AUDIO] is StageState.PENDING
 
 
+@pytest.mark.parametrize(
+    ("input_signature", "artifacts"),
+    [
+        ("script-v2", ("script-v1.json",)),
+        ("", ("script-v1.json",)),
+        ("script-v1", ("script-v2.json",)),
+    ],
+    ids=("changed-signature", "cleared-signature", "changed-artifacts"),
+)
+def test_update_stage_replacement_clears_target_approval(
+    tmp_path: Path,
+    input_signature: str,
+    artifacts: tuple[str, ...],
+) -> None:
+    project_dir = tmp_path / "projects" / "episode_01"
+    create_project(project_dir, _spec(tmp_path))
+    update_stage(
+        project_dir,
+        StageName.SCRIPT,
+        StageState.PASSED,
+        executor="fixture",
+        input_signature="script-v1",
+        artifacts=("script-v1.json",),
+        revision=3,
+        review_policy=ReviewPolicy.MANUAL,
+        review_state=ReviewState.APPROVED,
+        review_blocks_progress=True,
+    )
+
+    package = update_stage(
+        project_dir,
+        StageName.SCRIPT,
+        StageState.PASSED,
+        executor="fixture-v2",
+        input_signature=input_signature,
+        artifacts=artifacts,
+    )
+
+    record = package.stages[1]
+    assert record.state is StageState.PASSED
+    assert record.revision is None
+    assert record.review_policy is ReviewPolicy.MANUAL
+    assert record.review_state is ReviewState.NOT_READY
+    assert record.review_blocks_progress is False
+
+
 def test_store_rejects_symlinked_project_directory(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()

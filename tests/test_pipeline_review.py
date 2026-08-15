@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from factory.pipeline_contracts import StageName
 from factory.pipeline_review import (
     ApprovalPreset,
@@ -52,6 +54,37 @@ def test_revision_hash_change_invalidates_old_review(tmp_path) -> None:
     validation = validate_stage_review(tmp_path, StageName.SCRIPT)
     assert validation.valid is False
     assert "changed" in validation.reason
+
+
+def test_stale_revision_approval_is_rejected_before_persistence(tmp_path) -> None:
+    artifact = tmp_path / "script.json"
+    artifact.write_text('{"version":1}', encoding="utf-8")
+    first = write_stage_revision(
+        tmp_path,
+        StageName.SCRIPT,
+        (artifact,),
+        "script-signature-1",
+        "original.script",
+    )
+    artifact.write_text('{"version":2}', encoding="utf-8")
+    write_stage_revision(
+        tmp_path,
+        StageName.SCRIPT,
+        (artifact,),
+        "script-signature-2",
+        "original.script",
+    )
+
+    with pytest.raises(ValueError, match="latest revision"):
+        approve_stage_revision(
+            tmp_path,
+            StageName.SCRIPT,
+            first.number,
+            "dialogue is natural",
+            (artifact,),
+        )
+
+    assert not (tmp_path / "reviews" / "script.review.json").exists()
 
 
 def test_malformed_review_record_is_invalid(tmp_path) -> None:

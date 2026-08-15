@@ -304,6 +304,9 @@ def approve_stage_revision(
     evidence: tuple[str | Path, ...],
 ) -> StageReview:
     target = StageName(stage)
+    revisions = _load_revisions(project_dir, target)
+    if not revisions or revision != revisions[-1].number:
+        raise ValueError(f"Only the latest revision can be approved: {revision}")
     approved_revision = _current_revision(project_dir, target, revision)
     integrity_issue = _artifact_integrity_issue(approved_revision.artifacts)
     if integrity_issue:
