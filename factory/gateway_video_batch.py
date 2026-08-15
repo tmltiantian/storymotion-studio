@@ -678,6 +678,9 @@ def _clip_state_base(
         "model": model,
         "shot_id": job.shot_id,
         "output_path": _canonical_output_path(output),
+        "duration": job.duration,
+        "resolution": job.resolution,
+        "reference_image_count": len(job.images),
     }
 
 
@@ -784,10 +787,16 @@ def _reference_audio_evidence(audio: str | Path | None) -> dict[str, str]:
     if audio is None:
         return {}
     value = str(audio).strip()
-    if not value or value.lower().startswith(("https://", "http://", "data:")):
+    if not value:
         raise GatewayVideoBatchError(
-            "Gateway video single-shot reference audio must be a local file."
+            "Gateway video single-shot reference audio is empty."
         )
+    if value.lower().startswith(("https://", "http://", "data:")):
+        return {
+            "reference_audio_value_sha256": hashlib.sha256(
+                value.encode("utf-8")
+            ).hexdigest()
+        }
     path = Path(value).expanduser()
     return {
         "reference_audio_path": str(path.resolve()),
@@ -833,6 +842,28 @@ def _validate_replacement_mode(
         raise GatewayVideoBatchError(
             "Gateway video overwrite and replace_stale are mutually exclusive."
         )
+
+
+def _validate_client_generation_settings(
+    client: GatewayVideoClient,
+    job: GatewayVideoJob,
+) -> None:
+    provider_validator = getattr(client, "validate_generation_settings", None)
+    if callable(provider_validator):
+        provider_validator(
+            duration=job.duration,
+            ratio=job.ratio,
+            resolution=job.resolution,
+            image_count=len(job.images),
+        )
+        return
+    validate_gateway_video_generation_settings(
+        model=client.config.model,
+        duration=job.duration,
+        ratio=job.ratio,
+        resolution=job.resolution,
+        image_count=len(job.images),
+    )
 
 
 def _execute_gateway_video_jobs(
@@ -951,6 +982,25 @@ def _execute_gateway_video_jobs(
                 report["executed"] = True
                 task = resumable_task
                 report["resumed_count"] += 1
+                restore_settings = getattr(
+                    client,
+                    "restore_task_settings",
+                    None,
+                )
+                if callable(restore_settings):
+                    restore_settings(
+                        task.task_id,
+                        resolution=str(state.get("resolution") or job.resolution),
+                        duration=int(state.get("duration") or job.duration),
+                        image_count=int(
+                            state.get("reference_image_count")
+                            if isinstance(
+                                state.get("reference_image_count"),
+                                int,
+                            )
+                            else len(job.images)
+                        ),
+                    )
                 result = client.complete_task(
                     task,
                     job.output_path,
@@ -1127,18 +1177,12 @@ def render_gateway_video_batch(
     )
     try:
         for job in jobs:
-            validate_gateway_video_generation_settings(
-                model=client.config.model,
-                duration=job.duration,
-                ratio=job.ratio,
-                resolution=job.resolution,
-                image_count=len(job.images),
-            )
+            _validate_client_generation_settings(client, job)
     except GatewayVideoError as exc:
         raise GatewayVideoBatchError(str(exc)) from exc
     report: dict[str, Any] = {
         "schema_version": "motion-comic-factory.gateway-video-batch.v1",
-        "provider": "gateway",
+        "provider": getattr(client, "provider", "gateway"),
         "model": client.config.model,
         "handoff_path": str(Path(handoff_path)),
         "openmontage_package_path": str(Path(package_path)),
@@ -1217,13 +1261,7 @@ def render_gateway_video_single(
     destination = Path(report_path)
     _validate_report_destination(destination, [job])
     try:
-        validate_gateway_video_generation_settings(
-            model=client.config.model,
-            duration=job.duration,
-            ratio=job.ratio,
-            resolution=job.resolution,
-            image_count=len(job.images),
-        )
+        _validate_client_generation_settings(client, job)
         client.validate_reference_images(job.images)
         if audio is not None:
             client.validate_reference_audio(audio)
@@ -1233,7 +1271,7 @@ def render_gateway_video_single(
 
     report: dict[str, Any] = {
         "schema_version": "motion-comic-factory.gateway-video.v2",
-        "provider": "gateway",
+        "provider": getattr(client, "provider", "gateway"),
         "model": client.config.model,
         "output_path": job.output_path,
         "state_path": str(_clip_state_path(Path(job.output_path))),

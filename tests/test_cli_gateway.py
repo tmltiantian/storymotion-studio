@@ -44,6 +44,20 @@ def _gateway_env() -> dict[str, str]:
     return env
 
 
+def _minimax_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(
+        {
+            "VIDEO_PROVIDER": "minimax",
+            "MINIMAX_API_KEY": "minimax-do-not-leak",
+            "MINIMAX_API_BASE": "https://api.minimaxi.com",
+            "MINIMAX_VIDEO_MODEL": "MiniMax-H3",
+            "ENABLE_MINIMAX_VIDEO": "1",
+        }
+    )
+    return env
+
+
 def test_cli_provider_report_writes_sanitized_profile(tmp_path):
     config = _config(tmp_path)
 
@@ -242,6 +256,105 @@ def test_cli_gateway_video_generate_returns_error_for_invalid_dry_run(tmp_path):
     assert result.returncode == 1
     assert report["plan_ready"] is False
     assert "at most 15 seconds" in report["error"]
+
+
+def test_cli_video_generate_uses_minimax_h3_defaults_without_network(tmp_path):
+    config = _config(tmp_path)
+    output = tmp_path / "h3.mp4"
+
+    result = subprocess.run(
+        [
+            PYTHON,
+            "factory_cli.py",
+            "--config",
+            str(config),
+            "video-generate",
+            "--prompt",
+            "a cat raises one paw naturally",
+            "--output",
+            str(output),
+            "--duration",
+            "4",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_minimax_env(),
+    )
+
+    payload = json.loads(result.stdout)
+    report = json.loads(Path(payload["gateway_video_report"]).read_text(encoding="utf-8"))
+    assert report["provider"] == "minimax"
+    assert report["model"] == "MiniMax-H3"
+    assert report["jobs"][0]["resolution"] == "768P"
+    assert report["executed"] is False
+    assert report["plan_ready"] is True
+    assert output.exists() is False
+    assert "minimax-do-not-leak" not in json.dumps(report)
+
+
+def test_cli_video_generate_reports_unsupported_provider_without_crashing(tmp_path):
+    config = _config(tmp_path)
+    env = os.environ.copy()
+    env["VIDEO_PROVIDER"] = "local"
+
+    result = subprocess.run(
+        [
+            PYTHON,
+            "factory_cli.py",
+            "--config",
+            str(config),
+            "video-generate",
+            "--prompt",
+            "a cat moves",
+            "--output",
+            str(tmp_path / "clip.mp4"),
+            "--enable-live",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    payload = json.loads(result.stdout)
+    report = json.loads(Path(payload["gateway_video_report"]).read_text("utf-8"))
+    assert result.returncode == 1
+    assert report["executed"] is False
+    assert report["blocked_reasons"] == [
+        "A supported cloud video provider is not configured."
+    ]
+
+
+def test_cli_video_batch_reports_unsupported_provider_before_reading_inputs(tmp_path):
+    config = _config(tmp_path)
+    env = os.environ.copy()
+    env["VIDEO_PROVIDER"] = "local"
+
+    result = subprocess.run(
+        [
+            PYTHON,
+            "factory_cli.py",
+            "--config",
+            str(config),
+            "video-batch",
+            "--project",
+            "missing-project",
+            "--enable-live",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    payload = json.loads(result.stdout)
+    report = json.loads(Path(payload["gateway_video_batch"]).read_text("utf-8"))
+    assert result.returncode == 1
+    assert report["executed"] is False
+    assert report["blocked_reasons"] == [
+        "A supported cloud video provider is not configured."
+    ]
 
 
 def test_cli_gateway_video_batch_plans_openmontage_clips_without_network(tmp_path):

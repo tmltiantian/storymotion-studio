@@ -57,6 +57,7 @@ class GatewayVideoConfig:
     max_reference_image_bytes: int = 12 * 1024 * 1024
     max_reference_audio_bytes: int = 16 * 1024 * 1024
     send_idempotency_key: bool = False
+    retry_submit_with_curl: bool = True
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,8 @@ class GatewayVideoResult:
 
 
 class GatewayVideoClient:
+    provider = "gateway"
+
     def __init__(
         self,
         config: GatewayVideoConfig,
@@ -521,7 +524,10 @@ class GatewayVideoClient:
                 status_code=exc.code,
             ) from exc
         except (URLError, TimeoutError, OSError) as exc:
-            if self.enable_curl_fallback and self.curl_bin:
+            curl_retry_allowed = (
+                operation != "submit" or self.config.retry_submit_with_curl
+            )
+            if self.enable_curl_fallback and self.curl_bin and curl_retry_allowed:
                 return self._request_json_via_curl(
                     request,
                     operation=operation,
@@ -1087,6 +1093,36 @@ def validate_gateway_video_generation_settings(
         raise GatewayVideoError(
             "Seedance 2.0 Fast supports 480p or 720p resolution."
         )
+    if normalized_model == "minimax-h3":
+        if not 4 <= duration <= 15:
+            raise GatewayVideoError(
+                "MiniMax H3 duration must be between 4 and 15 seconds."
+            )
+        if image_count > 9:
+            raise GatewayVideoError(
+                "MiniMax H3 accepts at most 9 reference images."
+            )
+        if resolution.strip().upper() not in {"768P", "2K"}:
+            raise GatewayVideoError(
+                "MiniMax H3 resolution must be 768P or 2K."
+            )
+        normalized_ratio = ratio.strip().lower()
+        if normalized_ratio not in {
+            "adaptive",
+            "21:9",
+            "16:9",
+            "4:3",
+            "1:1",
+            "3:4",
+            "9:16",
+        }:
+            raise GatewayVideoError(
+                "MiniMax H3 aspect ratio is unsupported."
+            )
+        if normalized_ratio == "adaptive" and image_count == 0:
+            raise GatewayVideoError(
+                "MiniMax H3 text-only generation requires a concrete aspect ratio."
+            )
 
 
 class GatewayVideoProbe:

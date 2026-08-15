@@ -777,7 +777,7 @@ def test_visual_timeline_rejects_smuggled_action_targets(sample_episode, target)
 
 
 def _real_episode() -> Episode:
-    path = Path(__file__).parents[1] / "runs" / "sample_episode" / "episode.json"
+    path = Path(__file__).parents[1] / "samples" / "sample_episode.json"
     return episode_from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 

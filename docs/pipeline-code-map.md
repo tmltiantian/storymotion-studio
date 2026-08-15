@@ -31,6 +31,7 @@
 | 职责 | 文件 |
 | --- | --- |
 | Provider 选择和脱敏报告 | `provider_profile.py`, `dotenv.py` |
+| 可替换视频提供方 | `video_provider.py`, `gateway_video.py`, `minimax_h3_video.py` |
 | 网关文本/图像/视频 | `gateway_text.py`, `gateway_image.py`, `gateway_video.py` |
 | 视频 handoff 批处理 | `gateway_video_batch.py` |
 | 豆包与本地语音 | `doubao_tts.py`, `local_voiceover.py` |

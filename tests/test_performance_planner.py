@@ -693,7 +693,7 @@ def test_build_performance_plan_messages_emits_a_validator_safe_full_example(
 
 
 def test_build_performance_plan_messages_real_example_round_trips_unchanged():
-    path = Path(__file__).parents[1] / "runs" / "sample_episode" / "episode.json"
+    path = Path(__file__).parents[1] / "samples" / "sample_episode.json"
     episode = episode_from_dict(json.loads(path.read_text(encoding="utf-8")))
     system = build_performance_plan_messages(episode)[0]["content"]
     example_text = system.split("Compact JSON example: ", 1)[1]

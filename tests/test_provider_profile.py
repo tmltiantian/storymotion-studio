@@ -90,6 +90,56 @@ def test_gateway_video_requires_both_key_and_explicit_enable(tmp_path):
     )
 
 
+def test_provider_profile_selects_minimax_h3_video(tmp_path):
+    config = _config(tmp_path)
+
+    profile = resolve_provider_profile(
+        config,
+        process_env={
+            "VIDEO_PROVIDER": "minimax",
+            "MINIMAX_API_KEY": "minimax-secret",
+            "ENABLE_MINIMAX_VIDEO": "1",
+        },
+    )
+
+    assert profile.video.provider == "minimax"
+    assert profile.video.model == "MiniMax-H3"
+    assert profile.video.base_url == "https://api.minimaxi.com"
+    assert profile.video.key_name == "MINIMAX_API_KEY"
+    assert profile.video.key_source == "process"
+    assert profile.video.enabled is True
+    assert profile.video.ready is True
+    assert profile.video.blockers == ()
+    assert profile.video.supports_reference_images is True
+
+
+def test_minimax_h3_requires_both_key_and_explicit_enable(tmp_path):
+    config = _config(tmp_path)
+
+    missing_key = resolve_provider_profile(
+        config,
+        process_env={
+            "VIDEO_PROVIDER": "minimax",
+            "ENABLE_MINIMAX_VIDEO": "1",
+        },
+    )
+    disabled = resolve_provider_profile(
+        config,
+        process_env={
+            "VIDEO_PROVIDER": "minimax",
+            "MINIMAX_API_KEY": "minimax-secret",
+            "ENABLE_MINIMAX_VIDEO": "0",
+        },
+    )
+
+    assert missing_key.video.ready is False
+    assert missing_key.video.blockers == ("MINIMAX_API_KEY is missing.",)
+    assert disabled.video.ready is False
+    assert disabled.video.blockers == (
+        "MiniMax video is disabled; set ENABLE_MINIMAX_VIDEO=1.",
+    )
+
+
 def test_unknown_video_provider_fails_closed_instead_of_using_dashscope(tmp_path):
     config = _config(tmp_path)
 

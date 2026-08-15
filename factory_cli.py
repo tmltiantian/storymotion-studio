@@ -43,6 +43,7 @@ from factory.model_bakeoff import ModelBakeoffError, finalize_bakeoff
 from factory.openmontage_adapter import load_config
 from factory.preview_refresh import PreviewRefreshError, refresh_project_preview
 from factory.provider_profile import resolve_provider_profile
+from factory.video_provider import build_video_client, default_video_resolution
 from factory.quality_bakeoff_runner import (
     QualityBakeoffRunnerError,
     run_quality_bakeoff_candidates,
@@ -659,26 +660,27 @@ def gateway_video_probe_command(args: argparse.Namespace) -> int:
     return 0 if report["success"] or not args.enable_live else 1
 
 
-def _gateway_video_client(profile, args: argparse.Namespace) -> GatewayVideoClient:
+def _gateway_video_client(profile, args: argparse.Namespace):
     model = args.model.strip() or profile.video.model
-    return GatewayVideoClient(
-        GatewayVideoConfig(
-            api_key=profile.video.api_key,
-            base_url=profile.video.base_url,
-            model=model,
-            timeout_seconds=args.timeout,
-            submit_timeout_seconds=args.submit_timeout,
-            download_timeout_seconds=args.download_timeout,
-            poll_interval_seconds=args.poll_interval,
-            max_wait_seconds=args.max_wait,
-        )
+    return build_video_client(
+        profile.video,
+        model=model,
+        timeout_seconds=args.timeout,
+        submit_timeout_seconds=args.submit_timeout,
+        download_timeout_seconds=args.download_timeout,
+        poll_interval_seconds=args.poll_interval,
+        max_wait_seconds=args.max_wait,
     )
 
 
 def gateway_video_generate_command(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     profile = resolve_provider_profile(config)
-    video_client = _gateway_video_client(profile, args)
+    model = args.model.strip() or profile.video.model
+    provider_supported = profile.video.provider in {"gateway", "minimax"}
+    resolution = args.resolution.strip() or default_video_resolution(
+        profile.video.provider
+    )
     output_path = Path(args.output)
     report_path = (
         Path(args.report_output)
@@ -688,7 +690,7 @@ def gateway_video_generate_command(args: argparse.Namespace) -> int:
     fallback_report = {
         "schema_version": "motion-comic-factory.gateway-video.v2",
         "provider": profile.video.provider,
-        "model": video_client.config.model,
+        "model": model,
         "output_path": str(output_path),
         "reference_image_count": len(args.image),
         "reference_audio_provided": bool(args.audio),
@@ -707,15 +709,16 @@ def gateway_video_generate_command(args: argparse.Namespace) -> int:
         "errors": [],
         "error": "",
     }
-    if args.enable_live and profile.video.provider != "gateway":
+    if not provider_supported:
         report = fallback_report
-        report["blocked_reasons"] = ["Video provider is not configured as gateway."]
+        report["blocked_reasons"] = ["A supported cloud video provider is not configured."]
         write_json(report_path, report)
     elif args.enable_live and not profile.video.ready:
         report = fallback_report
         report["blocked_reasons"] = list(profile.video.blockers)
         write_json(report_path, report)
     else:
+        video_client = _gateway_video_client(profile, args)
         try:
             report = render_gateway_video_single(
                 args.prompt,
@@ -726,7 +729,7 @@ def gateway_video_generate_command(args: argparse.Namespace) -> int:
                 audio=args.audio or None,
                 duration=args.duration,
                 ratio=args.ratio,
-                resolution=args.resolution,
+                resolution=resolution,
                 generate_audio=args.generate_audio,
                 allow_network=args.enable_live,
                 overwrite=args.overwrite,
@@ -762,7 +765,10 @@ def gateway_video_generate_command(args: argparse.Namespace) -> int:
 def gateway_video_batch_command(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     profile = resolve_provider_profile(config)
-    video_client = _gateway_video_client(profile, args)
+    model = args.model.strip() or profile.video.model
+    resolution = args.resolution.strip() or default_video_resolution(
+        profile.video.provider
+    )
     run_dir = Path(config["runsDir"]) / args.project
     handoff_path = Path(args.handoff) if args.handoff else run_dir / "video_handoff.json"
     package_path = (
@@ -771,9 +777,47 @@ def gateway_video_batch_command(args: argparse.Namespace) -> int:
     report_path = (
         Path(args.output) if args.output else run_dir / "gateway_video_batch.json"
     )
+    if profile.video.provider not in {"gateway", "minimax"}:
+        report = {
+            "schema_version": "motion-comic-factory.gateway-video-batch.v1",
+            "provider": profile.video.provider,
+            "model": model,
+            "plan_ready": False,
+            "planned_count": 0,
+            "executed": False,
+            "success": False,
+            "completed_count": 0,
+            "skipped_count": 0,
+            "resumed_count": 0,
+            "failed_count": 0,
+            "overwrite": args.overwrite,
+            "blocked_reasons": [
+                "A supported cloud video provider is not configured."
+            ],
+            "jobs": [],
+            "results": [],
+            "errors": [],
+        }
+        write_json(report_path, report)
+        print(
+            json.dumps(
+                {
+                    "gateway_video_batch": str(report_path),
+                    "plan_ready": False,
+                    "planned_count": 0,
+                    "executed": False,
+                    "success": False,
+                    "skipped_count": 0,
+                    "blocked_reasons": report["blocked_reasons"],
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 1
+    video_client = _gateway_video_client(profile, args)
     can_execute = (
         args.enable_live
-        and profile.video.provider == "gateway"
+        and profile.video.provider in {"gateway", "minimax"}
         and profile.video.ready
     )
     try:
@@ -783,15 +827,12 @@ def gateway_video_batch_command(args: argparse.Namespace) -> int:
             video_client,
             report_path,
             limit=args.limit,
-            resolution=args.resolution,
+            resolution=resolution,
             generate_audio=args.generate_audio,
             overwrite=args.overwrite,
             allow_network=can_execute,
         )
-        if args.enable_live and profile.video.provider != "gateway":
-            report["blocked_reasons"] = ["Video provider is not configured as gateway."]
-            write_json(report_path, report)
-        elif args.enable_live and not profile.video.ready:
+        if args.enable_live and not profile.video.ready:
             report["blocked_reasons"] = list(profile.video.blockers)
             write_json(report_path, report)
     except GatewayVideoBatchError as exc:
@@ -4233,7 +4274,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     gateway_video_generate_parser = subparsers.add_parser(
         "gateway-video-generate",
-        help="Generate, poll, and download one gateway video clip",
+        aliases=["video-generate"],
+        help="Generate, poll, and download one configured cloud video clip",
     )
     gateway_video_generate_parser.add_argument("--prompt", required=True)
     gateway_video_generate_parser.add_argument("--model", default="")
@@ -4243,7 +4285,7 @@ def build_parser() -> argparse.ArgumentParser:
     gateway_video_generate_parser.add_argument("--audio", default="")
     gateway_video_generate_parser.add_argument("--duration", type=int, default=5)
     gateway_video_generate_parser.add_argument("--ratio", default="9:16")
-    gateway_video_generate_parser.add_argument("--resolution", default="720p")
+    gateway_video_generate_parser.add_argument("--resolution", default="")
     gateway_video_generate_parser.add_argument("--generate-audio", action="store_true")
     gateway_video_generate_parser.add_argument("--overwrite", action="store_true")
     gateway_video_generate_parser.add_argument("--timeout", type=float, default=60.0)
@@ -4256,7 +4298,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     gateway_video_batch_parser = subparsers.add_parser(
         "gateway-video-batch",
-        help="Generate video-handoff clips into OpenMontage asset paths",
+        aliases=["video-batch"],
+        help="Generate configured cloud video clips into OpenMontage asset paths",
     )
     gateway_video_batch_parser.add_argument("--project", default="sample_episode")
     gateway_video_batch_parser.add_argument("--model", default="")
@@ -4269,7 +4312,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Maximum clips to generate; use 0 for all clips",
     )
-    gateway_video_batch_parser.add_argument("--resolution", default="720p")
+    gateway_video_batch_parser.add_argument("--resolution", default="")
     gateway_video_batch_parser.add_argument("--generate-audio", action="store_true")
     gateway_video_batch_parser.add_argument(
         "--overwrite",

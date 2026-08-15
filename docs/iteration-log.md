@@ -2957,3 +2957,25 @@ Security:
 - Python Ruff、compileall 与全量 `2615 passed`；前端生产构建完成，4 项页面测试通过。
 - 发布审计未发现真实密钥；模型权重、生成媒体、队列历史、缓存和依赖目录均排除在新仓库
   之外。旧 GitHub 仓库保持不变，新项目使用无旧提交历史的干净快照发布。
+## 2026-08-14 - MiniMax H3 official video provider
+
+### Problem
+
+- The unified pipeline could only execute video through the internal gateway/Seedance route.
+- MiniMax H3 uses `/v2/video_generation`, a nested asynchronous task response, and provider-specific limits that did not fit the previous request contract.
+- The first live request exposed a contract mismatch: the service requires `ratio`; sending `aspect_ratio` was interpreted as an omitted ratio and rejected before generation.
+
+### Reasoning and correction
+
+- Kept the nine-stage pipeline unchanged and added H3 as a replaceable video adapter instead of creating another production path.
+- Reused the hardened timeout, retry, download validation, state recovery, and secret-redaction behavior from the existing video client.
+- Added tests before implementation for provider selection, request shape, 4-15 second and 768P/2K constraints, reference assets, nested polling, usage/cost reporting, CLI defaults, and credential redaction.
+- Captured the real HTTP 400 response as a regression test, then changed only the request field from `aspect_ratio` to `ratio`.
+
+### Result
+
+- `VIDEO_PROVIDER=minimax` now selects `MiniMax-H3` through the same storyboard-to-video and batch execution path.
+- `video-generate` and `video-batch` are neutral aliases; existing gateway command names remain compatible.
+- A live 4-second 768P probe completed successfully, returned an H.264/AAC 768x1344 clip, and reported four output seconds with an estimated cost of CNY 2.00.
+- The contact-sheet review showed one stable black-and-white cat, a fixed warm wooden room, one continuous paw-raise action, no extra limbs, and no scene cut.
+- Independent review then hardened five edge cases: billable H3 POST requests cannot fall back to an automatic curl resubmission; resume state restores resolution/duration/reference counts for 2K cost reporting; remote reference audio is represented only by a SHA-256 digest; the adapter canonicalizes and enforces `MiniMax-H3`; and unsupported providers return structured CLI blockers instead of crashing.

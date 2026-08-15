@@ -9,7 +9,6 @@ from typing import Any
 
 from .character_assets import write_character_asset_manifest
 from .file_io import sha256_file, write_json_atomic
-from .gateway_video import GatewayVideoClient, GatewayVideoConfig
 from .gateway_video_batch import render_gateway_video_batch
 from .local_voiceover import render_voiceover_preview
 from .media_validation import probe_media
@@ -28,6 +27,7 @@ from .provider_profile import resolve_provider_profile
 from .schema import Episode, episode_from_dict, episode_to_dict
 from .shot_card_renderer import render_card_preview_video
 from .video_handoff import write_video_handoff
+from .video_provider import build_video_client, default_video_resolution
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -332,9 +332,9 @@ def execute_video(context: StageContext) -> StageExecution:
     if context.enable_live:
         config = _factory_config(context)
         profile = resolve_provider_profile(config)
-        if profile.video.provider != "gateway" or not profile.video.ready:
+        if profile.video.provider not in {"gateway", "minimax"} or not profile.video.ready:
             blockers = profile.video.blockers or (
-                "A ready gateway video provider is required.",
+                "A ready cloud video provider is required.",
             )
             raise RuntimeError("; ".join(blockers))
         handoff = write_video_handoff(
@@ -347,15 +347,12 @@ def execute_video(context: StageContext) -> StageExecution:
             run_dir=context.stage_dir,
         )
         report_path = context.stage_dir / "gateway_video_batch.json"
-        client = GatewayVideoClient(
-            GatewayVideoConfig(
-                api_key=profile.video.api_key,
-                base_url=profile.video.base_url,
-                model=str(
-                    context.spec.providers.get("video_model")
-                    or profile.video.model
-                ),
-            )
+        client = build_video_client(
+            profile.video,
+            model=str(
+                context.spec.providers.get("video_model")
+                or profile.video.model
+            ),
         )
         report = render_gateway_video_batch(
             handoff,
@@ -363,13 +360,16 @@ def execute_video(context: StageContext) -> StageExecution:
             client,
             report_path,
             limit=int(context.spec.target.get("video_limit") or 0),
-            resolution=str(context.spec.target.get("video_resolution") or "720p"),
+            resolution=str(
+                context.spec.target.get("video_resolution")
+                or default_video_resolution(profile.video.provider)
+            ),
             generate_audio=False,
             allow_network=True,
         )
         if not report.get("success"):
             detail = report.get("errors") or report.get("blocked_reasons")
-            raise RuntimeError(f"Gateway video generation failed: {detail}")
+            raise RuntimeError(f"Cloud video generation failed: {detail}")
         package_payload = _read_json(package)
         clips = [
             Path(str(item["expected_assets"]["video_clip"]))
@@ -377,9 +377,9 @@ def execute_video(context: StageContext) -> StageExecution:
         ]
         missing = [str(path) for path in clips if not path.is_file()]
         if missing:
-            raise RuntimeError(f"Gateway video clips are missing: {missing}")
+            raise RuntimeError(f"Cloud video clips are missing: {missing}")
         artifacts.extend((handoff, package, report_path, *clips))
-        generation_mode = "gateway_video"
+        generation_mode = f"{profile.video.provider}_video"
     else:
         render_card_preview_video(
             episode,

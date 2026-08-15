@@ -19,6 +19,9 @@ def test_bootstrap_installs_pinned_dependencies_and_runs_tests():
     requirements = Path("requirements.txt").read_text(encoding="utf-8")
 
     assert "-m venv" in script
+    assert "python3.12" in script
+    assert "sys.version_info >= (3, 10)" in script
+    assert "--clear" in script
     assert "pip install -r" in script
     assert "-m pytest tests -q" in script
     assert "Pillow==" in requirements
