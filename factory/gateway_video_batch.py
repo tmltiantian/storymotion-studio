@@ -516,6 +516,10 @@ def _clip_state_path(output: Path) -> Path:
     return output.with_suffix(output.suffix + ".gateway.json")
 
 
+def gateway_video_clip_state_path(output: str | Path) -> Path:
+    return _clip_state_path(Path(output))
+
+
 def _clip_lock_path(output: Path) -> Path:
     return output.with_suffix(output.suffix + ".gateway.lock")
 
@@ -911,6 +915,7 @@ def _execute_gateway_video_jobs(
     allow_network: bool,
     overwrite: bool,
     replace_stale: bool = False,
+    repair_shot_ids: tuple[str, ...] = (),
     audio: str | Path | None = None,
     reference_audio: dict[str, str] | None = None,
     report_sanitizer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
@@ -923,7 +928,76 @@ def _execute_gateway_video_jobs(
         report["blocked_reasons"] = ["Live gateway video generation is disabled."]
         return _write_report(destination, report, report_sanitizer)
 
+    repair_targets = set(repair_shot_ids)
+    if repair_targets:
+        for job in jobs:
+            if job.shot_id in repair_targets:
+                continue
+            output = Path(job.output_path)
+            state_path = _clip_state_path(output)
+            lock_descriptor: int | None = None
+            try:
+                job_audio: str | Path | None = job.audio_path or audio
+                job_reference_audio = (
+                    _reference_audio_evidence(job_audio)
+                    if job_audio is not None
+                    else {}
+                )
+                endpoint_fingerprint = gateway_endpoint_fingerprint(
+                    client.config.base_url
+                )
+                signature = _job_signature(
+                    job,
+                    model=client.config.model,
+                    generate_audio=generate_audio,
+                    endpoint_fingerprint=endpoint_fingerprint,
+                    reference_audio=job_reference_audio or reference_audio,
+                )
+                _prepare_clip_lock_parent(output)
+                lock_descriptor = _acquire_clip_lock(output)
+                state = _read_clip_state(state_path)
+                matching_state = _state_matches_job(
+                    state,
+                    job=job,
+                    output=output,
+                    signature=signature,
+                    endpoint_fingerprint=endpoint_fingerprint,
+                    model=client.config.model,
+                )
+                if not (
+                    matching_state
+                    and _completed_state_matches_output(state, output)
+                ):
+                    raise GatewayVideoError(
+                        "Preserved gateway video job is not reusable for scoped repair."
+                    )
+                report["results"].append(
+                    {
+                        "shot_id": job.shot_id,
+                        "index": job.index,
+                        "status": "preserved_existing",
+                        "output_path": str(output),
+                        "output_size_bytes": output.stat().st_size,
+                        "state_path": str(state_path),
+                    }
+                )
+                report["skipped_count"] += 1
+            except (GatewayVideoError, OSError, ValueError) as exc:
+                report["errors"].append(
+                    {
+                        "shot_id": job.shot_id,
+                        "index": job.index,
+                        "error": _sanitize(str(exc), client.config.api_key),
+                    }
+                )
+                report["failed_count"] += 1
+                return _write_report(destination, report, report_sanitizer)
+            finally:
+                _release_clip_lock(lock_descriptor)
+
     for job in jobs:
+        if repair_targets and job.shot_id not in repair_targets:
+            continue
         output = Path(job.output_path)
         state_path = _clip_state_path(output)
         lock_descriptor: int | None = None
@@ -1198,6 +1272,7 @@ def render_gateway_video_batch(
     allow_network: bool = False,
     overwrite: bool = False,
     replace_stale: bool = False,
+    repair_shot_ids: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     _validate_replacement_mode(
         overwrite=overwrite,
@@ -1209,6 +1284,23 @@ def render_gateway_video_batch(
         limit=limit,
         resolution=resolution,
     )
+    normalized_repair_ids = tuple(
+        dict.fromkeys(str(shot_id).strip() for shot_id in repair_shot_ids)
+    )
+    if any(not shot_id for shot_id in normalized_repair_ids):
+        raise GatewayVideoBatchError("Repair shot IDs cannot be empty.")
+    known_shot_ids = {job.shot_id for job in jobs}
+    unknown_repair_ids = tuple(
+        shot_id for shot_id in normalized_repair_ids if shot_id not in known_shot_ids
+    )
+    if unknown_repair_ids:
+        raise GatewayVideoBatchError(
+            "Unknown repair shot IDs: " + ", ".join(unknown_repair_ids)
+        )
+    if normalized_repair_ids and not replace_stale:
+        raise GatewayVideoBatchError(
+            "Scoped repair shot IDs require replace_stale."
+        )
     destination = Path(report_path)
     _validate_report_destination(
         destination,
@@ -1236,6 +1328,7 @@ def render_gateway_video_batch(
         "failed_count": 0,
         "overwrite": overwrite,
         "replace_stale": replace_stale,
+        "repair_shot_ids": list(normalized_repair_ids),
         "blocked_reasons": [],
         "jobs": [job.to_report() for job in jobs],
         "results": [],
@@ -1250,6 +1343,7 @@ def render_gateway_video_batch(
         allow_network=allow_network,
         overwrite=overwrite,
         replace_stale=replace_stale,
+        repair_shot_ids=normalized_repair_ids,
     )
 
 

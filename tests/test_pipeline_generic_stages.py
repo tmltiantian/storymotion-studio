@@ -332,6 +332,8 @@ def test_live_video_repair_enables_signature_reuse_and_registers_every_clip(
     handoff = context.stage_dir / "handoff.json"
     package = context.stage_dir / "package.json"
     clips = [context.stage_dir / "shot_01.mp4", context.stage_dir / "shot_02.mp4"]
+    stale_local_preview = context.stage_dir / "visual_preview.mp4"
+    stale_local_preview.write_bytes(b"stale-local-preview")
     observed: dict[str, object] = {}
 
     monkeypatch.setattr(pipeline_generic_stages, "_episode", lambda current: episode)
@@ -386,6 +388,9 @@ def test_live_video_repair_enables_signature_reuse_and_registers_every_clip(
         observed.update(kwargs)
         for clip in clips:
             clip.write_bytes(clip.name.encode("ascii"))
+            Path(f"{clip}.gateway.json").write_text(
+                json.dumps({"status": "completed"}), encoding="utf-8"
+            )
         return {"success": True}
 
     monkeypatch.setattr(
@@ -404,8 +409,13 @@ def test_live_video_repair_enables_signature_reuse_and_registers_every_clip(
     )
 
     assert observed["replace_stale"] is True
+    assert observed["repair_shot_ids"] == ("shot_02",)
+    assert manifest["primary_video"] == ""
     assert manifest["clip_by_shot"] == {
         "shot_01": str(clips[0].resolve()),
         "shot_02": str(clips[1].resolve()),
     }
     assert all(str(clip) in execution.artifacts for clip in clips)
+    assert all(
+        str(Path(f"{clip}.gateway.json")) in execution.artifacts for clip in clips
+    )
