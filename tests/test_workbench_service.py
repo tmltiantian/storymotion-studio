@@ -18,6 +18,7 @@ from factory.pipeline_contracts import (
     StageState,
 )
 from factory.pipeline_jobs import JobManager, ProjectBusyError
+from factory.pipeline_migration import migrate_existing_project
 from factory.pipeline_store import create_project, load_production_package
 from factory.provider_profile import CapabilityConfig, ProviderProfile
 from factory.workbench_service import WorkbenchService
@@ -178,15 +179,80 @@ def test_impact_preview_exposes_path_free_authoritative_summary(
     )
 
     assert payload["summary"] == {
-        "schema_version": "motion-comic-factory.impact-summary.v1",
-        "regenerated_video_shot_ids": [],
-        "reused_video_shot_ids": ["shot_01", "shot_02"],
-        "regenerated_audio_item_ids": [],
+        "schema_version": "motion-comic-factory.impact-summary.v2",
+        "regenerated_video_shot_count": 0,
+        "reused_video_shot_count": 2,
+        "regenerated_audio_item_count": 0,
         "affected_stages": ["edit", "eval", "deliver"],
         "estimate": {"available": False},
     }
+    assert payload["entries"] == [
+        {"stage": "edit", "item_count": 1},
+        {"stage": "eval", "item_count": 1},
+        {"stage": "deliver", "item_count": 1},
+    ]
     assert payload["preserved_artifacts"] == []
     assert str(workspace) not in json.dumps(payload)
+
+    scoped = service.preview_impact(
+        "episode_01",
+        {
+            "stage": "storyboard",
+            "scope": "shot",
+            "dialogue_ids": [],
+            "character_ids": [],
+            "shot_ids": ["shot_01"],
+            "subtitle_style": False,
+        },
+    )
+    assert scoped["request"]["selection_counts"]["shot"] == 1
+    assert "shot_01" not in json.dumps(scoped)
+
+
+def test_subtitle_preview_never_exposes_path_shaped_migrated_shot_id(
+    service: WorkbenchService,
+    project_workspace: tuple[Path, Path],
+) -> None:
+    workspace, _artifact = project_workspace
+    raw_shot_id = "/private/legacy/storyboards/shot_01.png"
+    legacy = workspace / "legacy-source"
+    legacy.mkdir()
+    (legacy / "episode.json").write_text(
+        json.dumps(
+            {
+                "project_id": "legacy-impact",
+                "title": "Legacy Impact",
+                "shots": [
+                    {"id": raw_shot_id, "index": 1, "dialogue": []},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    migrate_existing_project(
+        legacy,
+        workspace / "runs" / "legacy-impact",
+        project_id="legacy-impact",
+        title="Legacy Impact",
+        mode=ProjectMode.NOVEL,
+    )
+
+    payload = service.preview_impact(
+        "legacy-impact",
+        {
+            "stage": "edit",
+            "scope": "subtitle_style",
+            "dialogue_ids": [],
+            "character_ids": [],
+            "shot_ids": [],
+            "subtitle_style": True,
+        },
+    )
+    encoded = json.dumps(payload)
+
+    assert payload["summary"]["reused_video_shot_count"] == 1
+    assert raw_shot_id not in encoded
+    assert "/private/" not in encoded
 
 
 def test_artifact_ids_are_stable_and_only_registered_files_are_readable(

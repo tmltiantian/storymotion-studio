@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   Artifact,
   ImpactPlan,
+  ImpactRequest,
   ProjectDetail,
   StageDetail,
   StageName,
@@ -95,34 +96,24 @@ function projectFixture(
 
 function impactFixture(overrides: Partial<ImpactPlan> = {}): ImpactPlan {
   return {
-    schema_version: "motion-comic-factory.impact-plan.v1",
+    schema_version: "motion-comic-factory.impact-plan.v2",
     plan_id: "a".repeat(64),
     request: {
       stage: "storyboard",
       scope: "shot",
-      dialogue_ids: [],
-      character_ids: [],
-      shot_ids: ["shot_03"],
       subtitle_style: false,
+      selection_counts: { dialogue: 0, character: 0, shot: 1 },
     },
     entries: [
-      { stage: "storyboard", item_ids: ["shot_03"] },
-      { stage: "video", item_ids: ["shot_03"] },
-      { stage: "edit", item_ids: ["timeline"] },
+      { stage: "storyboard", item_count: 1 },
+      { stage: "video", item_count: 1 },
+      { stage: "edit", item_count: 1 },
     ],
     summary: {
-      schema_version: "motion-comic-factory.impact-summary.v1",
-      regenerated_video_shot_ids: ["shot_03"],
-      reused_video_shot_ids: [
-        "shot_01",
-        "shot_02",
-        "shot_04",
-        "shot_05",
-        "shot_06",
-        "shot_07",
-        "shot_08",
-      ],
-      regenerated_audio_item_ids: [],
+      schema_version: "motion-comic-factory.impact-summary.v2",
+      regenerated_video_shot_count: 1,
+      reused_video_shot_count: 7,
+      regenerated_audio_item_count: 0,
       affected_stages: ["storyboard", "video", "edit"],
       estimate: { available: false },
     },
@@ -131,7 +122,19 @@ function impactFixture(overrides: Partial<ImpactPlan> = {}): ImpactPlan {
       (_, index) => `art_reused_${index + 1}`,
     ),
     package_sha256: "b".repeat(64),
+    episode_sha256: "c".repeat(64),
     ...overrides,
+  };
+}
+
+function impactRequestFixture(): ImpactRequest {
+  return {
+    stage: "storyboard",
+    scope: "shot",
+    dialogue_ids: [],
+    character_ids: [],
+    shot_ids: ["shot_03"],
+    subtitle_style: false,
   };
 }
 
@@ -194,6 +197,24 @@ function renderWorkspace(
 ) {
   const content = <WorkspaceTestTree api={api} route={route} />;
   return render(strict ? <StrictMode>{content}</StrictMode> : content);
+}
+
+function renderImpactDialog(api: ProjectWorkspaceApi) {
+  return render(
+    <>
+      <div className="app-shell" />
+      <ImpactDialog
+        api={api}
+        projectId="episode_01"
+        request={impactRequestFixture()}
+        issueLabel="动作不连贯"
+        description="第三镜动作接不上。"
+        returnFocusRef={{ current: document.createElement("button") }}
+        onClose={() => undefined}
+        onApplied={vi.fn().mockResolvedValue(undefined)}
+      />
+    </>,
+  );
 }
 
 afterEach(() => {
@@ -331,7 +352,7 @@ describe("project review workspace", () => {
         <ImpactDialog
           api={api}
           projectId="episode_01"
-          request={impactFixture().request}
+          request={impactRequestFixture()}
           issueLabel="动作不连贯"
           description="第三镜动作接不上。"
           returnFocusRef={returnFocusRef}
@@ -345,7 +366,7 @@ describe("project review workspace", () => {
     expect(screen.getByText("其他 7 个镜头继续复用")).toBeVisible();
     expect(screen.getByText("保留 14 个现有文件")).toBeVisible();
     expect(screen.getByText("费用预估：后端未提供")).toBeVisible();
-    expect(screen.getByText("视频 · shot_03")).toBeVisible();
+    expect(screen.getByText("视频 · 1 个项目")).toBeVisible();
     expect(api.applyImpact).not.toHaveBeenCalled();
     await user.click(await screen.findByRole("button", { name: "应用返修计划" }));
 
@@ -365,24 +386,19 @@ describe("project review workspace", () => {
       request: {
         stage: "edit",
         scope: "subtitle_style",
-        dialogue_ids: [],
-        character_ids: [],
-        shot_ids: [],
         subtitle_style: true,
+        selection_counts: { dialogue: 0, character: 0, shot: 0 },
       },
       entries: [
-        { stage: "edit", item_ids: ["subtitles"] },
-        { stage: "eval", item_ids: ["full"] },
-        { stage: "deliver", item_ids: ["full"] },
+        { stage: "edit", item_count: 1 },
+        { stage: "eval", item_count: 1 },
+        { stage: "deliver", item_count: 1 },
       ],
       summary: {
-        schema_version: "motion-comic-factory.impact-summary.v1",
-        regenerated_video_shot_ids: [],
-        reused_video_shot_ids: Array.from(
-          { length: 8 },
-          (_, index) => `shot_${String(index + 1).padStart(2, "0")}`,
-        ),
-        regenerated_audio_item_ids: [],
+        schema_version: "motion-comic-factory.impact-summary.v2",
+        regenerated_video_shot_count: 0,
+        reused_video_shot_count: 8,
+        regenerated_audio_item_count: 0,
         affected_stages: ["edit", "eval", "deliver"],
         estimate: { available: false },
       },
@@ -428,7 +444,7 @@ describe("project review workspace", () => {
         <ImpactDialog
           api={api}
           projectId="episode_01"
-          request={impactFixture().request}
+          request={impactRequestFixture()}
           issueLabel="动作不连贯"
           description="第三镜动作接不上。"
           returnFocusRef={{ current: document.createElement("button") }}
@@ -456,7 +472,7 @@ describe("project review workspace", () => {
         plan_id: "not-a-plan-id",
         request: {
           ...impactFixture().request,
-          shot_ids: ["shot_99"],
+          selection_counts: { dialogue: 0, character: 0, shot: 2 },
         },
       }),
     );
@@ -466,7 +482,7 @@ describe("project review workspace", () => {
         <ImpactDialog
           api={api}
           projectId="episode_01"
-          request={impactFixture().request}
+          request={impactRequestFixture()}
           issueLabel="动作不连贯"
           description="第三镜动作接不上。"
           returnFocusRef={{ current: document.createElement("button") }}
@@ -479,6 +495,61 @@ describe("project review workspace", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("影响预览无法验证");
     expect(screen.queryByRole("button", { name: "应用返修计划" })).not.toBeInTheDocument();
     expect(api.applyImpact).not.toHaveBeenCalled();
+  });
+
+  it("rejects a duplicate stage entry that understates regenerated work", async () => {
+    const api = workspaceApi();
+    vi.mocked(api.previewImpact).mockResolvedValue(impactFixture({
+      entries: [
+        { stage: "storyboard", item_count: 1 },
+        { stage: "video", item_count: 1 },
+        { stage: "video", item_count: 1 },
+        { stage: "edit", item_count: 1 },
+      ],
+    }));
+
+    renderImpactDialog(api);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("影响预览无法验证");
+    expect(screen.queryByRole("button", { name: "应用返修计划" })).not.toBeInTheDocument();
+    expect(api.applyImpact).not.toHaveBeenCalled();
+  });
+
+  it("rejects a summary count understated against its complete stage entry", async () => {
+    const api = workspaceApi();
+    vi.mocked(api.previewImpact).mockResolvedValue(impactFixture({
+      entries: [
+        { stage: "storyboard", item_count: 1 },
+        { stage: "video", item_count: 2 },
+        { stage: "edit", item_count: 1 },
+      ],
+    }));
+
+    renderImpactDialog(api);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("影响预览无法验证");
+    expect(screen.queryByRole("button", { name: "应用返修计划" })).not.toBeInTheDocument();
+    expect(api.applyImpact).not.toHaveBeenCalled();
+  });
+
+  it("rejects impact entries outside canonical stage order", async () => {
+    const api = workspaceApi();
+    vi.mocked(api.previewImpact).mockResolvedValue(impactFixture({
+      entries: [
+        { stage: "video", item_count: 1 },
+        { stage: "storyboard", item_count: 1 },
+        { stage: "edit", item_count: 1 },
+      ],
+      summary: {
+        ...impactFixture().summary,
+        affected_stages: ["video", "storyboard", "edit"],
+      },
+    }));
+
+    renderImpactDialog(api);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("影响预览无法验证");
+    expect(screen.queryByRole("button", { name: "应用返修计划" })).not.toBeInTheDocument();
   });
 
   it("uses the legal stage-level request when no scoped item action is selected", async () => {
@@ -597,7 +668,7 @@ describe("project review workspace", () => {
     const props = {
       api,
       projectId: "episode_01",
-      request: impactFixture().request,
+      request: impactRequestFixture(),
       issueLabel: "动作不连贯",
       description: "第三镜动作接不上。",
       returnFocusRef: { current: returnFocus },
@@ -641,7 +712,7 @@ describe("project review workspace", () => {
         <ImpactDialog
           api={api}
           projectId="episode_01"
-          request={impactFixture().request}
+          request={impactRequestFixture()}
           issueLabel="动作不连贯"
           description="第三镜动作接不上。"
           returnFocusRef={{ current: returnFocus }}

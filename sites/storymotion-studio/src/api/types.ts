@@ -116,26 +116,38 @@ export interface ImpactRequest {
 
 export interface ImpactEntry {
   stage: StageName;
-  item_ids: string[];
+  item_count: number;
+}
+
+export interface PublicImpactRequest {
+  stage: StageName;
+  scope: ChangeScope;
+  subtitle_style: boolean;
+  selection_counts: {
+    dialogue: number;
+    character: number;
+    shot: number;
+  };
 }
 
 export interface ImpactSummary {
-  schema_version: "motion-comic-factory.impact-summary.v1";
-  regenerated_video_shot_ids: string[];
-  reused_video_shot_ids: string[];
-  regenerated_audio_item_ids: string[];
+  schema_version: "motion-comic-factory.impact-summary.v2";
+  regenerated_video_shot_count: number;
+  reused_video_shot_count: number;
+  regenerated_audio_item_count: number;
   affected_stages: StageName[];
   estimate: { available: false };
 }
 
 export interface ImpactPlan {
-  schema_version: "motion-comic-factory.impact-plan.v1";
+  schema_version: "motion-comic-factory.impact-plan.v2";
   plan_id: string;
-  request: Required<ImpactRequest>;
+  request: PublicImpactRequest;
   entries: ImpactEntry[];
   summary: ImpactSummary;
   preserved_artifacts: string[];
   package_sha256: string;
+  episode_sha256: string;
 }
 
 export interface VideoShotRequest {

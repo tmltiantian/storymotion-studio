@@ -27,7 +27,6 @@ from .pipeline_impact import (
     ChangeRequest,
     ImpactPlan,
     apply_impact_plan,
-    build_impact_summary,
     preview_impact,
 )
 from .pipeline_jobs import JobEvent, JobManager, JobRecord, JobWorkerLease
@@ -858,17 +857,34 @@ class WorkbenchService:
         return self._reserved_mutation(project_id, "apply_impact", mutate)
 
     def _impact_public(self, project_id: str, plan: ImpactPlan) -> dict[str, Any]:
-        payload = plan.to_dict()
-        payload["summary"] = build_impact_summary(
-            self._project_dir(project_id),
-            plan,
-        ).to_dict()
-        payload["preserved_artifacts"] = [
-            ref.artifact_id
-            for path in plan.preserved_artifacts
-            if (ref := self._register_artifact(project_id, path)) is not None
-        ]
-        return payload
+        if plan.summary is None:
+            raise ValueError("Legacy impact plan requires a fresh preview")
+        return {
+            "schema_version": plan.schema_version,
+            "plan_id": plan.plan_id,
+            "request": {
+                "stage": plan.request.stage.value,
+                "scope": plan.request.scope.value,
+                "subtitle_style": plan.request.subtitle_style,
+                "selection_counts": {
+                    "dialogue": len(plan.request.dialogue_ids),
+                    "character": len(plan.request.character_ids),
+                    "shot": len(plan.request.shot_ids),
+                },
+            },
+            "entries": [
+                {"stage": entry.stage.value, "item_count": len(entry.item_ids)}
+                for entry in plan.entries
+            ],
+            "summary": plan.summary.to_dict(),
+            "preserved_artifacts": [
+                ref.artifact_id
+                for path in plan.preserved_artifacts
+                if (ref := self._register_artifact(project_id, path)) is not None
+            ],
+            "package_sha256": plan.package_sha256,
+            "episode_sha256": plan.episode_sha256,
+        }
 
     def video_preflight(
         self, project_id: str, shot_ids: Sequence[str]

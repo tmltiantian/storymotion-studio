@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 from pathlib import Path
 
@@ -19,7 +20,6 @@ from factory.pipeline_impact import (
     ChangeRequest,
     DEFAULT_DEPENDENCIES,
     apply_impact_plan,
-    build_impact_summary,
     load_active_repair_scope,
     preview_impact,
     registered_preserved_artifacts,
@@ -30,6 +30,7 @@ from factory import pipeline_impact, pipeline_store
 from factory.pipeline_store import (
     ApprovalInProgressError,
     create_project,
+    load_production_package,
     load_project_spec,
     update_stage,
 )
@@ -304,17 +305,22 @@ def test_impact_summary_counts_reused_shots_without_sidecar_inflation(
         ChangeRequest(stage=StageName.STORYBOARD, shot_ids=("shot_03",)),
     )
 
-    summary = build_impact_summary(root, plan)
-
     assert len(plan.preserved_artifacts) == 4
-    assert summary.to_dict() == {
-        "schema_version": "motion-comic-factory.impact-summary.v1",
-        "regenerated_video_shot_ids": ["shot_03"],
-        "reused_video_shot_ids": ["shot_01", "shot_02"],
-        "regenerated_audio_item_ids": [],
+    assert plan.summary is not None
+    assert plan.summary.to_dict() == {
+        "schema_version": "motion-comic-factory.impact-summary.v2",
+        "regenerated_video_shot_count": 1,
+        "reused_video_shot_count": 2,
+        "regenerated_audio_item_count": 0,
         "affected_stages": ["storyboard", "video", "edit"],
         "estimate": {"available": False},
     }
+    persisted = json.loads(
+        (root / "impact_plans" / f"{plan.plan_id}.json").read_text(encoding="utf-8")
+    )
+    assert persisted["summary"] == plan.summary.to_dict()
+    assert persisted["episode_sha256"] == plan.episode_sha256
+    assert len(plan.episode_sha256) == 64
 
 
 def test_subtitle_impact_summary_reuses_every_authoritative_video_shot(
@@ -326,17 +332,147 @@ def test_subtitle_impact_summary_reuses_every_authoritative_video_shot(
         ChangeRequest(stage=StageName.EDIT, scope=ChangeScope.SUBTITLE_STYLE),
     )
 
-    summary = build_impact_summary(root, plan)
-
     assert plan.preserved_artifacts == ()
-    assert summary.to_dict() == {
-        "schema_version": "motion-comic-factory.impact-summary.v1",
-        "regenerated_video_shot_ids": [],
-        "reused_video_shot_ids": ["shot_01", "shot_02", "shot_03"],
-        "regenerated_audio_item_ids": [],
+    assert plan.summary is not None
+    assert plan.summary.to_dict() == {
+        "schema_version": "motion-comic-factory.impact-summary.v2",
+        "regenerated_video_shot_count": 0,
+        "reused_video_shot_count": 3,
+        "regenerated_audio_item_count": 0,
         "affected_stages": ["edit", "eval", "deliver"],
         "estimate": {"available": False},
     }
+
+
+def test_apply_rejects_storyboard_payload_changed_after_preview(
+    tmp_path: Path,
+) -> None:
+    root = _project(tmp_path)
+    plan = preview_impact(
+        root,
+        ChangeRequest(stage=StageName.STORYBOARD, shot_ids=("shot_03",)),
+    )
+    episode_path = root / "stages" / "storyboard" / "episode.json"
+    episode = json.loads(episode_path.read_text(encoding="utf-8"))
+    episode["shots"].append(
+        {"id": "shot_04", "index": 4, "character_ids": [], "dialogue": []}
+    )
+    episode_path.write_text(json.dumps(episode), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="episode snapshot|fresh preview"):
+        pipeline_impact._load_plan(root, plan.plan_id)
+    with pytest.raises(ValueError, match="episode snapshot|fresh preview"):
+        apply_impact_plan(root, plan.plan_id)
+
+    assert load_active_repair_scope(root) == {}
+    refreshed = preview_impact(
+        root,
+        ChangeRequest(stage=StageName.STORYBOARD, shot_ids=("shot_03",)),
+    )
+    assert refreshed.episode_sha256 != plan.episode_sha256
+    assert refreshed.plan_id != plan.plan_id
+
+
+def test_apply_rechecks_episode_digest_inside_mutation_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _project(tmp_path)
+    plan = preview_impact(
+        root,
+        ChangeRequest(stage=StageName.STORYBOARD, shot_ids=("shot_03",)),
+    )
+    original_verify = pipeline_impact._verify_episode_snapshot
+    calls = 0
+
+    def change_before_locked_recheck(project_root: Path, expected: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            episode_path = project_root / "stages" / "storyboard" / "episode.json"
+            episode = json.loads(episode_path.read_text(encoding="utf-8"))
+            episode["title"] = "Changed after plan load"
+            episode_path.write_text(json.dumps(episode), encoding="utf-8")
+        original_verify(project_root, expected)
+
+    monkeypatch.setattr(
+        pipeline_impact,
+        "_verify_episode_snapshot",
+        change_before_locked_recheck,
+    )
+
+    with pytest.raises(ValueError, match="episode snapshot|fresh preview"):
+        apply_impact_plan(root, plan.plan_id)
+
+    assert calls == 2
+    assert load_active_repair_scope(root) == {}
+
+
+def test_apply_rejects_tampered_immutable_summary(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    plan = preview_impact(
+        root,
+        ChangeRequest(stage=StageName.STORYBOARD, shot_ids=("shot_03",)),
+    )
+    path = root / "impact_plans" / f"{plan.plan_id}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["summary"]["reused_video_shot_count"] = 999
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="content has changed"):
+        apply_impact_plan(root, plan.plan_id)
+
+
+def test_legacy_v1_plan_loads_but_requires_fresh_preview_to_apply(
+    tmp_path: Path,
+) -> None:
+    root = _project(tmp_path)
+    request = ChangeRequest(stage=StageName.STORYBOARD, shot_ids=("shot_03",))
+    episode = json.loads(
+        (root / "stages" / "storyboard" / "episode.json").read_text(encoding="utf-8")
+    )
+    entries = pipeline_impact._expand_request(request, episode)
+    package_bytes = (root / "production_package.json").read_bytes()
+    seed = {
+        "schema_version": "motion-comic-factory.impact-plan.v1",
+        "request": request.to_dict(),
+        "entries": [entry.to_dict() for entry in entries],
+        "preserved_artifacts": [],
+        "package_sha256": hashlib.sha256(package_bytes).hexdigest(),
+    }
+    plan_id = hashlib.sha256(
+        json.dumps(seed, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    payload = {**seed, "plan_id": plan_id}
+    plans = root / "impact_plans"
+    plans.mkdir()
+    (plans / f"{plan_id}.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = pipeline_impact._load_plan(root, plan_id)
+
+    assert loaded.summary is None
+    with pytest.raises(ValueError, match="fresh preview"):
+        apply_impact_plan(root, plan_id)
+
+    payload["summary"] = {
+        "schema_version": "motion-comic-factory.impact-summary.v2",
+        "regenerated_video_shot_count": 1,
+        "reused_video_shot_count": 2,
+        "regenerated_audio_item_count": 0,
+        "affected_stages": ["storyboard", "video", "edit"],
+        "estimate": {"available": False},
+    }
+    (plans / f"{plan_id}.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="canonical schema|content has changed"):
+        pipeline_impact._load_plan(root, plan_id)
 
 
 def test_stage_context_loads_applied_repair_scope(tmp_path: Path) -> None:
@@ -632,7 +768,7 @@ def test_active_scope_read_recovers_interrupted_active_publication(
     assert not any(transactions.iterdir())
 
 
-def test_preview_uses_registered_migrated_episode_snapshot(tmp_path: Path) -> None:
+def test_migrated_episode_snapshot_is_used_and_digest_bound(tmp_path: Path) -> None:
     legacy = tmp_path / "legacy"
     legacy.mkdir()
     episode = {
@@ -670,6 +806,20 @@ def test_preview_uses_registered_migrated_episode_snapshot(tmp_path: Path) -> No
     )
 
     assert plan.affected[StageName.VIDEO] == ("shot_legacy",)
+    package = load_production_package(root)
+    storyboard_record = next(
+        record for record in package.stages if record.stage is StageName.STORYBOARD
+    )
+    migrated_episode = next(
+        Path(path) for path in storyboard_record.artifacts if Path(path).name == "episode.json"
+    )
+    episode["shots"].append(
+        {"id": "shot_added", "index": 2, "character_ids": [], "dialogue": []}
+    )
+    migrated_episode.write_text(json.dumps(episode), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="episode snapshot|fresh preview"):
+        apply_impact_plan(root, plan.plan_id)
 
 
 def test_apply_impact_rejects_concurrent_review_mutation(
