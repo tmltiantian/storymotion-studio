@@ -11,10 +11,10 @@ from .pipeline_contracts import PIPELINE_STAGES, ProjectMode, StageName
 class ModeStep:
     stage: StageName
     executor_id: str
+    version: int
     requires_live: bool = False
     manual_gate: bool = False
     prepare_before_gate: bool = False
-    version: int = 1
 
 
 class ModeAdapter:
@@ -32,27 +32,30 @@ class ModeAdapter:
 
 def _generic_steps(script_executor: str) -> tuple[ModeStep, ...]:
     return (
-        ModeStep(StageName.CONCEPT, "generic.concept"),
-        ModeStep(StageName.SCRIPT, script_executor),
-        ModeStep(StageName.STORYBOARD, "generic.storyboard"),
+        ModeStep(StageName.CONCEPT, "generic.concept", version=2),
+        ModeStep(StageName.SCRIPT, script_executor, version=2),
+        ModeStep(StageName.STORYBOARD, "generic.storyboard", version=2),
         ModeStep(
             StageName.ASSETS,
             "generic.assets",
+            version=2,
             manual_gate=True,
             prepare_before_gate=True,
         ),
-        ModeStep(StageName.AUDIO, "generic.audio"),
-        ModeStep(StageName.VIDEO, "generic.video"),
-        ModeStep(StageName.EDIT, "generic.edit"),
+        ModeStep(StageName.AUDIO, "generic.audio", version=2),
+        ModeStep(StageName.VIDEO, "generic.video", version=2),
+        ModeStep(StageName.EDIT, "generic.edit", version=2),
         ModeStep(
             StageName.EVAL,
             "generic.eval",
+            version=2,
             manual_gate=True,
             prepare_before_gate=True,
         ),
         ModeStep(
             StageName.DELIVER,
             "generic.deliver",
+            version=2,
             manual_gate=True,
             prepare_before_gate=True,
         ),
@@ -74,31 +77,35 @@ class ReplicaModeAdapter(ModeAdapter):
         super().__init__(
             ProjectMode.REPLICA,
             (
-                ModeStep(StageName.CONCEPT, "replica.concept"),
-                ModeStep(StageName.SCRIPT, "replica.script"),
-                ModeStep(StageName.STORYBOARD, "replica.storyboard"),
+                ModeStep(StageName.CONCEPT, "replica.concept", version=2),
+                ModeStep(StageName.SCRIPT, "replica.script", version=2),
+                ModeStep(StageName.STORYBOARD, "replica.storyboard", version=2),
                 ModeStep(
                     StageName.ASSETS,
                     "replica.assets",
+                    version=2,
                     manual_gate=True,
                     prepare_before_gate=True,
                 ),
-                ModeStep(StageName.AUDIO, "replica.audio"),
+                ModeStep(StageName.AUDIO, "replica.audio", version=2),
                 ModeStep(
                     StageName.VIDEO,
                     "replica.video",
+                    version=2,
                     requires_live=True,
                 ),
-                ModeStep(StageName.EDIT, "replica.edit"),
+                ModeStep(StageName.EDIT, "replica.edit", version=2),
                 ModeStep(
                     StageName.EVAL,
                     "replica.eval",
+                    version=2,
                     manual_gate=True,
                     prepare_before_gate=True,
                 ),
                 ModeStep(
                     StageName.DELIVER,
                     "replica.deliver",
+                    version=2,
                     manual_gate=True,
                     prepare_before_gate=True,
                 ),

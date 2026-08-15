@@ -12,6 +12,7 @@ from .pet_replica import build_pet_replica_plan
 from .pipeline_context import StageContext, StageExecution
 from .pipeline_contracts import StageState
 from .pipeline_executors import register_executor
+from .pipeline_eval import build_specialist_eval
 
 
 def _source(context: StageContext) -> Path:
@@ -308,22 +309,23 @@ def execute_eval(context: StageContext) -> StageExecution:
         context,
         _workspace_files(workspace, ("review/**/*.json", "shots/*/*.review.json")),
     )
-    report = write_json_atomic(
-        context.stage_dir / "eval_result.json",
-        {
-            "schema_version": "motion-comic-factory.replica-eval.v1",
-            "status": "REVIEW_REQUIRED",
-            "operation_code": code,
-            "operation": detail,
-            "required_dimensions": [
-                "与来源镜头的剧情功能、时长和构图关系一致",
-                "替换角色身份清晰稳定",
-                "动作符合物理规律且无多肢体、穿模和道具漂移",
-                "口型、台词、字幕和情绪同步",
-                "相邻镜头的姿态、视线、空间和光线连续",
-            ],
-        },
+    evaluation = build_specialist_eval(
+        project_id=context.spec.project_id,
+        operation_code=code,
+        operation=detail,
+        candidate_count=len(
+            _workspace_files(workspace, ("shots/*/candidate_*.mp4",))
+        ),
     )
+    report = write_json_atomic(context.stage_dir / "eval_result.json", evaluation)
+    if not evaluation["automatic_passed"]:
+        return _failure(
+            context,
+            "; ".join(
+                str(item["message"]) for item in evaluation["hard_failures"]
+            ),
+            (report, *snapshots),
+        )
     return StageExecution.passed(
         executor=context.step.executor_id, artifacts=(report, *snapshots)
     )

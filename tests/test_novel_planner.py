@@ -20,6 +20,12 @@ def test_planner_creates_monotonic_shots_and_dialogue():
     assert any(line.speaker_id == "narrator" for shot in episode.shots for line in shot.dialogue)
     character_ids = {character.id for character in episode.characters}
     assert any(line.speaker_id in character_ids for shot in episode.shots for line in shot.dialogue)
+    assert all(shot.character_ids for shot in episode.shots)
+    assert all(
+        line.speaker_id == "narrator" or line.speaker_id in shot.character_ids
+        for shot in episode.shots
+        for line in shot.dialogue
+    )
 
 
 def test_planner_extracts_spoken_dialogue_from_story_text():

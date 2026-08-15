@@ -21,6 +21,13 @@ from .gateway_video import (
 
 H3_RATIOS = {"adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"}
 H3_OUTPUT_PRICE_YUAN_PER_SECOND = {"768P": 0.50, "2K": 0.80}
+H3_IMAGE_ROLES = {"first_frame", "last_frame", "reference_image"}
+
+
+@dataclass(frozen=True)
+class MiniMaxH3ImageInput:
+    source: str | Path
+    role: str = "reference_image"
 
 
 @dataclass(frozen=True)
@@ -42,6 +49,7 @@ class MiniMaxH3Result(GatewayVideoResult):
     usage: dict[str, int | float] | None = None
     resolution: str = "768P"
     estimated_cost_yuan: float = 0.0
+    native_audio_generated: bool = True
 
     def to_report(self) -> dict[str, Any]:
         report = super().to_report()
@@ -51,6 +59,7 @@ class MiniMaxH3Result(GatewayVideoResult):
                 "usage": dict(self.usage or {}),
                 "resolution": self.resolution,
                 "estimated_cost_yuan": round(self.estimated_cost_yuan, 4),
+                "native_audio_generated": self.native_audio_generated,
             }
         )
         return report
@@ -67,7 +76,8 @@ class MiniMaxH3Client(GatewayVideoClient):
         self,
         prompt: str,
         *,
-        images: Sequence[str | Path] | None = None,
+        images: Sequence[str | Path | MiniMaxH3ImageInput] | None = None,
+        image_roles: Sequence[str] | None = None,
         audio: str | Path | None = None,
         duration: int = 5,
         ratio: str = "9:16",
@@ -77,6 +87,17 @@ class MiniMaxH3Client(GatewayVideoClient):
     ) -> GatewayVideoSubmission:
         del generate_audio
         image_inputs = tuple(images or ())
+        explicit_roles = tuple(str(role).strip() for role in image_roles or ())
+        if explicit_roles and len(explicit_roles) != len(image_inputs):
+            raise GatewayVideoError("MiniMax H3 image roles must match images.")
+        normalized_roles = tuple(
+            image.role.strip()
+            if isinstance(image, MiniMaxH3ImageInput)
+            else explicit_roles[index]
+            if explicit_roles
+            else "reference_image"
+            for index, image in enumerate(image_inputs)
+        )
         normalized_resolution = _normalize_resolution(resolution)
         normalized_ratio = ratio.strip().lower()
         self._validate_h3_request(
@@ -85,9 +106,18 @@ class MiniMaxH3Client(GatewayVideoClient):
             ratio=normalized_ratio,
             resolution=normalized_resolution,
             image_count=len(image_inputs),
+            image_roles=normalized_roles,
             allow_network=allow_network,
         )
-        image_values = [self._normalize_image(image) for image in image_inputs]
+        image_values = [
+            (
+                self._normalize_image(
+                    image.source if isinstance(image, MiniMaxH3ImageInput) else image
+                ),
+                role,
+            )
+            for image, role in zip(image_inputs, normalized_roles, strict=True)
+        ]
         audio_value = self._normalize_audio(audio) if audio is not None else ""
         content: list[dict[str, Any]] = [
             {"type": "text", "text": prompt.strip()}
@@ -96,9 +126,9 @@ class MiniMaxH3Client(GatewayVideoClient):
             {
                 "type": "image_url",
                 "image_url": {"url": value},
-                "role": "reference_image",
+                "role": role,
             }
-            for value in image_values
+            for value, role in image_values
         )
         if audio_value:
             content.append(
@@ -150,7 +180,7 @@ class MiniMaxH3Client(GatewayVideoClient):
                 "image_count": sum(
                     1
                     for item in payload.get("content") or ()
-                    if isinstance(item, dict) and item.get("role") == "reference_image"
+                    if isinstance(item, dict) and item.get("type") == "image_url"
                 ),
             }
         return task
@@ -355,6 +385,7 @@ class MiniMaxH3Client(GatewayVideoClient):
         ratio: str,
         resolution: str,
         image_count: int,
+        image_roles: Sequence[str] = (),
         allow_network: bool,
     ) -> None:
         self._validate_client_config(allow_network)
@@ -365,6 +396,7 @@ class MiniMaxH3Client(GatewayVideoClient):
             ratio=ratio,
             resolution=resolution,
             image_count=image_count,
+            image_roles=image_roles,
         )
 
     def _validate_h3_generation_settings(
@@ -374,6 +406,7 @@ class MiniMaxH3Client(GatewayVideoClient):
         ratio: str,
         resolution: str,
         image_count: int,
+        image_roles: Sequence[str] = (),
     ) -> None:
         if self.config.model != "MiniMax-H3":
             raise GatewayVideoError(
@@ -395,6 +428,15 @@ class MiniMaxH3Client(GatewayVideoClient):
             raise GatewayVideoError(
                 "MiniMax H3 accepts at most 9 reference images."
             )
+        unknown_roles = [role for role in image_roles if role not in H3_IMAGE_ROLES]
+        if unknown_roles:
+            raise GatewayVideoError(
+                f"MiniMax H3 image role is unsupported: {unknown_roles[0]}."
+            )
+        if image_roles.count("first_frame") > 1:
+            raise GatewayVideoError("MiniMax H3 accepts at most one first_frame.")
+        if image_roles.count("last_frame") > 1:
+            raise GatewayVideoError("MiniMax H3 accepts at most one last_frame.")
 
 
 def _v2_base(base_url: str) -> str:

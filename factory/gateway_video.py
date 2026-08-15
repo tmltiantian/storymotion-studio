@@ -144,6 +144,7 @@ class GatewayVideoClient:
         prompt: str,
         *,
         images: Sequence[str | Path] | None = None,
+        image_roles: Sequence[str] | None = None,
         audio: str | Path | None = None,
         duration: int = 5,
         ratio: str = "9:16",
@@ -154,6 +155,7 @@ class GatewayVideoClient:
         submission = self.prepare_submission(
             prompt,
             images=images,
+            image_roles=image_roles,
             audio=audio,
             duration=duration,
             ratio=ratio,
@@ -168,6 +170,7 @@ class GatewayVideoClient:
         prompt: str,
         *,
         images: Sequence[str | Path] | None = None,
+        image_roles: Sequence[str] | None = None,
         audio: str | Path | None = None,
         duration: int = 5,
         ratio: str = "9:16",
@@ -176,6 +179,9 @@ class GatewayVideoClient:
         allow_network: bool = False,
     ) -> GatewayVideoSubmission:
         image_inputs = tuple(images or ())
+        roles = tuple(image_roles or ("reference_image",) * len(image_inputs))
+        if len(roles) != len(image_inputs):
+            raise GatewayVideoError("Gateway video image roles must match images.")
         self._validate_request(
             prompt,
             duration,
@@ -189,6 +195,7 @@ class GatewayVideoClient:
         request_body = self._request_body(
             prompt,
             image_values,
+            roles,
             audio_value,
             duration=duration,
             ratio=ratio,
@@ -226,6 +233,7 @@ class GatewayVideoClient:
                 request_body = self._request_body(
                     prompt,
                     image_values,
+                    roles,
                     audio_value,
                     duration=duration,
                     ratio=ratio,
@@ -248,6 +256,7 @@ class GatewayVideoClient:
         self,
         prompt: str,
         image_values: Sequence[str],
+        image_roles: Sequence[str],
         audio_value: str,
         *,
         duration: int,
@@ -266,9 +275,9 @@ class GatewayVideoClient:
                 {
                     "type": "image_url",
                     "image_url": {"url": value},
-                    "role": "reference_image",
+                    "role": role,
                 }
-                for value in image_values
+                for value, role in zip(image_values, image_roles, strict=True)
             ]
         if audio_value:
             content.append(
@@ -366,6 +375,7 @@ class GatewayVideoClient:
         output_path: str | Path,
         *,
         images: Sequence[str | Path] | None = None,
+        image_roles: Sequence[str] | None = None,
         audio: str | Path | None = None,
         duration: int = 5,
         ratio: str = "9:16",
@@ -380,6 +390,7 @@ class GatewayVideoClient:
         task = self.submit(
             prompt,
             images=images,
+            image_roles=image_roles,
             audio=audio,
             duration=duration,
             ratio=ratio,

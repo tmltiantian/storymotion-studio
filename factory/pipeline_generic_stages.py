@@ -1,22 +1,22 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
 from .character_assets import write_character_asset_manifest
-from .file_io import sha256_file, write_json_atomic
+from .file_io import read_json_object, sha256_file, write_json_atomic
 from .gateway_video_batch import render_gateway_video_batch
 from .local_voiceover import render_voiceover_preview
 from .media_validation import probe_media
+from .media_assembly import assemble_visual_track, mux_final_audio
 from .novel_planner import plan_episode, read_novel
 from .openmontage_adapter import write_openmontage_package
 from .pipeline_context import StageContext, StageExecution
 from .pipeline_contracts import StageState
 from .pipeline_executors import register_executor
+from .pipeline_eval import build_automatic_eval
 from .placeholder_renderer import render_placeholder_video
 from .preview_writer import (
     write_storyboard_markdown,
@@ -26,6 +26,7 @@ from .preview_writer import (
 from .provider_profile import resolve_provider_profile
 from .schema import Episode, episode_from_dict, episode_to_dict
 from .shot_card_renderer import render_card_preview_video
+from .shot_audio import write_shot_audio_assets
 from .video_handoff import write_video_handoff
 from .video_provider import build_video_client, default_video_resolution
 
@@ -35,10 +36,7 @@ _DEFAULT_CONFIG = _REPO_ROOT / "config" / "factory.config.json"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"Expected a JSON object: {path}")
-    return payload
+    return read_json_object(path)
 
 
 def _factory_config(context: StageContext) -> dict[str, Any]:
@@ -87,83 +85,6 @@ def _copy_atomic(source: Path, destination: Path) -> Path:
     shutil.copy2(source, temporary)
     os.replace(temporary, destination)
     return destination
-
-
-def _mux_audio(
-    video: Path,
-    audio: Path,
-    output: Path,
-    subtitles: Path | None = None,
-) -> Path:
-    temporary = output.with_name(f".{output.stem}.tmp{output.suffix}")
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(video),
-        "-i",
-        str(audio),
-    ]
-    if subtitles is not None:
-        command.extend(["-i", str(subtitles)])
-    command.extend([
-        "-map",
-        "0:v:0",
-        "-map",
-        "1:a:0",
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-    ])
-    if subtitles is not None:
-        command.extend(["-map", "2:s:0", "-c:s", "mov_text"])
-    command.extend([
-        "-shortest",
-        str(temporary),
-    ])
-    subprocess.run(
-        command,
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    os.replace(temporary, output)
-    return output
-
-
-def _concat_clips(clips: list[Path], output: Path) -> Path:
-    if not clips:
-        raise ValueError("Video stage did not produce any clips")
-    manifest = output.with_suffix(".ffconcat")
-    lines = ["ffconcat version 1.0"]
-    for clip in clips:
-        escaped = str(clip.resolve()).replace("'", "'\\''")
-        lines.append(f"file '{escaped}'")
-    manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    temporary = output.with_name(f".{output.stem}.tmp{output.suffix}")
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(manifest),
-            "-c",
-            "copy",
-            str(temporary),
-        ],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    os.replace(temporary, output)
-    return output
 
 
 @register_executor("generic.concept")
@@ -332,27 +253,38 @@ def execute_video(context: StageContext) -> StageExecution:
     if context.enable_live:
         config = _factory_config(context)
         profile = resolve_provider_profile(config)
+        effective_model = str(
+            context.spec.providers.get("video_model") or profile.video.model
+        )
         if profile.video.provider not in {"gateway", "minimax"} or not profile.video.ready:
             blockers = profile.video.blockers or (
                 "A ready cloud video provider is required.",
             )
             raise RuntimeError("; ".join(blockers))
         handoff = write_video_handoff(
-            episode, config, context.stage_dir, character_assets
+            episode,
+            config,
+            context.stage_dir,
+            character_assets,
+            video_provider=profile.video.provider,
+            video_model=effective_model,
+        )
+        shot_audio = write_shot_audio_assets(
+            episode,
+            Path(str(audio["voiceover_audio"])),
+            context.stage_dir / "reference_audio",
         )
         package = write_openmontage_package(
             episode,
             config,
             character_assets=character_assets,
             run_dir=context.stage_dir,
+            shot_audio=shot_audio,
         )
         report_path = context.stage_dir / "gateway_video_batch.json"
         client = build_video_client(
             profile.video,
-            model=str(
-                context.spec.providers.get("video_model")
-                or profile.video.model
-            ),
+            model=effective_model,
         )
         report = render_gateway_video_batch(
             handoff,
@@ -378,7 +310,7 @@ def execute_video(context: StageContext) -> StageExecution:
         missing = [str(path) for path in clips if not path.is_file()]
         if missing:
             raise RuntimeError(f"Cloud video clips are missing: {missing}")
-        artifacts.extend((handoff, package, report_path, *clips))
+        artifacts.extend((handoff, package, report_path, *shot_audio.values(), *clips))
         generation_mode = f"{profile.video.provider}_video"
     else:
         render_card_preview_video(
@@ -400,6 +332,13 @@ def execute_video(context: StageContext) -> StageExecution:
             "primary_video": str(output.resolve()) if output.is_file() else "",
             "clips": [str(path.resolve()) for path in clips],
             "cloud_generation_requested": context.enable_live,
+            "lip_sync_policy": (
+                "exact_tts_reference_audio"
+                if context.enable_live and shot_audio
+                else "no_on_screen_dialogue"
+                if context.enable_live
+                else "local_preview"
+            ),
         },
     )
     return StageExecution.passed(
@@ -410,17 +349,39 @@ def execute_video(context: StageContext) -> StageExecution:
 
 @register_executor("generic.edit")
 def execute_edit(context: StageContext) -> StageExecution:
+    episode = _episode(context)
     video = _video_manifest(context)
     audio = _audio_manifest(context)
     visual = Path(str(video["primary_video"]))
+    target_duration = sum(shot.duration_seconds for shot in episode.shots)
     if not visual.is_file():
-        visual = _concat_clips(
-            [Path(str(path)) for path in video.get("clips") or ()],
+        clips = [Path(str(path)) for path in video.get("clips") or ()]
+        if not clips:
+            raise ValueError("Video stage did not produce any clips")
+        durations = [shot.duration_seconds for shot in episode.shots[: len(clips)]]
+        target_duration = sum(durations)
+        try:
+            width_text, height_text = episode.target_resolution.lower().split("x", 1)
+            width, height = int(width_text), int(height_text)
+        except (TypeError, ValueError):
+            width, height = 1080, 1920
+        visual = assemble_visual_track(
+            clips,
+            durations,
             context.stage_dir / "visual_assembly.mp4",
+            width=width,
+            height=height,
+            fps=int(context.spec.target.get("fps") or 30),
         )
     voiceover = Path(str(audio["voiceover_audio"]))
     output = context.stage_dir / "final_preview.mp4"
-    _mux_audio(visual, voiceover, output, Path(str(audio["subtitles"])))
+    mux_final_audio(
+        visual,
+        voiceover,
+        output,
+        duration_seconds=target_duration,
+        subtitles=Path(str(audio["subtitles"])),
+    )
     manifest = write_json_atomic(
         context.stage_dir / "edit_manifest.json",
         {
@@ -429,6 +390,8 @@ def execute_edit(context: StageContext) -> StageExecution:
             "final_preview": str(output.resolve()),
             "subtitles": str(audio["subtitles"]),
             "transition_policy": "cut_on_action_or_audio_motivation",
+            "duration_seconds": target_duration,
+            "assembly_policy": "normalized_cfr_trim_pad",
         },
     )
     return StageExecution.passed(
@@ -439,37 +402,35 @@ def execute_edit(context: StageContext) -> StageExecution:
 
 @register_executor("generic.eval")
 def execute_eval(context: StageContext) -> StageExecution:
+    episode = _episode(context)
     edit_manifest = _read_json(context.require_artifact("edit", "edit_manifest.json"))
+    audio_manifest = _audio_manifest(context)
+    video_manifest = _video_manifest(context)
     video = Path(str(edit_manifest["final_preview"]))
     probe = probe_media(video, required_stream="video")
-    report = write_json_atomic(
-        context.stage_dir / "eval_result.json",
-        {
-            "schema_version": "motion-comic-factory.eval.v1",
-            "project_id": context.spec.project_id,
-            "status": "REVIEW_REQUIRED" if probe.valid else "TECHNICAL_FAILURE",
-            "technical": {
-                "valid": probe.valid,
-                "duration_seconds": probe.duration_seconds,
-                "video_stream_count": probe.video_stream_count,
-                "audio_stream_count": probe.audio_stream_count,
-                "error": probe.error,
-            },
-            "review_dimensions": [
-                "角色与场景一致性",
-                "动作物理合理性与连续性",
-                "口型、对白和字幕同步",
-                "声音角色匹配、停顿和情绪自然度",
-                "转场动机、节奏和观看舒适度",
-            ],
-        },
+    cloud_requested = bool(video_manifest.get("cloud_generation_requested"))
+    clips = list(video_manifest.get("clips") or ())
+    rendered_shot_count = len(clips) if cloud_requested else len(episode.shots)
+    evaluation = build_automatic_eval(
+        project_id=context.spec.project_id,
+        probe=probe,
+        expected_duration_seconds=float(edit_manifest.get("duration_seconds") or 0),
+        timings=list(audio_manifest.get("timings") or ()),
+        expected_shot_count=len(episode.shots),
+        rendered_shot_count=rendered_shot_count,
+        generation_success=bool(
+            video_manifest.get("generation_success", probe.valid)
+        ),
     )
-    if not probe.valid:
+    report = write_json_atomic(context.stage_dir / "eval_result.json", evaluation)
+    if not evaluation["automatic_passed"]:
         return StageExecution(
             state=StageState.FAILED,
             executor=context.step.executor_id,
             artifacts=(str(report),),
-            error=f"Edit preview failed media validation: {probe.error}",
+            error="; ".join(
+                str(item["message"]) for item in evaluation["hard_failures"]
+            ),
         )
     return StageExecution.passed(executor=context.step.executor_id, artifacts=(report,))
 

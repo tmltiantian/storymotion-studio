@@ -5,6 +5,7 @@ from pathlib import Path
 from factory.pipeline_context import StageContext, StageExecution
 from factory.pipeline_contracts import ProjectMode, ProjectSpec, StageName, StageState
 from factory.pipeline_runner import pipeline_status, resume_pipeline, run_pipeline
+from factory.pipeline_modes import ModeAdapter, ModeStep, get_mode_adapter
 from factory.pipeline_store import create_project, load_production_package, update_stage
 
 
@@ -143,6 +144,44 @@ def test_resume_skips_complete_stage_when_artifacts_are_current(
 
     assert result.success is True
     assert calls == [StageName.STORYBOARD]
+
+
+def test_resume_reruns_changed_stage_revision_and_downstream(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _project(tmp_path)
+    run_pipeline(
+        root,
+        through=StageName.STORYBOARD,
+        executor=_passing_executor([]),
+    )
+    original = get_mode_adapter(ProjectMode.ORIGINAL)
+    steps = tuple(
+        ModeStep(
+            step.stage,
+            step.executor_id,
+            version=step.version + (1 if step.stage is StageName.SCRIPT else 0),
+            requires_live=step.requires_live,
+            manual_gate=step.manual_gate,
+            prepare_before_gate=step.prepare_before_gate,
+        )
+        for step in original.stage_steps.values()
+    )
+    revised = ModeAdapter(ProjectMode.ORIGINAL, steps)
+    monkeypatch.setattr(
+        "factory.pipeline_runner.get_mode_adapter",
+        lambda mode: revised,
+    )
+    calls: list[StageName] = []
+
+    result = resume_pipeline(
+        root,
+        through=StageName.STORYBOARD,
+        executor=_passing_executor(calls),
+    )
+
+    assert result.success is True
+    assert calls == [StageName.SCRIPT, StageName.STORYBOARD]
 
 
 def test_resume_preserves_imported_legacy_signature(tmp_path: Path) -> None:

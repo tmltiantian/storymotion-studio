@@ -300,6 +300,84 @@ def test_build_gateway_video_jobs_maps_frames_roles_and_openmontage_outputs(tmp_
     assert jobs[1].images == (str(role_b),)
 
 
+def test_build_gateway_video_jobs_preserves_keyframe_and_reference_roles(tmp_path):
+    handoff, package, role_a, _role_b = _write_inputs(tmp_path)
+    first = tmp_path / "run/frames/shot_001_first.png"
+    last = tmp_path / "run/frames/shot_001_last.png"
+    first.parent.mkdir(exist_ok=True)
+    first.write_bytes(b"\x89PNG\r\n\x1a\nfirst")
+    last.write_bytes(b"\x89PNG\r\n\x1a\nlast")
+    payload = json.loads(package.read_text(encoding="utf-8"))
+    payload["timeline"][0]["expected_assets"].update(
+        {"first_frame": str(first), "last_frame": str(last)}
+    )
+    package.write_text(json.dumps(payload), encoding="utf-8")
+
+    job = build_gateway_video_jobs(handoff, package)[0]
+
+    assert job.images == (str(first), str(last), str(role_a), str(tmp_path / "roles/b.png"))
+    assert job.image_roles == (
+        "first_frame",
+        "last_frame",
+        "reference_image",
+        "reference_image",
+    )
+
+
+def test_gateway_video_batch_passes_image_roles_to_provider(tmp_path):
+    handoff, package, _role_a, _role_b = _write_inputs(tmp_path)
+    first = tmp_path / "run/frames/shot_001_first.png"
+    first.parent.mkdir(exist_ok=True)
+    first.write_bytes(b"\x89PNG\r\n\x1a\nfirst")
+    payload = json.loads(package.read_text(encoding="utf-8"))
+    payload["timeline"][0]["expected_assets"]["first_frame"] = str(first)
+    package.write_text(json.dumps(payload), encoding="utf-8")
+    client = FakeClient()
+
+    report = render_gateway_video_batch(
+        handoff,
+        package,
+        client,
+        tmp_path / "report.json",
+        limit=1,
+        allow_network=True,
+    )
+
+    assert report["success"] is True
+    assert client.calls[0][2]["image_roles"] == [
+        "first_frame",
+        "reference_image",
+        "reference_image",
+    ]
+
+
+def test_gateway_video_batch_binds_each_job_to_its_shot_audio(tmp_path):
+    handoff, package, _role_a, _role_b = _write_inputs(tmp_path)
+    audio = tmp_path / "run/audio/shot_001.wav"
+    audio.parent.mkdir(exist_ok=True)
+    _write_wav(audio)
+    payload = json.loads(package.read_text(encoding="utf-8"))
+    payload["timeline"][0]["expected_assets"]["voice_audio"] = str(audio)
+    package.write_text(json.dumps(payload), encoding="utf-8")
+    client = FakeClient()
+
+    report = render_gateway_video_batch(
+        handoff,
+        package,
+        client,
+        tmp_path / "report.json",
+        limit=1,
+        allow_network=True,
+    )
+
+    assert report["success"] is True
+    assert client.calls[0][2]["audio"] == str(audio)
+    state = json.loads(
+        (tmp_path / "run/clips/shot_001.mp4.gateway.json").read_text(encoding="utf-8")
+    )
+    assert state["reference_audio_sha256"] == hashlib.sha256(audio.read_bytes()).hexdigest()
+
+
 def test_build_gateway_video_jobs_rejects_duplicate_output_paths(tmp_path):
     handoff, package, _, _ = _write_inputs(tmp_path)
     data = json.loads(package.read_text(encoding="utf-8"))

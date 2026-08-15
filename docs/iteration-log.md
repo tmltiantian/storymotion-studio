@@ -2979,3 +2979,52 @@ Security:
 - A live 4-second 768P probe completed successfully, returned an H.264/AAC 768x1344 clip, and reported four output seconds with an estimated cost of CNY 2.00.
 - The contact-sheet review showed one stable black-and-white cat, a fixed warm wooden room, one continuous paw-raise action, no extra limbs, and no scene cut.
 - Independent review then hardened five edge cases: billable H3 POST requests cannot fall back to an automatic curl resubmission; resume state restores resolution/duration/reference counts for 2K cost reporting; remote reference audio is represented only by a SHA-256 digest; the adapter canonicalizes and enforces `MiniMax-H3`; and unsupported providers return structured CLI blockers instead of crashing.
+
+## 2026-08-15 - MiniMax H3 official prompt protocol
+
+### Problem
+
+- The H3 transport was live, but StoryMotion still sent the same flat visual prompt used by Seedance.
+- Character reference images were all marked as generic references, so direct first-frame and first/last-frame generation could not express their actual role.
+- Dialogue had no stable speaker IDs, language tags, mouth-open window, sentence-end closure, or narrator closed-mouth rule.
+
+### Reasoning and correction
+
+- Kept the upstream MiniMax-H3 checkout independent at `/Users/tml/Desktop/MiniMax-H3`; the checkout is a specification/reference source, not a vendored runtime dependency.
+- Added a provider-specific compiler following the official H3 base and Ref2VA field order. Reference prompts define stable `<Subject N>` and `<Picture N>` labels, retention rules, playback-order action, `(S1)` speakers, exact `<d>[Chinese] ...</d>` dialogue, soundscape, and no default non-diegetic music.
+- Selected the H3 compiler only when the resolved provider/model is `minimax`/`MiniMax-H3`. Gateway and Seedance keep their previous prompt contract.
+- Added typed H3 image inputs for `first_frame`, `last_frame`, and `reference_image`, including duplicate-keyframe and unsupported-role validation. Plain image paths remain backward compatible as `reference_image`.
+- Kept final voice identity under the existing approved Doubao TTS pipeline. H3-generated sound is not mixed on top of the final voice track; exact word-level lip sync remains a separate post-process and EVAL responsibility.
+
+### Result
+
+- Focused H3 compiler, provider, handoff, batch, and pipeline regression tests passed; the final full regression finished with `2651 passed`.
+- Generated H3 prompts now expose auditable official sections instead of an unstructured sentence, while preserving Chinese dialogue text and explicit mouth behavior.
+- First-frame and last-frame roles are now available through the H3 adapter without breaking existing reference-image callers.
+
+## 2026-08-15 - Production pipeline hardening
+
+### 发现的问题
+
+1. 阶段缓存默认版本长期不变，代码实现升级后可能继续复用旧产物；项目级视频模型覆盖也没有贯穿 handoff 和实际客户端。
+2. 首帧、尾帧和角色参考图进入批处理后丢失语义角色；分镜靠提示词中的名字反推出镜人物，空镜和无台词角色容易绑定错误。
+3. TTS 只在整集时间线上存在，视频生成任务没有逐镜对白音频；H3 原生声音状态也没有如实进入最终混音策略。
+4. 云端片段使用 concat stream-copy 拼接并以 `-shortest` 截止，混合帧率、分辨率、像素比例或尾部时长时可能卡顿、失败或吞掉结尾。
+5. 通用模式和复刻模式的 EVAL 语义不一致，客观媒体失败有时仍会进入人工审批；CLI 又直接调用大量宠物模块私有符号，维护边界不稳定。
+
+### 思考与处理
+
+- 给所有九阶段步骤设置显式实现版本，让版本、输入和配置共同参与阶段签名；只使变化阶段及下游失效。
+- 在共享 `Shot` 契约加入 `character_ids`，旧项目读取时安全迁移；从剧本规划阶段一次确定出镜角色，Provider 层不再猜测名字。
+- 视频任务保存图片路径与 `first_frame`、`last_frame`、`reference_image` 角色，并把有效 Provider/模型、图片角色和音频摘要一起写入签名。
+- 从已测量的 TTS 时间线无损切出对白镜头 WAV，传给支持参考音频的 Provider；不支持时明确标记后处理口型策略，不虚报原生同步。
+- 新增确定性媒体装配层：逐镜统一 CFR、尺寸、像素格式和 SAR，移除云端原音后按分镜时长补齐或裁切，再按明确目标时长合入最终音轨和字幕。
+- 新增统一 `eval.v2` 客观门禁；无效视频、缺失音轨、时长漂移、对白重叠、镜头数不符和生成失败直接阻断，主观画面问题才交给人工审核。
+- 用白名单动态服务面承接宠物专业模块能力。CLI 只调用公开名称，同时保留旧扩展需要的兼容入口；共享 JSON 读取集中到 `file_io.py`。
+
+### 结果
+
+- H3 图片角色、项目级模型覆盖、逐镜音频、任务恢复与缓存失效都具备回归测试；旧纯路径和旧 Episode JSON 仍可读取。
+- 混合编码、分辨率、帧率和像素比例的真实 FFmpeg 小样可以稳定拼接，最终输出不再依赖 `-shortest`。
+- Ruff、compileall、`git diff --check` 和 152 项核心回归通过；全量回归 `2673 passed`，零失败。
+- MiniMax 上游仓库、模型权重、生成媒体和凭据均未并入 StoryMotion Studio；旧 GitHub 项目未删除或改写。

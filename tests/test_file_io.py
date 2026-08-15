@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from factory.file_io import sha256_file, write_json_atomic, write_text_atomic
+from factory.file_io import read_json_object, sha256_file, write_json_atomic, write_text_atomic
 
 
 def test_write_json_atomic_preserves_unicode_and_replaces_existing_file(
@@ -65,3 +65,11 @@ def test_sha256_file_rejects_symlink(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="symlink"):
         sha256_file(link)
+
+
+def test_read_json_object_requires_an_object(tmp_path: Path) -> None:
+    path = tmp_path / "value.json"
+    path.write_text('["not", "an", "object"]', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="JSON object"):
+        read_json_object(path)

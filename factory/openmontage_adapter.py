@@ -20,6 +20,7 @@ def build_openmontage_package(
     character_assets: dict[str, Any] | None = None,
     *,
     run_dir: str | Path | None = None,
+    shot_audio: dict[str, str | Path] | None = None,
 ) -> dict[str, Any]:
     errors = validate_episode(episode)
     if errors:
@@ -78,7 +79,11 @@ def build_openmontage_package(
                 "expected_assets": {
                     "first_frame": str(run_dir / "frames" / f"{shot.id}_first.png"),
                     "video_clip": str(run_dir / "clips" / f"{shot.id}.mp4"),
-                    "voice_audio": str(run_dir / "audio" / f"{shot.id}.wav"),
+                    "voice_audio": str(
+                        (shot_audio or {}).get(
+                            shot.id, run_dir / "audio" / f"{shot.id}.wav"
+                        )
+                    ),
                 },
             }
             for shot in episode.shots
@@ -122,6 +127,7 @@ def write_openmontage_package(
     character_assets: dict[str, Any] | None = None,
     *,
     run_dir: str | Path | None = None,
+    shot_audio: dict[str, str | Path] | None = None,
 ) -> Path:
     run_dir = (
         Path(run_dir)
@@ -137,6 +143,7 @@ def write_openmontage_package(
         config,
         character_assets=character_assets,
         run_dir=run_dir,
+        shot_audio=shot_audio,
     )
     package_errors = validate_openmontage_package(package)
     if package_errors:

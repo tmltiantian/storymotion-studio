@@ -168,19 +168,23 @@ def test_native_media_stages_keep_outputs_isolated_and_stop_at_review_gates(
         Path(output).write_bytes(b"visual")
         return Path(output)
 
-    def fake_mux(video, audio, output, subtitles=None):
+    def fake_mux(video, audio, output, subtitles=None, **kwargs):
         Path(output).write_bytes(b"final")
         return Path(output)
 
     monkeypatch.setattr(pipeline_generic_stages, "render_placeholder_video", fake_placeholder)
     monkeypatch.setattr(pipeline_generic_stages, "render_voiceover_preview", fake_voiceover)
     monkeypatch.setattr(pipeline_generic_stages, "render_card_preview_video", fake_video)
-    monkeypatch.setattr(pipeline_generic_stages, "_mux_audio", fake_mux)
-    monkeypatch.setattr(
-        pipeline_generic_stages,
-        "probe_media",
-        lambda path, **kwargs: MediaProbeResult(Path(path), True, 42.0, 1, 1),
-    )
+    monkeypatch.setattr(pipeline_generic_stages, "mux_final_audio", fake_mux)
+    def fake_probe(path, **kwargs):
+        manifest = json.loads(
+            (Path(path).parent / "edit_manifest.json").read_text(encoding="utf-8")
+        )
+        return MediaProbeResult(
+            Path(path), True, float(manifest["duration_seconds"]), 1, 1
+        )
+
+    monkeypatch.setattr(pipeline_generic_stages, "probe_media", fake_probe)
 
     result = run_pipeline(root, through=StageName.EVAL)
 
