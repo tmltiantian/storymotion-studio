@@ -249,6 +249,39 @@
   gap: 8px;
 }
 
+.filter-row {
+  display: grid;
+  grid-template-columns: 18px minmax(180px, 360px) 34px 1fr;
+  min-height: 48px;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 12px;
+  padding: 6px 0;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  color: var(--steel);
+}
+
+.filter-row input {
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.filter-row > span {
+  justify-self: end;
+  font-family: var(--utility-font);
+  font-size: 10px;
+}
+
+.filter-clear {
+  grid-column: 3;
+}
+
 .command-button,
 .text-button {
   display: inline-flex;
@@ -414,6 +447,12 @@
   box-shadow: 0 0 0 2px var(--review-soft);
 }
 
+.stage-changes .stage-dot {
+  border-radius: 1px;
+  background: #65726e;
+  box-shadow: 0 0 0 1px #65726e;
+}
+
 .stage-current .stage-dot {
   background: var(--operation);
   box-shadow: 0 0 0 2px var(--operation-soft);
@@ -422,6 +461,28 @@
 .stage-failed .stage-dot {
   background: var(--failed);
   box-shadow: 0 0 0 2px var(--failed-soft);
+}
+
+.stage-ready .stage-dot {
+  background: var(--surface);
+  box-shadow: 0 0 0 1px #65726e;
+}
+
+.stage-blocked .stage-dot {
+  border-radius: 1px;
+  background: #495451;
+  box-shadow: 0 0 0 1px #495451;
+}
+
+.stage-stale .stage-dot {
+  border: 1px dashed #65726e;
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--surface);
+}
+
+.stage-pending .stage-dot {
+  background: #aab4b1;
+  box-shadow: 0 0 0 1px #aab4b1;
 }
 
 .project-action {
@@ -443,6 +504,10 @@
 
 .state-current {
   color: var(--operation);
+}
+
+.state-changes {
+  color: var(--steel);
 }
 
 .state-failed {
@@ -473,6 +538,11 @@
 .action-current {
   color: var(--operation);
   background: var(--operation-soft);
+}
+
+.action-changes {
+  color: #495451;
+  background: #edf1ef;
 }
 
 .action-failed {
@@ -516,7 +586,7 @@
 }
 
 .state-busy svg {
-  color: var(--review);
+  color: var(--operation);
 }
 
 .state-error svg {
@@ -543,7 +613,7 @@
 }
 
 .activity-empty svg {
-  color: var(--passed);
+  color: var(--steel);
 }
 
 .activity-list a {
@@ -574,6 +644,16 @@
 
 .activity-status.stage-failed {
   background: var(--failed);
+}
+
+.activity-status.stage-stale {
+  border: 1px dashed #65726e;
+  background: transparent;
+}
+
+.activity-status.stage-blocked {
+  border-radius: 1px;
+  background: #495451;
 }
 
 .route-context {
@@ -618,19 +698,169 @@
   font-size: 11px;
 }
 
+.settings-row > * {
+  min-width: 0;
+}
+
+.settings-row code,
+.settings-row > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .settings-row > span,
 .settings-row code {
   color: var(--steel);
 }
 
 .settings-row .provider-ready {
-  color: var(--passed);
+  color: var(--ink);
   font-weight: 650;
 }
 
-.settings-row .provider-blocked {
-  color: var(--failed);
+.settings-row .provider-unavailable {
+  color: var(--steel);
   font-weight: 650;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  display: grid;
+  overflow-y: auto;
+  place-items: center;
+  padding: 24px;
+  background: rgb(23 32 30 / 48%);
+}
+
+.create-dialog {
+  width: min(100%, 560px);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  border: 1px solid var(--rule-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: 0 18px 48px rgb(23 32 30 / 18%);
+}
+
+.dialog-heading {
+  display: flex;
+  min-height: 62px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.dialog-heading h2 {
+  margin: 4px 0 0;
+  font-size: 16px;
+}
+
+.create-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 16px;
+}
+
+.create-form label {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: var(--steel);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.create-form input,
+.create-form select,
+.create-form textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.create-form input,
+.create-form select {
+  height: 36px;
+  padding: 0 9px;
+}
+
+.create-form textarea {
+  min-height: 82px;
+  resize: vertical;
+  padding: 9px;
+  line-height: 1.5;
+}
+
+.form-wide,
+.form-message,
+.dialog-actions {
+  grid-column: 1 / -1;
+}
+
+.form-message {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  color: var(--steel);
+  font-size: 11px;
+}
+
+.form-error svg {
+  color: var(--failed);
+}
+
+.form-busy svg {
+  color: var(--operation);
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.create-success {
+  display: grid;
+  min-height: 240px;
+  align-content: center;
+  justify-items: center;
+  gap: 9px;
+  padding: 24px;
+  text-align: center;
+}
+
+.create-success svg {
+  color: var(--passed);
+}
+
+.create-success strong {
+  font-size: 14px;
+}
+
+.create-success span,
+.create-success code {
+  color: var(--steel);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.create-success .command-button {
+  margin-top: 10px;
 }
 
 .mobile-navigation {
@@ -682,7 +912,7 @@
     left: 0;
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    height: 58px;
+    height: calc(58px + env(safe-area-inset-bottom));
     padding-bottom: env(safe-area-inset-bottom);
     border-top: 1px solid var(--rule);
     background: rgb(255 255 255 / 98%);
@@ -700,7 +930,7 @@
   }
 
   .workbench-main {
-    padding-bottom: 58px;
+    padding-bottom: calc(58px + env(safe-area-inset-bottom));
   }
 }
 
@@ -822,5 +1052,25 @@
   .settings-row > span:last-child {
     grid-column: 1 / -1;
     overflow-wrap: anywhere;
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .dialog-backdrop {
+    align-items: end;
+    padding: 12px 12px calc(12px + env(safe-area-inset-bottom));
+  }
+
+  .create-dialog {
+    max-height: calc(100vh - 24px - env(safe-area-inset-bottom));
+  }
+
+  .create-form {
+    grid-template-columns: 1fr;
+  }
+
+  .create-form > * {
+    grid-column: 1;
   }
 }

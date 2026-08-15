@@ -67,14 +67,18 @@ export function AppShell() {
           <span className="brand-role">制作台</span>
         </NavLink>
         <PrimaryNavigation />
-        <a
-          className="icon-button masthead-activity"
-          href="#job-activity"
-          aria-label="查看作业活动"
-          title="查看作业活动"
-        >
-          <Activity aria-hidden="true" size={17} />
-        </a>
+        {location.pathname === "/projects" ? (
+          <a
+            className="icon-button masthead-activity"
+            href="#job-activity"
+            aria-label="查看作业活动"
+            title="查看作业活动"
+          >
+            <Activity aria-hidden="true" size={17} />
+          </a>
+        ) : (
+          <span className="masthead-spacer" aria-hidden="true" />
+        )}
       </header>
 
       <div className="production-rail-wrap">

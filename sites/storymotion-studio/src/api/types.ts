@@ -183,6 +183,8 @@ export interface JobDetail {
   resume_count: number;
 }
 
+export type ResumeJobResponse = JobAccepted | JobDetail;
+
 export interface JobEvent {
   job_id: string;
   sequence: number;
@@ -222,3 +224,18 @@ export interface WorkDetail extends WorkSummary {
   versions: JsonObject[];
   eval_reports: Artifact[];
 }
+
+export interface WorkCatalogAdapter {
+  listWorks(): Promise<WorkSummary[]>;
+  getWork(workId: string): Promise<WorkDetail>;
+}
+
+export type WorkCapability =
+  | {
+      availability: "unavailable";
+      reason: "local_catalog_not_configured";
+    }
+  | {
+      availability: "available";
+      catalog: WorkCatalogAdapter;
+    };
