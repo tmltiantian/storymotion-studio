@@ -88,6 +88,68 @@ def test_manual_policy_runs_stage_then_waits_for_review(tmp_path: Path) -> None:
     assert result.next_stage is StageName.SCRIPT
 
 
+def test_revision_write_failure_leaves_manual_execution_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _project(tmp_path)
+    calls: list[StageName] = []
+
+    def fail_revision_write(*_args, **_kwargs):
+        raise OSError("forced revision write failure")
+
+    monkeypatch.setattr(
+        "factory.pipeline_runner.write_stage_revision", fail_revision_write
+    )
+
+    with pytest.raises(OSError, match="forced revision write failure"):
+        run_pipeline(
+            root,
+            through=StageName.CONCEPT,
+            executor=_passing_executor(calls),
+            review_config=_review_config(concept=ReviewPolicy.MANUAL),
+        )
+
+    record = load_production_package(root).stages[0]
+    assert calls == [StageName.CONCEPT]
+    assert record.state is StageState.RUNNING
+    assert record.review_state is ReviewState.NOT_READY
+    assert record.state is not StageState.BLOCKED
+
+
+def test_resume_reruns_passed_stage_with_incomplete_review_metadata(
+    tmp_path: Path,
+) -> None:
+    root = _project(tmp_path)
+    artifact = tmp_path / "interrupted-concept.json"
+    artifact.write_text("{}", encoding="utf-8")
+    update_stage(
+        root,
+        StageName.CONCEPT,
+        StageState.PASSED,
+        executor="generic.concept",
+        artifacts=(str(artifact),),
+        review_policy=ReviewPolicy.MANUAL,
+        review_state=ReviewState.NOT_READY,
+        review_blocks_progress=False,
+    )
+    calls: list[StageName] = []
+
+    result = resume_pipeline(
+        root,
+        through=StageName.CONCEPT,
+        executor=_passing_executor(calls),
+        review_config=_review_config(concept=ReviewPolicy.MANUAL),
+    )
+    record = load_production_package(root).stages[0]
+
+    assert calls == [StageName.CONCEPT]
+    assert result.next_stage is StageName.CONCEPT
+    assert record.state is StageState.PASSED
+    assert record.review_state is ReviewState.AWAITING_REVIEW
+    assert record.review_blocks_progress is True
+    assert record.state is not StageState.BLOCKED
+
+
 def test_grouped_policy_runs_members_and_stops_at_group_terminal(
     tmp_path: Path,
 ) -> None:

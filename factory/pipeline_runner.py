@@ -256,11 +256,16 @@ def run_pipeline(
                     and not record.input_signature.startswith("legacy:")
                     and record.input_signature != signature
                 )
+                review_metadata_incomplete = (
+                    bool(record.artifacts)
+                    and record.review_state is ReviewState.NOT_READY
+                )
                 review_issue = _review_validation_issue(root, record)
                 if (
                     not missing
                     and not integrity_issue
                     and not signature_changed
+                    and not review_metadata_incomplete
                     and not review_issue
                 ):
                     if record.review_blocks_progress and record.review_state not in (
@@ -278,6 +283,11 @@ def run_pipeline(
                         if missing
                         else integrity_issue
                         or review_issue
+                        or (
+                            "Stage review metadata is incomplete"
+                            if review_metadata_incomplete
+                            else ""
+                        )
                         or "Stage executor signature changed"
                     ),
                 )
@@ -336,17 +346,17 @@ def run_pipeline(
                     _redact(str(exc)), executor=step.executor_id
                 )
                 state, artifacts, blocked_reasons = result.state, (), ()
-            package = update_stage(
-                root,
-                stage,
-                state,
-                executor=result.executor,
-                input_signature=signature,
-                artifacts=artifacts,
-                blocked_reasons=blocked_reasons,
-                error=_redact(result.error),
-            )
             if state is not StageState.PASSED:
+                package = update_stage(
+                    root,
+                    stage,
+                    state,
+                    executor=result.executor,
+                    input_signature=signature,
+                    artifacts=artifacts,
+                    blocked_reasons=blocked_reasons,
+                    error=_redact(result.error),
+                )
                 return PipelineRunResult(
                     False,
                     stage,

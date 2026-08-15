@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from factory import pipeline_store
 from factory.pipeline_contracts import (
     PIPELINE_STAGES,
     ProjectMode,
@@ -15,6 +16,7 @@ from factory.pipeline_contracts import (
     StageState,
 )
 from factory.pipeline_store import (
+    approve_review_bundle,
     approve_stage,
     create_project,
     invalidate_stage_and_downstream,
@@ -22,7 +24,8 @@ from factory.pipeline_store import (
     load_project_spec,
     update_stage,
 )
-from factory.pipeline_runner import StageExecution, resume_pipeline
+from factory.pipeline_review import ApprovalPreset, ReviewConfig
+from factory.pipeline_runner import StageExecution, resume_pipeline, run_pipeline
 
 
 def _spec(tmp_path: Path) -> ProjectSpec:
@@ -33,6 +36,129 @@ def _spec(tmp_path: Path) -> ProjectSpec:
         input={"kind": "idea", "text": "two cats investigate a noise"},
         output_dir=tmp_path / "output",
     )
+
+
+def _grouped_review_project(tmp_path: Path) -> tuple[Path, tuple[StageName, ...]]:
+    project_dir = tmp_path / "projects" / "grouped"
+    spec = _spec(tmp_path)
+    create_project(project_dir, spec)
+    grouped_stages = (
+        StageName.SCRIPT,
+        StageName.STORYBOARD,
+        StageName.ASSETS,
+        StageName.AUDIO,
+    )
+    policies = {stage: ReviewPolicy.AUTOMATIC for stage in PIPELINE_STAGES}
+    policies.update({stage: ReviewPolicy.GROUPED for stage in grouped_stages})
+
+    def execute(context):
+        artifact = context.stage_dir / f"{context.stage.value}.json"
+        artifact.write_text("{}", encoding="utf-8")
+        return StageExecution.passed(
+            executor=context.step.executor_id,
+            artifacts=(artifact,),
+        )
+
+    run_pipeline(
+        project_dir,
+        through=StageName.AUDIO,
+        executor=execute,
+        review_config=ReviewConfig(ApprovalPreset.QUICK, policies),
+    )
+    return project_dir, grouped_stages
+
+
+def test_grouped_approval_failure_rolls_back_partial_review_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_dir, grouped_stages = _grouped_review_project(tmp_path)
+    evidence = tmp_path / "group-review.json"
+    evidence.write_text('{"approved":true}', encoding="utf-8")
+    real_approve = pipeline_store.approve_stage_revision
+    writes = 0
+
+    def fail_after_first_write(*args, **kwargs):
+        nonlocal writes
+        if writes == 1:
+            raise OSError("forced grouped review write failure")
+        review = real_approve(*args, **kwargs)
+        writes += 1
+        return review
+
+    monkeypatch.setattr(
+        pipeline_store, "approve_stage_revision", fail_after_first_write
+    )
+
+    with pytest.raises(OSError, match="forced grouped review write failure"):
+        approve_review_bundle(
+            project_dir,
+            grouped_stages,
+            note="group approved",
+            evidence=(evidence,),
+        )
+
+    package = load_production_package(project_dir)
+    records = package.stages[1:5]
+    assert all(record.review_state is ReviewState.AWAITING_REVIEW for record in records)
+    assert all(
+        not (project_dir / "reviews" / f"{stage.value}.review.json").exists()
+        for stage in grouped_stages
+    )
+
+
+def test_grouped_approval_retry_recovers_interrupted_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_dir, grouped_stages = _grouped_review_project(tmp_path)
+    evidence = tmp_path / "group-review.json"
+    evidence.write_text('{"approved":true}', encoding="utf-8")
+    real_approve = pipeline_store.approve_stage_revision
+    writes = 0
+
+    class SimulatedProcessInterruption(BaseException):
+        pass
+
+    def interrupt_after_first_write(*args, **kwargs):
+        nonlocal writes
+        if writes == 1:
+            raise SimulatedProcessInterruption
+        review = real_approve(*args, **kwargs)
+        writes += 1
+        return review
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(
+            pipeline_store,
+            "approve_stage_revision",
+            interrupt_after_first_write,
+        )
+        with pytest.raises(SimulatedProcessInterruption):
+            approve_review_bundle(
+                project_dir,
+                grouped_stages,
+                note="group approved",
+                evidence=(evidence,),
+            )
+
+    interrupted_package = load_production_package(project_dir)
+    assert all(
+        record.review_state is ReviewState.AWAITING_REVIEW
+        for record in interrupted_package.stages[1:5]
+    )
+    assert (project_dir / "reviews" / "script.review.json").is_file()
+
+    package = approve_review_bundle(
+        project_dir,
+        grouped_stages,
+        note="group approved",
+        evidence=(evidence,),
+    )
+
+    assert all(
+        record.review_state is ReviewState.APPROVED for record in package.stages[1:5]
+    )
+    transactions = project_dir / "reviews" / ".transactions"
+    assert not any(transactions.iterdir())
 
 
 def test_create_project_writes_spec_and_full_pending_package(tmp_path: Path) -> None:
