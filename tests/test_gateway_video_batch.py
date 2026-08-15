@@ -1681,6 +1681,69 @@ def test_gateway_video_single_resumes_submitted_task_without_duplicate_charge(tm
     assert resumed.complete_count == 1
 
 
+def test_gateway_video_resume_restores_persisted_job_settings(tmp_path):
+    output = tmp_path / "single.mp4"
+    report_path = tmp_path / "single-report.json"
+
+    class InterruptedClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.config = GatewayVideoConfig(
+                api_key="batch-secret",
+                base_url="https://gateway.test/v1",
+                model="MiniMax-H3",
+            )
+
+        def complete_task(self, task, output_path, **kwargs):
+            raise GatewayVideoError("poll interrupted")
+
+    first = InterruptedClient()
+    render_gateway_video_single(
+        "animate one character",
+        output,
+        first,
+        report_path,
+        duration=4,
+        resolution="2K",
+        allow_network=True,
+    )
+
+    state = json.loads(output.with_suffix(".mp4.gateway.json").read_text("utf-8"))
+    assert state["duration"] == 4
+    assert state["resolution"] == "2K"
+    assert state["reference_image_count"] == 0
+
+    class ResumeClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.config = GatewayVideoConfig(
+                api_key="batch-secret",
+                base_url="https://gateway.test/v1",
+                model="MiniMax-H3",
+            )
+            self.restored = None
+
+        def restore_task_settings(self, task_id, **settings):
+            self.restored = (task_id, settings)
+
+    resumed = ResumeClient()
+    report = render_gateway_video_single(
+        "animate one character",
+        output,
+        resumed,
+        report_path,
+        duration=4,
+        resolution="2K",
+        allow_network=True,
+    )
+
+    assert report["success"] is True
+    assert resumed.restored == (
+        "task-1",
+        {"resolution": "2K", "duration": 4, "image_count": 0},
+    )
+
+
 def test_gateway_video_single_persists_only_local_reference_audio_evidence(tmp_path):
     audio = tmp_path / "drive.wav"
     _write_wav(audio)

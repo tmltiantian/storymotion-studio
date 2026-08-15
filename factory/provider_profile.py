@@ -10,6 +10,7 @@ from .dotenv import parse_dotenv
 
 
 DEFAULT_GATEWAY_ROOT = "https://ops-ai-gateway.yc345.tv"
+DEFAULT_MINIMAX_API_BASE = "https://api.minimaxi.com"
 
 
 def _parse_dotenv(path: Path | None) -> dict[str, str]:
@@ -292,6 +293,34 @@ def resolve_provider_profile(
             api_key=gateway_key,
             key_name=gateway_key_name,
             key_source=gateway_key_source,
+            ready=not video_blockers,
+            blockers=tuple(video_blockers),
+            enabled=video_enabled,
+            supports_reference_images=True,
+        )
+    elif video_provider == "minimax":
+        minimax_key, minimax_key_source = values.get("MINIMAX_API_KEY")
+        minimax_base, _ = values.get(
+            "MINIMAX_API_BASE",
+            DEFAULT_MINIMAX_API_BASE,
+        )
+        minimax_model, _ = values.get("MINIMAX_VIDEO_MODEL", "MiniMax-H3")
+        video_enabled_value, _ = values.get("ENABLE_MINIMAX_VIDEO", "0")
+        video_enabled = _truthy(video_enabled_value)
+        video_blockers = []
+        if not minimax_key:
+            video_blockers.append("MINIMAX_API_KEY is missing.")
+        if not video_enabled:
+            video_blockers.append(
+                "MiniMax video is disabled; set ENABLE_MINIMAX_VIDEO=1."
+            )
+        video = CapabilityConfig(
+            provider="minimax",
+            model=minimax_model,
+            base_url=minimax_base.rstrip("/"),
+            api_key=minimax_key,
+            key_name="MINIMAX_API_KEY",
+            key_source=minimax_key_source,
             ready=not video_blockers,
             blockers=tuple(video_blockers),
             enabled=video_enabled,

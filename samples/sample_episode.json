@@ -1,0 +1,135 @@
+{
+  "project_id": "sample_episode",
+  "title": "旧城来信",
+  "language": "zh-CN",
+  "style": "国漫风动态漫剧，电影感光影，角色一致",
+  "target_aspect_ratio": "9:16",
+  "target_resolution": "1080x1920",
+  "characters": [
+    {
+      "id": "char_1_林澈",
+      "name": "林澈",
+      "role": "主角A",
+      "description": "林澈 是本集核心人物，承担主要情绪推进和动作反应。",
+      "visual_anchor": "anime motion comic, consistent face, dark short hair, alert eyes, simple school jacket",
+      "voice_style": "清亮、克制、带一点少年感"
+    },
+    {
+      "id": "char_2_苏眠",
+      "name": "苏眠",
+      "role": "主角B",
+      "description": "苏眠 是本集核心人物，承担主要情绪推进和动作反应。",
+      "visual_anchor": "anime motion comic, consistent face, soft shoulder-length hair, calm eyes, light cardigan",
+      "voice_style": "温柔、坚定、情绪细腻"
+    }
+  ],
+  "shots": [
+    {
+      "id": "shot_001",
+      "index": 1,
+      "scene_title": "第 1 镜",
+      "action": "雨停后的旧城区像被擦亮的玻璃。林澈推开便利店的门，看见柜台上放着一枚没有寄件人的黑色信封。",
+      "visual_prompt": "国漫风动态漫剧，电影感光影，角色一致。画面包含 林澈、苏眠。剧情动作：雨停后的旧城区像被擦亮的玻璃。林澈推开便利店的门，看见柜台上放着一枚没有寄件人的黑色信封。。竖版9:16，适合短视频漫剧，字幕安全区留白。",
+      "camera": "medium shot, slow push-in",
+      "duration_seconds": 11.5,
+      "audio_mood": "悬念推进，轻微环境音，对白清晰",
+      "dialogue": [
+        {
+          "speaker_id": "narrator",
+          "text": "雨停后的旧城区像被擦亮的玻璃。林澈推开便利店的门，看见柜台上放着一枚没有寄件人的黑色信封。",
+          "emotion": "narrating"
+        }
+      ]
+    },
+    {
+      "id": "shot_002",
+      "index": 2,
+      "scene_title": "第 2 镜",
+      "action": "苏眠站在街灯下，手里握着一张被雨水泡软的车票。她低声说，最后一班车不是开往城外，而是开往十年前。",
+      "visual_prompt": "国漫风动态漫剧，电影感光影，角色一致。画面包含 林澈、苏眠。剧情动作：苏眠站在街灯下，手里握着一张被雨水泡软的车票。她低声说，最后一班车不是开往城外，而是开往十年前。。竖版9:16，适合短视频漫剧，字幕安全区留白。",
+      "camera": "close-up, slight handheld tension",
+      "duration_seconds": 8.0,
+      "audio_mood": "悬念推进，轻微环境音，对白清晰",
+      "dialogue": [
+        {
+          "speaker_id": "narrator",
+          "text": "苏眠站在街灯下。",
+          "emotion": "narrating"
+        },
+        {
+          "speaker_id": "char_2_苏眠",
+          "text": "最后一班车不是开往城外，而是开往十年前",
+          "emotion": "focused"
+        }
+      ]
+    },
+    {
+      "id": "shot_003",
+      "index": 3,
+      "scene_title": "第 3 镜",
+      "action": "林澈抬头看向巷口，那里本该废弃的电影院忽然亮起了招牌。空白海报框里浮出两道交叠的冷光，像把他们此刻的模样藏在玻璃后面。",
+      "visual_prompt": "国漫风动态漫剧，电影感光影，角色一致。画面包含 林澈、苏眠。剧情动作：林澈抬头看向巷口，那里本该废弃的电影院忽然亮起了招牌。空白海报框里浮出两道交叠的冷光，像把他们此刻的模样藏在玻璃后面。。竖版9:16，适合短视频漫剧，字幕安全区留白。",
+      "camera": "medium shot, slow push-in",
+      "duration_seconds": 13.0,
+      "audio_mood": "悬念推进，轻微环境音，对白清晰",
+      "dialogue": [
+        {
+          "speaker_id": "narrator",
+          "text": "林澈抬头看向巷口，那里本该废弃的电影院忽然亮起了招牌。空白海报框里浮出两道交叠的冷光，像把他们此刻的模样藏在玻璃后面。",
+          "emotion": "narrating"
+        }
+      ]
+    },
+    {
+      "id": "shot_004",
+      "index": 4,
+      "scene_title": "第 4 镜",
+      "action": "风从空荡的售票厅穿过，旧喇叭里传来断断续续的倒计时。苏眠停下脚步，把车票塞进检票口。",
+      "visual_prompt": "国漫风动态漫剧，电影感光影，角色一致。画面包含 林澈、苏眠。剧情动作：风从空荡的售票厅穿过，旧喇叭里传来断断续续的倒计时。苏眠停下脚步，把车票塞进检票口。。竖版9:16，适合短视频漫剧，字幕安全区留白。",
+      "camera": "close-up, slight handheld tension",
+      "duration_seconds": 11.0,
+      "audio_mood": "悬念推进，轻微环境音，对白清晰",
+      "dialogue": [
+        {
+          "speaker_id": "narrator",
+          "text": "风从空荡的售票厅穿过，旧喇叭里传来断断续续的倒计时。苏眠停下脚步，把车票塞进检票口。",
+          "emotion": "narrating"
+        }
+      ]
+    },
+    {
+      "id": "shot_005",
+      "index": 5,
+      "scene_title": "第 5 镜",
+      "action": "屏幕亮起的一瞬间，同样的黑色信封悬在银白光里。林澈低头接住信封，苏眠站在他身后。",
+      "visual_prompt": "国漫风动态漫剧，电影感光影，角色一致。画面包含 林澈、苏眠。剧情动作：屏幕亮起的一瞬间，同样的黑色信封悬在银白光里。林澈低头接住信封，苏眠站在他身后。。竖版9:16，适合短视频漫剧，字幕安全区留白。",
+      "camera": "medium shot, slow push-in",
+      "duration_seconds": 10.0,
+      "audio_mood": "悬念推进，轻微环境音，对白清晰",
+      "dialogue": [
+        {
+          "speaker_id": "narrator",
+          "text": "屏幕亮起的一瞬间，同样的黑色信封悬在银白光里。林澈低头接住信封，苏眠站在他身后。",
+          "emotion": "narrating"
+        }
+      ]
+    },
+    {
+      "id": "shot_006",
+      "index": 6,
+      "scene_title": "第 6 镜",
+      "action": "他们终于明白，这不是一封信，而是一场被重复播放的选择。",
+      "visual_prompt": "国漫风动态漫剧，电影感光影，角色一致。画面包含 林澈、苏眠。剧情动作：他们终于明白，这不是一封信，而是一场被重复播放的选择。。竖版9:16，适合短视频漫剧，字幕安全区留白。",
+      "camera": "close-up, slight handheld tension",
+      "duration_seconds": 7.5,
+      "audio_mood": "悬念推进，轻微环境音，对白清晰",
+      "dialogue": [
+        {
+          "speaker_id": "narrator",
+          "text": "他们终于明白，这不是一封信，而是一场被重复播放的选择。",
+          "emotion": "narrating"
+        }
+      ]
+    }
+  ]
+}

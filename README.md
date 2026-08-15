@@ -17,7 +17,7 @@
 ## 能力边界
 
 - 统一项目状态、阶段产物、审批、恢复运行和发布门禁。
-- 网关文本、图像和 Seedance 视频生成，所有付费调用都需要显式 `--enable-live`。
+- 网关文本、图像、Seedance 与 MiniMax H3 视频生成，所有付费调用都需要显式 `--enable-live`。
 - 豆包多角色 TTS 与本地语音回退；角色音色在项目内固定。
 - OpenMontage/FFmpeg 剪辑、字幕、响度和成片导出。
 - EVAL 检查角色/场景一致性、动作物理、镜头连续性、口型、音频重叠、杂音和交付完整性。
@@ -44,6 +44,30 @@ ENABLE_GATEWAY_VIDEO=1
 ```
 
 豆包 TTS 可使用 Speech API Key，或 AppID + Access Key 的流式凭据。真实密钥只放在 `.env`，不要提交到仓库。
+
+MiniMax H3 视频路线：
+
+```dotenv
+VIDEO_PROVIDER=minimax
+MINIMAX_API_KEY=your-key
+MINIMAX_API_BASE=https://api.minimaxi.com
+MINIMAX_VIDEO_MODEL=MiniMax-H3
+ENABLE_MINIMAX_VIDEO=1
+```
+
+单镜头试生成使用统一入口；H3 支持 4-15 秒和 `768P`/`2K`：
+
+```bash
+.venv/bin/python factory_cli.py video-generate \
+  --prompt "一只黑白猫自然抬起右前爪，固定机位，无转场" \
+  --duration 4 \
+  --ratio 9:16 \
+  --resolution 768P \
+  --output output/h3_probe.mp4 \
+  --enable-live
+```
+
+任务 ID、轮询次数、MiniMax 返回的用量和预估人民币费用会写入生成报告。省略 `--enable-live` 只生成计划，不会发起云端请求。
 
 ## 快速开始
 
@@ -142,11 +166,11 @@ delivery/                  母版、报告和版本记录
 .venv/bin/python factory_cli.py pet-sitcom --help
 ```
 
-网关与质量检查也保留独立诊断命令：
+视频提供方与质量检查也保留独立诊断命令：
 
 ```bash
 .venv/bin/python factory_cli.py provider-report
-.venv/bin/python factory_cli.py gateway-video-batch --help
+.venv/bin/python factory_cli.py video-batch --help
 .venv/bin/python factory_cli.py quality-visual-qc --help
 ```
 
