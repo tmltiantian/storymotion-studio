@@ -35,6 +35,7 @@ class Shot:
     duration_seconds: float
     audio_mood: str
     dialogue: list[DialogueLine] = field(default_factory=list)
+    character_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -72,7 +73,14 @@ def character_from_dict(data: dict[str, Any]) -> Character:
     )
 
 
-def shot_from_dict(data: dict[str, Any]) -> Shot:
+def shot_from_dict(
+    data: dict[str, Any],
+    *,
+    legacy_character_ids: list[str] | None = None,
+) -> Shot:
+    raw_character_ids = data.get("character_ids")
+    if raw_character_ids is None:
+        raw_character_ids = legacy_character_ids or []
     return Shot(
         id=str(data["id"]),
         index=int(data["index"]),
@@ -82,11 +90,14 @@ def shot_from_dict(data: dict[str, Any]) -> Shot:
         camera=str(data["camera"]),
         duration_seconds=float(data["duration_seconds"]),
         audio_mood=str(data["audio_mood"]),
+        character_ids=[str(item) for item in raw_character_ids],
         dialogue=[dialogue_from_dict(item) for item in data.get("dialogue", [])],
     )
 
 
 def episode_from_dict(data: dict[str, Any]) -> Episode:
+    characters = [character_from_dict(item) for item in data.get("characters", [])]
+    legacy_character_ids = [character.id for character in characters]
     return Episode(
         project_id=str(data["project_id"]),
         title=str(data["title"]),
@@ -94,8 +105,11 @@ def episode_from_dict(data: dict[str, Any]) -> Episode:
         style=str(data["style"]),
         target_aspect_ratio=str(data["target_aspect_ratio"]),
         target_resolution=str(data["target_resolution"]),
-        characters=[character_from_dict(item) for item in data.get("characters", [])],
-        shots=[shot_from_dict(item) for item in data.get("shots", [])],
+        characters=characters,
+        shots=[
+            shot_from_dict(item, legacy_character_ids=legacy_character_ids)
+            for item in data.get("shots", [])
+        ],
     )
 
 
@@ -126,6 +140,11 @@ def validate_episode(episode: Episode) -> list[str]:
             errors.append(f"{shot.id} duration_seconds must be positive")
         if not shot.visual_prompt.strip():
             errors.append(f"{shot.id} visual_prompt is required")
+        if len(set(shot.character_ids)) != len(shot.character_ids):
+            errors.append(f"{shot.id} character_ids must be unique")
+        for character_id in shot.character_ids:
+            if character_id not in character_ids:
+                errors.append(f"{shot.id} character {character_id!r} is unknown")
         for line in shot.dialogue:
             if line.speaker_id != NARRATOR_ID and line.speaker_id not in character_ids:
                 errors.append(
@@ -133,6 +152,14 @@ def validate_episode(episode: Episode) -> list[str]:
                 )
             if not line.text.strip():
                 errors.append(f"{shot.id} dialogue text is empty")
+            if (
+                line.speaker_id != NARRATOR_ID
+                and shot.character_ids
+                and line.speaker_id not in shot.character_ids
+            ):
+                errors.append(
+                    f"{shot.id} dialogue speaker {line.speaker_id!r} is not on screen"
+                )
 
     return errors
 

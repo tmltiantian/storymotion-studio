@@ -40,6 +40,17 @@ def write_json_atomic(path: str | Path, payload: Any) -> Path:
     )
 
 
+def read_json_object(path: str | Path) -> dict[str, Any]:
+    source = Path(path).expanduser()
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON file: {source}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a JSON object: {source}")
+    return payload
+
+
 def sha256_file(path: str | Path) -> str:
     source = Path(path).expanduser()
     if source.is_symlink():

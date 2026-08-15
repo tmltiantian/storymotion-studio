@@ -65,6 +65,9 @@ from factory.pet_sitcom import (
     build_pet_sitcom_plan,
     write_pet_sitcom_plan,
 )
+# Compatibility exports for integrations that patched the former CLI module globals.
+from factory import pet_sitcom_audio_probe as pet_sitcom_audio_probe_module  # noqa: F401
+from factory import pet_sitcom_generation as pet_sitcom_generation_module  # noqa: F401
 from factory.pet_sitcom_generation import (
     PET_RETRY_SUFFIXES,
     PetSitcomGenerationError,
@@ -93,11 +96,7 @@ from factory.pet_sitcom_sound import (
     load_pet_sound_design,
     prepare_pet_sound_design,
 )
-from factory import pet_sitcom_audio_probe as pet_sitcom_audio_probe_module
-from factory import pet_sitcom_audio_first as pet_sitcom_audio_first_module
-from factory import pet_sitcom_generation as pet_sitcom_generation_module
-from factory import pet_sitcom_review as pet_sitcom_review_module
-from factory import pet_sitcom_sound as pet_sitcom_sound_module
+from factory.pet_sitcom_service import PET_SITCOM_SERVICES as pet_services
 from factory.pet_sitcom_review import (
     PetSitcomReviewError,
     build_final_evidence,
@@ -1706,7 +1705,7 @@ def _pet_plan_is_current(plan: Any) -> bool:
 def _pet_inspect_anchors(plan: Any) -> dict[str, Any]:
     root = Path(plan.output_dir)
     try:
-        jobs = pet_sitcom_generation_module._anchor_jobs(plan)
+        jobs = pet_services.generation.anchor_jobs(plan)
         source_hashes: dict[str, str] = {}
         state_fields = {
             "schema_version",
@@ -1725,17 +1724,17 @@ def _pet_inspect_anchors(plan: Any) -> dict[str, Any]:
                 root=root,
                 expected=output,
             )
-            signature = pet_sitcom_generation_module._hash_payload(
+            signature = pet_services.generation.hash_payload(
                 {
-                    "provider": pet_sitcom_generation_module.IMAGE_PROVIDER,
-                    "model": pet_sitcom_generation_module.IMAGE_MODEL,
+                    "provider": pet_services.generation.IMAGE_PROVIDER,
+                    "model": pet_services.generation.IMAGE_MODEL,
                     "prompt": job["prompt"],
-                    "size": pet_sitcom_generation_module.IMAGE_SIZE,
+                    "size": pet_services.generation.IMAGE_SIZE,
                     "candidate_number": 1,
                 }
             )
             state_path = (
-                pet_sitcom_generation_module._anchor_state_path(output)
+                pet_services.generation.anchor_state_path(output)
             )
             state = _pet_read_strict_json(
                 state_path,
@@ -1744,25 +1743,25 @@ def _pet_inspect_anchors(plan: Any) -> dict[str, Any]:
             digest = _pet_file_sha256(output)
             expected_state = {
                 "schema_version": (
-                    pet_sitcom_generation_module.ANCHOR_STATE_SCHEMA
+                    pet_services.generation.ANCHOR_STATE_SCHEMA
                 ),
                 "signature": signature,
-                "provider": pet_sitcom_generation_module.IMAGE_PROVIDER,
-                "model": pet_sitcom_generation_module.IMAGE_MODEL,
+                "provider": pet_services.generation.IMAGE_PROVIDER,
+                "model": pet_services.generation.IMAGE_MODEL,
                 "prompt": job["prompt"],
-                "size": pet_sitcom_generation_module.IMAGE_SIZE,
+                "size": pet_services.generation.IMAGE_SIZE,
                 "candidate_number": 1,
                 "output_sha256": digest,
             }
             if state != expected_state:
                 raise ValueError("Anchor state is stale.")
-        source_hashes = pet_sitcom_generation_module._anchor_hashes(plan)
+        source_hashes = pet_services.generation.anchor_hashes(plan)
         review_fields = {
             "schema_version",
             "completed",
             "approved",
             "source_hashes",
-            *pet_sitcom_generation_module._ANCHOR_REVIEW_FIELDS,
+            *pet_services.generation.ANCHOR_REVIEW_FIELDS,
         }
         review = _pet_read_strict_json(
             _pet_anchor_review_path(plan),
@@ -1770,14 +1769,14 @@ def _pet_inspect_anchors(plan: Any) -> dict[str, Any]:
         )
         if (
             review.get("schema_version")
-            != pet_sitcom_generation_module.ANCHOR_REVIEW_SCHEMA
+            != pet_services.generation.ANCHOR_REVIEW_SCHEMA
             or review.get("completed") is not True
             or review.get("approved") is not True
             or review.get("source_hashes") != source_hashes
             or any(
                 review.get(field) is not True
                 for field in (
-                    pet_sitcom_generation_module._ANCHOR_REVIEW_FIELDS
+                    pet_services.generation.ANCHOR_REVIEW_FIELDS
                 )
             )
         ):
@@ -1816,12 +1815,12 @@ def _pet_inspect_audio(plan: Any) -> dict[str, Any]:
         )
         if (
             document.get("schema_version")
-            != pet_sitcom_audio_first_module.AUDIO_FIRST_SCHEMA
+            != pet_services.audio_first.AUDIO_FIRST_SCHEMA
             or document.get("plan_schema_version")
-            != pet_sitcom_audio_first_module.PLAN_SCHEMA_VERSION
+            != pet_services.audio_first.PLAN_SCHEMA_VERSION
             or document.get("project_id") != plan.project_id
             or document.get("plan_sha256")
-            != pet_sitcom_audio_first_module._plan_hash(plan)
+            != pet_services.audio_first.plan_hash(plan)
             or document.get("duration_seconds") != plan.duration_seconds
         ):
             raise ValueError("Audio manifest is not current-plan bound.")
@@ -1829,7 +1828,7 @@ def _pet_inspect_audio(plan: Any) -> dict[str, Any]:
         shots = tuple(shot for shot in plan.shots if shot.dialogue)
         if not isinstance(records, list) or len(records) != len(shots):
             raise ValueError("Audio manifest must contain eight spoken shots.")
-        starts = pet_sitcom_audio_first_module._shot_start_times(plan)
+        starts = pet_services.audio_first.shot_start_times(plan)
         assets: dict[str, dict[str, Any]] = {}
         dataclasses: dict[str, Any] = {}
         for shot, record in zip(shots, records, strict=True):
@@ -1837,7 +1836,7 @@ def _pet_inspect_audio(plan: Any) -> dict[str, Any]:
                 raise ValueError("Audio asset fields are invalid.")
             duration = _pet_finite_number(
                 record.get("duration_seconds"),
-                minimum=pet_sitcom_audio_first_module.MINIMUM_DURATION_SECONDS,
+                minimum=pet_services.audio_first.MINIMUM_DURATION_SECONDS,
             )
             absolute_start = _pet_finite_number(
                 record.get("absolute_start_seconds"),
@@ -1847,10 +1846,10 @@ def _pet_inspect_audio(plan: Any) -> dict[str, Any]:
                 record.get("absolute_end_seconds"),
                 minimum=0,
             )
-            voice = pet_sitcom_audio_first_module.PET_VOICES.get(
+            voice = pet_services.audio_first.PET_VOICES.get(
                 str(shot.speaker)
             )
-            expected_path = pet_sitcom_audio_first_module._speech_output(
+            expected_path = pet_services.audio_first.speech_output(
                 plan,
                 shot,
             )
@@ -1867,7 +1866,7 @@ def _pet_inspect_audio(plan: Any) -> dict[str, Any]:
             available_end = (
                 starts[shot.shot_id]
                 + shot.duration_seconds
-                - pet_sitcom_audio_first_module.DIALOGUE_TAIL_SECONDS
+                - pet_services.audio_first.DIALOGUE_TAIL_SECONDS
             )
             if (
                 voice is None
@@ -1884,7 +1883,7 @@ def _pet_inspect_audio(plan: Any) -> dict[str, Any]:
                 raise ValueError("Audio asset metadata is stale.")
             assets[shot.shot_id] = dict(record)
             dataclasses[shot.shot_id] = (
-                pet_sitcom_audio_first_module._asset_from_record(record)
+                pet_services.audio_first.asset_from_record(record)
             )
         return {
             "ready": len(assets) == 8,
@@ -1943,10 +1942,10 @@ def _pet_inspect_drive(
     )
     expected = {
         "schema_version": (
-            pet_sitcom_audio_first_module.DRIVE_AUDIO_STATE_SCHEMA
+            pet_services.audio_first.DRIVE_AUDIO_STATE_SCHEMA
         ),
         "status": "completed",
-        "signature": pet_sitcom_audio_first_module._drive_signature(
+        "signature": pet_services.audio_first.drive_signature(
             shot,
             asset_object,
         ),
@@ -2000,17 +1999,17 @@ def _pet_inspect_probe(
         capability = report.get("capability")
         if (
             not isinstance(capability, str)
-            or capability not in pet_sitcom_audio_probe_module._CAPABILITIES
+            or capability not in pet_services.audio_probe.CAPABILITIES
             or set(report)
-            != set(pet_sitcom_audio_probe_module._OUTCOME_FIELDS[capability])
+            != set(pet_services.audio_probe.OUTCOME_FIELDS[capability])
             or report.get("schema_version")
-            != pet_sitcom_audio_probe_module.PROBE_SCHEMA
+            != pet_services.audio_probe.PROBE_SCHEMA
             or report.get("executed") is not True
             or type(report.get("success")) is not bool
             or report.get("source_shot_id")
-            != pet_sitcom_audio_probe_module.PROBE_SOURCE_SHOT_ID
+            != pet_services.audio_probe.PROBE_SOURCE_SHOT_ID
             or report.get("model")
-            != pet_sitcom_audio_probe_module.PROBE_MODEL
+            != pet_services.audio_probe.PROBE_MODEL
         ):
             raise ValueError("Probe outcome schema is invalid.")
         if capability == "supported" and report["success"] is not True:
@@ -2026,14 +2025,14 @@ def _pet_inspect_probe(
         ):
             raise ValueError("Unsupported probe must bind HTTP 400.")
         if capability == "inconclusive":
-            pet_sitcom_audio_probe_module._validate_inconclusive_task(report)
+            pet_services.audio_probe.validate_inconclusive_task(report)
         if audio.get("ready") is not True:
             raise ValueError("Probe requires current audio.")
         shot = next(
             item
             for item in plan.shots
             if item.shot_id
-            == pet_sitcom_audio_probe_module.PROBE_SOURCE_SHOT_ID
+            == pet_services.audio_probe.PROBE_SOURCE_SHOT_ID
         )
         asset = (audio.get("assets") or {}).get(shot.shot_id)
         drive = _pet_inspect_drive(plan, shot, audio)
@@ -2067,9 +2066,9 @@ def _pet_inspect_probe(
             expected=Path(plan.audio_manifest_path),
         )
         expected_common = {
-            "model": pet_sitcom_audio_probe_module.PROBE_MODEL,
-            "prompt_sha256": pet_sitcom_audio_probe_module._hash_text(
-                pet_sitcom_audio_probe_module._probe_prompt(plan)
+            "model": pet_services.audio_probe.PROBE_MODEL,
+            "prompt_sha256": pet_services.audio_probe.hash_text(
+                pet_services.audio_probe.probe_prompt(plan)
             ),
             "references": references,
             "source_tts_path": asset["output_path"],
@@ -2106,7 +2105,7 @@ def _pet_inspect_probe(
             root=root,
         )
         frames = report.get("frame_evidence")
-        timestamps = pet_sitcom_audio_probe_module.PROBE_FRAME_TIMESTAMPS
+        timestamps = pet_services.audio_probe.PROBE_FRAME_TIMESTAMPS
         if not isinstance(frames, list) or len(frames) != len(timestamps):
             raise ValueError("Probe frame evidence is incomplete.")
         for frame, timestamp in zip(frames, timestamps, strict=True):
@@ -2159,7 +2158,7 @@ def _pet_inspect_probe(
             "mouth_onset_seconds",
             "audio_offset_seconds",
             "mouth_offset_seconds",
-            *pet_sitcom_audio_probe_module.PROBE_REVIEW_GATES,
+            *pet_services.audio_probe.PROBE_REVIEW_GATES,
             "notes",
         }
         review = _pet_read_strict_json(
@@ -2168,7 +2167,7 @@ def _pet_inspect_probe(
         )
         if (
             review.get("schema_version")
-            != pet_sitcom_audio_probe_module.PROBE_REVIEW_SCHEMA
+            != pet_services.audio_probe.PROBE_REVIEW_SCHEMA
             or any(
                 review.get(key) != value
                 for key, value in review_bindings.items()
@@ -2178,7 +2177,7 @@ def _pet_inspect_probe(
             or any(
                 review.get(gate) is not True
                 for gate in (
-                    pet_sitcom_audio_probe_module.PROBE_REVIEW_GATES
+                    pet_services.audio_probe.PROBE_REVIEW_GATES
                 )
             )
             or not isinstance(review.get("notes"), str)
@@ -2188,7 +2187,7 @@ def _pet_inspect_probe(
                 "supported probe human review is incomplete or stale",
                 capability=capability,
             )
-        pet_sitcom_audio_probe_module._validate_review_timing(review)
+        pet_services.audio_probe.validate_review_timing(review)
         return _pet_probe_result(
             "approved",
             "",
@@ -2214,17 +2213,17 @@ def _pet_inspect_continuity(
     candidate: Path,
 ) -> dict[str, Any]:
     root = Path(plan.output_dir)
-    frame = pet_sitcom_generation_module._pet_continuity_frame_path(
+    frame = pet_services.generation.pet_continuity_frame_path(
         plan,
         shot.shot_id,
     )
     sidecar = (
-        pet_sitcom_generation_module._pet_continuity_state_path(frame)
+        pet_services.generation.pet_continuity_state_path(frame)
     )
     _pet_canonical_file(str(frame), root=root, expected=frame)
     state = _pet_read_strict_json(
         sidecar,
-        fields=pet_sitcom_generation_module._PET_CONTINUITY_FIELDS,
+        fields=pet_services.generation.PET_CONTINUITY_FIELDS,
     )
     source_duration = _pet_finite_number(
         state.get("source_video_duration_seconds"),
@@ -2241,12 +2240,12 @@ def _pet_inspect_continuity(
     expected_timestamp = min(edit_duration - 0.08, source_duration - 0.08)
     if (
         state.get("schema_version")
-        != pet_sitcom_generation_module.PET_CONTINUITY_SCHEMA
+        != pet_services.generation.PET_CONTINUITY_SCHEMA
         or state.get("source_video_path") != str(candidate)
         or state.get("source_video_sha256") != _pet_file_sha256(candidate)
         or edit_duration != float(shot.duration_seconds)
         or abs(timestamp - expected_timestamp) > 1e-9
-        or not pet_sitcom_review_module._iso(state.get("extracted_at"))
+        or not pet_services.review.iso(state.get("extracted_at"))
         or state.get("frame_sha256") != _pet_file_sha256(frame)
     ):
         raise ValueError("Continuity evidence is stale.")
@@ -2264,14 +2263,14 @@ def _pet_selection_state_fields(
     schema_version = state.get("schema_version")
     if (
         schema_version
-        == pet_sitcom_generation_module.PET_LOCAL_RECUT_SCHEMA
+        == pet_services.generation.PET_LOCAL_RECUT_SCHEMA
     ):
-        return pet_sitcom_generation_module._PET_LOCAL_RECUT_FIELDS
+        return pet_services.generation.PET_LOCAL_RECUT_FIELDS
     if (
         schema_version
-        == pet_sitcom_generation_module.PET_SHOT_GENERATION_SCHEMA
+        == pet_services.generation.PET_SHOT_GENERATION_SCHEMA
     ):
-        return pet_sitcom_generation_module._PET_PROVENANCE_FIELDS
+        return pet_services.generation.PET_PROVENANCE_FIELDS
     raise ValueError("Selection provenance schema is invalid.")
 
 
@@ -2287,11 +2286,11 @@ def _pet_inspect_selections(
     try:
         document = _pet_read_strict_json(
             path,
-            fields=pet_sitcom_review_module._SELECTION_TOP_FIELDS,
+            fields=pet_services.review.SELECTION_TOP_FIELDS,
         )
         if (
             document.get("schema_version")
-            != pet_sitcom_generation_module.PET_SELECTION_SCHEMA
+            != pet_services.generation.PET_SELECTION_SCHEMA
             or not isinstance(document.get("shots"), Mapping)
             or not isinstance(document.get("history"), Mapping)
         ):
@@ -2311,13 +2310,13 @@ def _pet_inspect_selections(
                     not isinstance(item, Mapping)
                     or set(item)
                     != set(
-                        pet_sitcom_review_module._SELECTION_ENTRY_FIELDS
+                        pet_services.review.SELECTION_ENTRY_FIELDS
                     )
                     or item.get("status") != "selected"
                     or type(item.get("candidate_number")) is not int
                     or item["candidate_number"]
                     not in {1, 2, 3, 4, 5, 6}
-                    or not pet_sitcom_review_module._iso(
+                    or not pet_services.review.iso(
                         item.get("selected_at")
                     )
                 ):
@@ -2333,16 +2332,16 @@ def _pet_inspect_selections(
             if (
                 not isinstance(entry, Mapping)
                 or set(entry)
-                != set(pet_sitcom_review_module._SELECTION_ENTRY_FIELDS)
+                != set(pet_services.review.SELECTION_ENTRY_FIELDS)
                 or entry.get("status") != "selected"
                 or type(entry.get("candidate_number")) is not int
                 or entry["candidate_number"] not in {1, 2, 3, 4, 5, 6}
-                or not pet_sitcom_review_module._iso(entry.get("selected_at"))
+                or not pet_services.review.iso(entry.get("selected_at"))
             ):
                 raise ValueError("Selection entry schema is invalid.")
             candidate_number = entry["candidate_number"]
             candidate = (
-                pet_sitcom_generation_module._pet_candidate_path(
+                pet_services.generation.pet_candidate_path(
                     shot,
                     candidate_number,
                 )
@@ -2354,7 +2353,7 @@ def _pet_inspect_selections(
                 expected=candidate,
             )
             state_path = (
-                pet_sitcom_generation_module._pet_candidate_state_path(
+                pet_services.generation.pet_candidate_state_path(
                     candidate
                 )
             )
@@ -2364,10 +2363,10 @@ def _pet_inspect_selections(
                 raise ValueError("Selection provenance schema is invalid.")
             is_local_recut = (
                 state.get("schema_version")
-                == pet_sitcom_generation_module.PET_LOCAL_RECUT_SCHEMA
+                == pet_services.generation.PET_LOCAL_RECUT_SCHEMA
             )
             gateway_path = (
-                pet_sitcom_generation_module._pet_gateway_report_path(
+                pet_services.generation.pet_gateway_report_path(
                     candidate
                 )
             )
@@ -2378,13 +2377,13 @@ def _pet_inspect_selections(
             if (
                 candidate_number > 1
                 and retry_reason
-                not in pet_sitcom_generation_module.PET_RETRY_SUFFIXES
+                not in pet_services.generation.PET_RETRY_SUFFIXES
             ):
                 raise ValueError("Selection retry reason is invalid.")
             prompt = (
                 ""
                 if is_local_recut
-                else pet_sitcom_generation_module._pet_shot_prompt(
+                else pet_services.generation.pet_shot_prompt(
                     shot,
                     candidate_number,
                     str(retry_reason),
@@ -2432,9 +2431,9 @@ def _pet_inspect_selections(
                 source_tts_hash = str(asset["output_sha256"])
             if (
                 state.get("schema_version")
-                == pet_sitcom_generation_module.PET_LOCAL_RECUT_SCHEMA
+                == pet_services.generation.PET_LOCAL_RECUT_SCHEMA
             ):
-                pet_sitcom_generation_module._validate_candidate_for_selection(
+                pet_services.generation.validate_candidate_for_selection(
                     plan,
                     shot,
                     candidate_number,
@@ -2448,19 +2447,19 @@ def _pet_inspect_selections(
             else:
                 expected_binding = {
                     "schema_version": (
-                        pet_sitcom_generation_module.PET_SHOT_GENERATION_SCHEMA
+                        pet_services.generation.PET_SHOT_GENERATION_SCHEMA
                     ),
                     "shot_id": shot.shot_id,
                     "candidate_number": candidate_number,
-                    "provider": pet_sitcom_generation_module.VIDEO_PROVIDER,
-                    "model": pet_sitcom_generation_module.VIDEO_MODEL,
+                    "provider": pet_services.generation.VIDEO_PROVIDER,
+                    "model": pet_services.generation.VIDEO_MODEL,
                     "base_prompt_sha256": (
-                        pet_sitcom_generation_module._hash_payload(
+                        pet_services.generation.hash_payload(
                             {"prompt": shot.base_prompt}
                         )
                     ),
                     "prompt_sha256": (
-                        pet_sitcom_generation_module._hash_payload(
+                        pet_services.generation.hash_payload(
                             {"prompt": prompt}
                         )
                     ),
@@ -2470,7 +2469,7 @@ def _pet_inspect_selections(
                     "retry_suffix": (
                         ""
                         if candidate_number == 1
-                        else pet_sitcom_generation_module.PET_RETRY_SUFFIXES[
+                        else pet_services.generation.PET_RETRY_SUFFIXES[
                             str(retry_reason)
                         ]
                     ),
@@ -2581,7 +2580,7 @@ def _pet_inspect_owner_review(
         owner_path = Path(plan.output_dir) / "owner_native_audio_review.json"
         owner = _pet_read_strict_json(
             owner_path,
-            fields=pet_sitcom_review_module._OWNER_TOP_FIELDS,
+            fields=pet_services.review.OWNER_TOP_FIELDS,
         )
         owner_records = owner.get("shots")
         owner_ids = {
@@ -2591,12 +2590,12 @@ def _pet_inspect_owner_review(
         }
         if not (
             owner.get("schema_version")
-            == pet_sitcom_review_module.OWNER_NATIVE_AUDIO_REVIEW_SCHEMA
+            == pet_services.review.OWNER_NATIVE_AUDIO_REVIEW_SCHEMA
             and owner.get("reviewed") is True
             and owner.get("verified") is True
-            and pet_sitcom_review_module._iso(owner.get("generated_at"))
+            and pet_services.review.iso(owner.get("generated_at"))
             and owner.get("reviewer_method")
-            == pet_sitcom_review_module.OWNER_REVIEW_METHOD
+            == pet_services.review.OWNER_REVIEW_METHOD
             and isinstance(owner_records, Mapping)
             and set(owner_records) == owner_ids
         ):
@@ -2607,15 +2606,15 @@ def _pet_inspect_owner_review(
             if not (
                 isinstance(record, Mapping)
                 and set(record)
-                == set(pet_sitcom_review_module._OWNER_RECORD_FIELDS)
+                == set(pet_services.review.OWNER_RECORD_FIELDS)
                 and record.get("selected_mp4_path")
                 == str(source["path"])
                 and record.get("selected_mp4_sha256") == source["sha256"]
                 and record.get("no_native_voice") is True
                 and record.get("room_tone_allowed") is True
                 and record.get("reviewer_method")
-                == pet_sitcom_review_module.OWNER_REVIEW_METHOD
-                and pet_sitcom_review_module._iso(
+                == pet_services.review.OWNER_REVIEW_METHOD
+                and pet_services.review.iso(
                     record.get("reviewed_at")
                 )
                 and isinstance(record.get("notes"), str)
@@ -2657,14 +2656,14 @@ def _pet_inspect_reviews(
     try:
         document = _pet_read_strict_json(
             Path(plan.shot_review_path),
-            fields=pet_sitcom_review_module._SHOT_REVIEW_TOP_FIELDS,
+            fields=pet_services.review.SHOT_REVIEW_TOP_FIELDS,
         )
         records = document.get("shots")
         mouth = document.get("mouth_timing")
         if (
             document.get("schema_version")
-            != pet_sitcom_review_module.SHOT_REVIEW_SCHEMA
-            or not pet_sitcom_review_module._iso(
+            != pet_services.review.SHOT_REVIEW_SCHEMA
+            or not pet_services.review.iso(
                 document.get("generated_at")
             )
             or not isinstance(records, Mapping)
@@ -2673,7 +2672,7 @@ def _pet_inspect_reviews(
             or set(mouth)
             != (
                 set(sources)
-                & set(pet_sitcom_review_module._MOUTH_SHOTS)
+                & set(pet_services.review.MOUTH_SHOTS)
             )
         ):
             raise ValueError("Shot review document is invalid.")
@@ -2704,14 +2703,14 @@ def _pet_inspect_reviews(
     for shot in plan.shots:
         source = sources[shot.shot_id]
         try:
-            result = pet_sitcom_review_module._validate_shot_review_record(
+            result = pet_services.review.validate_shot_review_record(
                 shot.shot_id,
                 records[shot.shot_id],
                 source,
                 durations[shot.shot_id],
             )
-            if shot.shot_id in pet_sitcom_review_module._MOUTH_SHOTS:
-                pet_sitcom_review_module._validate_mouth_timing_record(
+            if shot.shot_id in pet_services.review.MOUTH_SHOTS:
+                pet_services.review.validate_mouth_timing_record(
                     shot.shot_id,
                     mouth[shot.shot_id],
                     source,
@@ -2741,22 +2740,22 @@ def _pet_inspect_sound(plan: Any) -> dict[str, Any]:
         manifest_path = root / "sound_design.json"
         document = _pet_read_strict_json(
             manifest_path,
-            fields=pet_sitcom_sound_module._TOP_LEVEL_FIELDS,
+            fields=pet_services.sound.TOP_LEVEL_FIELDS,
         )
-        config = pet_sitcom_sound_module._sound_config()
-        config_hash = pet_sitcom_sound_module._json_hash(config)
-        plan_hash = pet_sitcom_sound_module._json_hash(plan.to_report())
+        config = pet_services.sound.sound_config()
+        config_hash = pet_services.sound.json_hash(config)
+        plan_hash = pet_services.sound.json_hash(plan.to_report())
         if (
             document.get("schema_version")
-            != pet_sitcom_sound_module.SOUND_DESIGN_SCHEMA
+            != pet_services.sound.SOUND_DESIGN_SCHEMA
             or document.get("project_id") != plan.project_id
             or document.get("plan_sha256") != plan_hash
             or document.get("duration_seconds")
-            != pet_sitcom_sound_module.FINAL_DURATION_SECONDS
+            != pet_services.sound.FINAL_DURATION_SECONDS
             or document.get("sample_rate")
-            != pet_sitcom_sound_module.SAMPLE_RATE
+            != pet_services.sound.SAMPLE_RATE
             or document.get("channels")
-            != pet_sitcom_sound_module.CHANNELS
+            != pet_services.sound.CHANNELS
             or document.get("config_sha256") != config_hash
             or document.get("music_cues") != config["music_cues"]
             or document.get("dialogue_fades")
@@ -2770,7 +2769,7 @@ def _pet_inspect_sound(plan: Any) -> dict[str, Any]:
         if (
             not isinstance(source_record, Mapping)
             or set(source_record)
-            != set(pet_sitcom_sound_module._SOURCE_FIELDS)
+            != set(pet_services.sound.SOURCE_FIELDS)
         ):
             raise ValueError("Sound source schema is invalid.")
         source = _pet_bound_file(
@@ -2782,22 +2781,22 @@ def _pet_inspect_sound(plan: Any) -> dict[str, Any]:
         if (
             not isinstance(approval_record, Mapping)
             or set(approval_record)
-            != set(pet_sitcom_sound_module._MANIFEST_APPROVAL_FIELDS)
+            != set(pet_services.sound.MANIFEST_APPROVAL_FIELDS)
         ):
             raise ValueError("Sound approval binding is invalid.")
         approval_path = _pet_bound_file(
             approval_record.get("path"),
             approval_record.get("sha256"),
             root=None,
-            expected=pet_sitcom_sound_module.music_approval_path(source),
+            expected=pet_services.sound.music_approval_path(source),
         )
         approval = _pet_read_strict_json(
             approval_path,
-            fields=pet_sitcom_sound_module._APPROVAL_FIELDS,
+            fields=pet_services.sound.APPROVAL_FIELDS,
         )
         if (
             approval.get("schema_version")
-            != pet_sitcom_sound_module.MUSIC_APPROVAL_SCHEMA
+            != pet_services.sound.MUSIC_APPROVAL_SCHEMA
             or approval.get("source_path") != str(source)
             or approval.get("source_sha256") != source_record["sha256"]
             or approval.get("reviewed") is not True
@@ -2805,7 +2804,7 @@ def _pet_inspect_sound(plan: Any) -> dict[str, Any]:
             or approval.get("not_harsh") is not True
             or approval.get("not_repetitive") is not True
             or approval.get("dialogue_compatible") is not True
-            or not pet_sitcom_sound_module._valid_iso_timestamp(
+            or not pet_services.sound.valid_iso_timestamp(
                 approval.get("reviewed_at")
             )
             or approval_record.get("reviewed_at")
@@ -2815,25 +2814,25 @@ def _pet_inspect_sound(plan: Any) -> dict[str, Any]:
         music_source = str(source)
         source_duration = _pet_finite_number(
             source_record.get("duration_seconds"),
-            minimum=pet_sitcom_sound_module.FINAL_DURATION_SECONDS,
+            minimum=pet_services.sound.FINAL_DURATION_SECONDS,
         )
         source_stream_duration = _pet_finite_number(
             source_record.get("stream_duration_seconds"),
-            minimum=pet_sitcom_sound_module.FINAL_DURATION_SECONDS,
+            minimum=pet_services.sound.FINAL_DURATION_SECONDS,
         )
         source_sample_rate = source_record.get("sample_rate")
         source_channels = source_record.get("channels")
         if (
-            source_duration < pet_sitcom_sound_module.FINAL_DURATION_SECONDS
+            source_duration < pet_services.sound.FINAL_DURATION_SECONDS
             or source_stream_duration
-            < pet_sitcom_sound_module.FINAL_DURATION_SECONDS
+            < pet_services.sound.FINAL_DURATION_SECONDS
             or isinstance(source_sample_rate, bool)
             or not isinstance(source_sample_rate, int)
             or source_sample_rate
-            < pet_sitcom_sound_module.MINIMUM_MUSIC_SAMPLE_RATE
+            < pet_services.sound.MINIMUM_MUSIC_SAMPLE_RATE
             or isinstance(source_channels, bool)
             or not isinstance(source_channels, int)
-            or source_channels != pet_sitcom_sound_module.CHANNELS
+            or source_channels != pet_services.sound.CHANNELS
             or source_record.get("codec_type") != "audio"
             or not isinstance(source_record.get("codec_name"), str)
             or not source_record.get("codec_name")
@@ -2844,23 +2843,23 @@ def _pet_inspect_sound(plan: Any) -> dict[str, Any]:
         stems = document.get("stems")
         if (
             not isinstance(stems, Mapping)
-            or set(stems) != set(pet_sitcom_sound_module._STEM_NAMES)
+            or set(stems) != set(pet_services.sound.STEM_NAMES)
         ):
             raise ValueError("Sound stems are incomplete.")
         content_root = _pet_digest(
             document.get("stems_content_root_sha256")
         )
-        expected_durations = pet_sitcom_sound_module._stem_durations()
+        expected_durations = pet_services.sound.stem_durations()
         actual: dict[str, dict[str, Any]] = {}
-        for name in pet_sitcom_sound_module._STEM_NAMES:
+        for name in pet_services.sound.STEM_NAMES:
             record = stems[name]
             if (
                 not isinstance(record, Mapping)
                 or set(record)
-                != set(pet_sitcom_sound_module._STEM_FIELDS)
+                != set(pet_services.sound.STEM_FIELDS)
             ):
                 raise ValueError("Sound stem schema is invalid.")
-            expected_path = pet_sitcom_sound_module._stem_path(
+            expected_path = pet_services.sound.stem_path(
                 plan,
                 content_root,
                 name,
@@ -2887,28 +2886,28 @@ def _pet_inspect_sound(plan: Any) -> dict[str, Any]:
                 or record.get("duration_seconds")
                 != expected_durations[name]
                 or abs(stream_duration - expected_durations[name])
-                > pet_sitcom_sound_module._DURATION_TOLERANCE_SECONDS
+                > pet_services.sound.DURATION_TOLERANCE_SECONDS
                 or record.get("codec_type") != "audio"
                 or record.get("codec_name") != "pcm_s16le"
                 or isinstance(record.get("sample_rate"), bool)
                 or not isinstance(record.get("sample_rate"), int)
                 or record.get("sample_rate")
-                != pet_sitcom_sound_module.SAMPLE_RATE
+                != pet_services.sound.SAMPLE_RATE
                 or isinstance(record.get("channels"), bool)
                 or not isinstance(record.get("channels"), int)
                 or record.get("channels")
-                != pet_sitcom_sound_module.CHANNELS
+                != pet_services.sound.CHANNELS
                 or record.get("channel_layout") != "stereo"
             ):
                 raise ValueError("Sound stem metadata is stale.")
             actual[name] = {**dict(record), "path": str(path)}
         if (
-            pet_sitcom_sound_module._stems_content_root(actual)
+            pet_services.sound.stems_content_root(actual)
             != content_root
         ):
             raise ValueError("Sound content root is stale.")
-        binding = pet_sitcom_sound_module._binding_sha256(
-            pet_sitcom_sound_module._binding_base(
+        binding = pet_services.sound.binding_sha256(
+            pet_services.sound.binding_base(
                 plan=plan,
                 plan_sha256=plan_hash,
                 source=source,
@@ -2951,7 +2950,7 @@ def _pet_inspect_source_evidence(
     selections: Mapping[str, Any],
 ) -> dict[str, Any]:
     root = Path(plan.output_dir)
-    evidence_root = pet_sitcom_review_module._evidence_root(plan)
+    evidence_root = pet_services.review.evidence_root(plan)
     sources = selections.get("sources")
     if (
         selections.get("count") != len(plan.shots)
@@ -2960,20 +2959,20 @@ def _pet_inspect_source_evidence(
     ):
         return {"valid": False, "manifest_sha256": ""}
     try:
-        manifest_path = pet_sitcom_review_module._source_manifest_path(plan)
+        manifest_path = pet_services.review.source_manifest_path(plan)
         manifest = _pet_read_strict_json(
             manifest_path,
-            fields=pet_sitcom_review_module._SOURCE_MANIFEST_FIELDS,
+            fields=pet_services.review.SOURCE_MANIFEST_FIELDS,
         )
         if (
             manifest.get("schema_version")
-            != pet_sitcom_review_module.SOURCE_EVIDENCE_SCHEMA
+            != pet_services.review.SOURCE_EVIDENCE_SCHEMA
             or manifest.get("phase") != "source"
-            or not pet_sitcom_review_module._iso(
+            or not pet_services.review.iso(
                 manifest.get("generated_at")
             )
             or manifest.get("automation_limitations")
-            != pet_sitcom_review_module._AUTOMATION_LIMITATIONS
+            != pet_services.review.AUTOMATION_LIMITATIONS
         ):
             raise ValueError("Source evidence manifest is stale.")
         qc_path = evidence_root / "source_technical_qc.json"
@@ -2985,13 +2984,13 @@ def _pet_inspect_source_evidence(
         )
         _pet_read_strict_json(
             qc_path,
-            fields=pet_sitcom_review_module._QC_TOP_FIELDS,
+            fields=pet_services.review.QC_TOP_FIELDS,
         )
         expected_sources = {
             shot.shot_id: sources[shot.shot_id]
             for shot in plan.shots
         }
-        qc = pet_sitcom_review_module._validate_qc_document(
+        qc = pet_services.review.validate_qc_document(
             plan,
             qc_path,
             phase="source",
@@ -3013,7 +3012,7 @@ def _pet_inspect_source_evidence(
         ):
             raise ValueError("Source shot sheets are incomplete.")
         for shot, item in zip(plan.shots, shot_sheets, strict=True):
-            pet_sitcom_review_module._validate_source_sequence(
+            pet_services.review.validate_source_sequence(
                 plan,
                 item,
                 shot.shot_id,
@@ -3028,20 +3027,20 @@ def _pet_inspect_source_evidence(
         for key, shot_ids, frame_count, layout, folder in (
             (
                 "mouth_sequences",
-                pet_sitcom_review_module._MOUTH_SHOTS,
+                pet_services.review.MOUTH_SHOTS,
                 13,
                 "4x4",
                 "mouth",
             ),
             (
                 "paw_sequences",
-                pet_sitcom_review_module._PAW_SHOTS,
+                pet_services.review.PAW_SHOTS,
                 9,
                 "3x3",
                 "paws",
             ),
         ):
-            pet_sitcom_review_module._validate_sequence_group(
+            pet_services.review.validate_sequence_group(
                 plan,
                 manifest.get(key),
                 shot_ids,
@@ -3055,15 +3054,15 @@ def _pet_inspect_source_evidence(
         props = manifest.get("prop_sequences")
         if (
             not isinstance(props, Mapping)
-            or set(props) != set(pet_sitcom_review_module._PROP_SHOTS)
+            or set(props) != set(pet_services.review.PROP_SHOTS)
         ):
             raise ValueError("Source prop evidence is incomplete.")
-        for label, shot_ids in pet_sitcom_review_module._PROP_SHOTS.items():
+        for label, shot_ids in pet_services.review.PROP_SHOTS.items():
             group = props.get(label)
             if not isinstance(group, Mapping) or set(group) != set(shot_ids):
                 raise ValueError("Source prop evidence is incomplete.")
             for shot_id in shot_ids:
-                pet_sitcom_review_module._validate_source_sequence(
+                pet_services.review.validate_source_sequence(
                     plan,
                     group[shot_id],
                     shot_id,
@@ -3079,7 +3078,7 @@ def _pet_inspect_source_evidence(
                     / shot_id
                     / f"{label}.png",
                 )
-        edges = pet_sitcom_review_module._continuity_edges(plan)
+        edges = pet_services.review.continuity_edges(plan)
         comparisons = manifest.get("continuity_comparisons")
         if (
             not isinstance(comparisons, list)
@@ -3087,7 +3086,7 @@ def _pet_inspect_source_evidence(
         ):
             raise ValueError("Source continuity evidence is incomplete.")
         for edge, item in zip(edges, comparisons, strict=True):
-            pet_sitcom_review_module._validate_continuity_item(
+            pet_services.review.validate_continuity_item(
                 plan,
                 item,
                 edge[0],
@@ -3149,28 +3148,28 @@ def _pet_inspect_incremental_evidence(
     ):
         return False
     try:
-        evidence_root = pet_sitcom_review_module._evidence_root(plan)
+        evidence_root = pet_services.review.evidence_root(plan)
         for shot in plan.shots:
             shot_id = shot.shot_id
             evidence = _pet_read_strict_json(
                 evidence_root / "incremental" / f"{shot_id}.json",
-                fields=pet_sitcom_review_module._SHOT_EVIDENCE_FIELDS,
+                fields=pet_services.review.SHOT_EVIDENCE_FIELDS,
             )
             if (
                 evidence.get("schema_version")
-                != pet_sitcom_review_module.SHOT_EVIDENCE_SCHEMA
+                != pet_services.review.SHOT_EVIDENCE_SCHEMA
                 or evidence.get("shot_id") != shot_id
-                or not pet_sitcom_review_module._iso(
+                or not pet_services.review.iso(
                     evidence.get("generated_at")
                 )
                 or evidence.get("manual_review_path")
                 != str(Path(plan.shot_review_path).resolve())
                 or evidence.get("automation_limitations")
-                != pet_sitcom_review_module._AUTOMATION_LIMITATIONS
+                != pet_services.review.AUTOMATION_LIMITATIONS
             ):
                 raise ValueError("Incremental evidence is stale.")
             source = sources[shot_id]
-            technical = pet_sitcom_review_module._validate_qc_record(
+            technical = pet_services.review.validate_qc_record(
                 plan,
                 evidence.get("source_technical_qc"),
                 phase="source",
@@ -3182,7 +3181,7 @@ def _pet_inspect_incremental_evidence(
                 raise ValueError("Incremental technical QC did not pass.")
             duration = float(technical["duration_seconds"])
             video_duration = float(technical["video_duration_seconds"])
-            pet_sitcom_review_module._validate_source_sequence(
+            pet_services.review.validate_source_sequence(
                 plan,
                 evidence.get("shot_sheet"),
                 shot_id,
@@ -3194,31 +3193,31 @@ def _pet_inspect_incremental_evidence(
                 "3x3",
                 evidence_root / "shot_sheets" / f"{shot_id}.png",
             )
-            pet_sitcom_review_module._validate_optional_incremental_sequence(
+            pet_services.review.validate_optional_incremental_sequence(
                 plan,
                 evidence.get("mouth_sequence"),
                 shot_id=shot_id,
                 source=source,
                 duration=duration,
                 video_duration=video_duration,
-                expected_shots=pet_sitcom_review_module._MOUTH_SHOTS,
+                expected_shots=pet_services.review.MOUTH_SHOTS,
                 frame_count=13,
                 layout="4x4",
                 folder="mouth",
             )
-            pet_sitcom_review_module._validate_optional_incremental_sequence(
+            pet_services.review.validate_optional_incremental_sequence(
                 plan,
                 evidence.get("paw_sequence"),
                 shot_id=shot_id,
                 source=source,
                 duration=duration,
                 video_duration=video_duration,
-                expected_shots=pet_sitcom_review_module._PAW_SHOTS,
+                expected_shots=pet_services.review.PAW_SHOTS,
                 frame_count=9,
                 layout="3x3",
                 folder="paws",
             )
-            pet_sitcom_review_module._validate_incremental_props(
+            pet_services.review.validate_incremental_props(
                 plan,
                 evidence.get("prop_sequences"),
                 shot_id,
@@ -3226,7 +3225,7 @@ def _pet_inspect_incremental_evidence(
                 duration,
                 video_duration,
             )
-            pet_sitcom_review_module._validate_incremental_continuity(
+            pet_services.review.validate_incremental_continuity(
                 plan,
                 evidence.get("continuity_comparison"),
                 shot,
@@ -3254,22 +3253,22 @@ def _pet_inspect_final_evidence(
     if source.get("valid") is not True:
         return {"valid": False}
     root = Path(plan.output_dir)
-    evidence_root = pet_sitcom_review_module._evidence_root(plan)
+    evidence_root = pet_services.review.evidence_root(plan)
     try:
-        manifest_path = pet_sitcom_review_module._final_manifest_path(plan)
+        manifest_path = pet_services.review.final_manifest_path(plan)
         manifest = _pet_read_strict_json(
             manifest_path,
-            fields=pet_sitcom_review_module._FINAL_MANIFEST_FIELDS,
+            fields=pet_services.review.FINAL_MANIFEST_FIELDS,
         )
         if (
             manifest.get("schema_version")
-            != pet_sitcom_review_module.FINAL_EVIDENCE_SCHEMA
+            != pet_services.review.FINAL_EVIDENCE_SCHEMA
             or manifest.get("phase") != "final"
-            or not pet_sitcom_review_module._iso(
+            or not pet_services.review.iso(
                 manifest.get("generated_at")
             )
             or manifest.get("automation_limitations")
-            != pet_sitcom_review_module._AUTOMATION_LIMITATIONS
+            != pet_services.review.AUTOMATION_LIMITATIONS
             or manifest.get("source_manifest_sha256")
             != source["manifest_sha256"]
         ):
@@ -3297,16 +3296,16 @@ def _pet_inspect_final_evidence(
         )
         _pet_read_strict_json(
             qc_path,
-            fields=pet_sitcom_review_module._QC_TOP_FIELDS,
+            fields=pet_services.review.QC_TOP_FIELDS,
         )
-        qc = pet_sitcom_review_module._validate_qc_document(
+        qc = pet_services.review.validate_qc_document(
             plan,
             qc_path,
             phase="final",
             expected=outputs,
         )
         records = {record["name"]: record for record in qc["records"]}
-        pet_sitcom_review_module._validate_final_sequence(
+        pet_services.review.validate_final_sequence(
             plan,
             manifest.get("whole_cut_sheet"),
             "whole_cut",
@@ -3326,7 +3325,7 @@ def _pet_inspect_final_evidence(
             ("clean", Path(plan.clean_output)),
             ("release", Path(plan.release_output)),
         ):
-            pet_sitcom_review_module._validate_final_sequence(
+            pet_services.review.validate_final_sequence(
                 plan,
                 checks[name],
                 f"{name}_start_cut_end",
@@ -3428,7 +3427,7 @@ def _pet_read_only_selection_drives(
         path = _pet_selection_drive_path(plan, shot)
         if path is not None:
             paths[shot.shot_id] = path
-    original = pet_sitcom_generation_module.build_pet_drive_audio
+    original = pet_services.generation.build_pet_drive_audio
 
     def read_only_drive(_plan: Any, shot_id: str, **_kwargs: Any) -> Path:
         expected = paths.get(shot_id)
@@ -3447,17 +3446,17 @@ def _pet_read_only_selection_drives(
             )
         return path
 
-    pet_sitcom_generation_module.build_pet_drive_audio = read_only_drive
+    pet_services.generation.build_pet_drive_audio = read_only_drive
     try:
         yield
     finally:
-        pet_sitcom_generation_module.build_pet_drive_audio = original
+        pet_services.generation.build_pet_drive_audio = original
 
 
 def _pet_require_approved_probe_read_only(plan: Any) -> dict[str, Any]:
     if (
         getattr(require_approved_pet_audio_probe, "__module__", "")
-        != pet_sitcom_audio_probe_module.__name__
+        != pet_services.audio_probe.module_name
     ):
         return require_approved_pet_audio_probe(plan)
     report = _pet_read_json_object(Path(plan.audio_probe_path))
@@ -3472,7 +3471,7 @@ def _pet_require_approved_probe_read_only(plan: Any) -> dict[str, Any]:
     )
     if drive != expected:
         raise ValueError("Probe drive audio path is not canonical.")
-    original = pet_sitcom_audio_probe_module.build_pet_drive_audio
+    original = pet_services.audio_probe.build_pet_drive_audio
 
     def read_only_drive(_plan: Any, shot_id: str, **_kwargs: Any) -> Path:
         path = original(
@@ -3486,11 +3485,11 @@ def _pet_require_approved_probe_read_only(plan: Any) -> dict[str, Any]:
             )
         return path
 
-    pet_sitcom_audio_probe_module.build_pet_drive_audio = read_only_drive
+    pet_services.audio_probe.build_pet_drive_audio = read_only_drive
     try:
         return require_approved_pet_audio_probe(plan)
     finally:
-        pet_sitcom_audio_probe_module.build_pet_drive_audio = original
+        pet_services.audio_probe.build_pet_drive_audio = original
 
 
 def _pet_deny_media_command(*_args: Any, **_kwargs: Any) -> Any:
@@ -3509,7 +3508,7 @@ def _pet_current_selection_and_review_counts(plan: Any) -> tuple[int, int]:
         prefix.append(shot)
         try:
             with _pet_read_only_selection_drives(plan, prefix):
-                pet_sitcom_review_module._selected_source_chain(plan, shot)
+                pet_services.review.selected_source_chain(plan, shot)
         except Exception:
             break
         selected_count += 1

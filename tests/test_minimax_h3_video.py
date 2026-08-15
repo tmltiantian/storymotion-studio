@@ -17,6 +17,8 @@ from factory.gateway_video_batch import (
 from factory.minimax_h3_video import (
     MiniMaxH3Client,
     MiniMaxH3Config,
+    MiniMaxH3ImageInput,
+    MiniMaxH3Result,
     _estimate_cost_yuan,
 )
 from tests.media_fixtures import VALID_VIDEO_MP4
@@ -97,6 +99,80 @@ def test_prepare_submission_builds_official_h3_v2_reference_payload():
         ],
     }
     assert "minimax-secret" not in submission.request_body.decode("utf-8")
+
+
+def test_prepare_submission_preserves_explicit_first_and_last_frame_roles():
+    client = _client(lambda *_args, **_kwargs: None)
+
+    submission = client.prepare_submission(
+        "Connect the supplied keyframes with one physically continuous action.",
+        images=[
+            MiniMaxH3ImageInput("https://assets.example/first.png", "first_frame"),
+            MiniMaxH3ImageInput("https://assets.example/last.png", "last_frame"),
+        ],
+        duration=6,
+        ratio="adaptive",
+        resolution="768P",
+        allow_network=True,
+    )
+
+    image_content = json.loads(submission.request_body)["content"][1:]
+    assert [item["role"] for item in image_content] == ["first_frame", "last_frame"]
+
+
+def test_prepare_submission_accepts_parallel_provider_neutral_image_roles():
+    client = _client(lambda *_args, **_kwargs: None)
+
+    submission = client.prepare_submission(
+        "Connect the supplied keyframes.",
+        images=[
+            "https://assets.example/first.png",
+            "https://assets.example/cat.png",
+        ],
+        image_roles=["first_frame", "reference_image"],
+        duration=6,
+        ratio="adaptive",
+        resolution="768P",
+        allow_network=True,
+    )
+
+    image_content = json.loads(submission.request_body)["content"][1:]
+    assert [item["role"] for item in image_content] == [
+        "first_frame",
+        "reference_image",
+    ]
+
+
+def test_h3_result_reports_unavoidable_native_audio_truthfully(tmp_path):
+    result = MiniMaxH3Result(
+        output_path=str(tmp_path / "clip.mp4"),
+        model="MiniMax-H3",
+        task_id="task",
+        status="completed",
+        poll_count=1,
+        output_size_bytes=10,
+        duration_seconds=4,
+        source_host="cdn.example",
+    )
+
+    assert result.to_report()["native_audio_generated"] is True
+
+
+def test_prepare_submission_rejects_duplicate_keyframe_roles():
+    client = _client(lambda *_args, **_kwargs: None)
+
+    with pytest.raises(GatewayVideoError, match="at most one first_frame"):
+        client.prepare_submission(
+            "A cat walks forward.",
+            images=[
+                MiniMaxH3ImageInput("https://assets.example/one.png", "first_frame"),
+                MiniMaxH3ImageInput("https://assets.example/two.png", "first_frame"),
+            ],
+            duration=4,
+            ratio="adaptive",
+            resolution="768P",
+            allow_network=True,
+        )
 
 
 def test_generate_polls_nested_h3_task_downloads_video_and_reports_usage(tmp_path):

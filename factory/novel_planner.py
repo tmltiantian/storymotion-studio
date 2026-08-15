@@ -237,6 +237,18 @@ def _estimated_shot_duration(dialogue: list[DialogueLine]) -> float:
     )
 
 
+def _visible_character_ids(
+    beat: str,
+    characters: list[Character],
+    dialogue: list[DialogueLine],
+) -> list[str]:
+    visible = [character.id for character in characters if character.name in beat]
+    for line in dialogue:
+        if line.speaker_id != NARRATOR_ID and line.speaker_id not in visible:
+            visible.append(line.speaker_id)
+    return visible or [character.id for character in characters]
+
+
 def plan_episode(
     text: str,
     project_id: str,
@@ -261,6 +273,12 @@ def plan_episode(
     for idx, beat in enumerate(beats, start=1):
         character_names = "、".join(character.name for character in characters)
         dialogue = _dialogue_for_beat(beat, characters, idx)
+        visible_character_ids = _visible_character_ids(beat, characters, dialogue)
+        visible_names = "、".join(
+            character.name
+            for character in characters
+            if character.id in visible_character_ids
+        )
         shots.append(
             Shot(
                 id=f"shot_{idx:03d}",
@@ -268,12 +286,13 @@ def plan_episode(
                 scene_title=f"第 {idx} 镜",
                 action=beat,
                 visual_prompt=(
-                    f"{style}。画面包含 {character_names}。"
+                    f"{style}。画面包含 {visible_names or character_names}。"
                     f"剧情动作：{beat}。竖版9:16，适合短视频漫剧，字幕安全区留白。"
                 ),
                 camera="medium shot, slow push-in" if idx % 2 else "close-up, slight handheld tension",
                 duration_seconds=_estimated_shot_duration(dialogue),
                 audio_mood="悬念推进，轻微环境音，对白清晰",
+                character_ids=visible_character_ids,
                 dialogue=dialogue,
             )
         )

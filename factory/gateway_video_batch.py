@@ -47,6 +47,16 @@ class GatewayVideoJob:
     ratio: str
     resolution: str
     output_path: str
+    image_roles: tuple[str, ...] = ()
+    audio_path: str = ""
+
+    def __post_init__(self) -> None:
+        roles = self.image_roles or ("reference_image",) * len(self.images)
+        if len(roles) != len(self.images):
+            raise GatewayVideoBatchError(
+                "Gateway video image roles must match reference images."
+            )
+        object.__setattr__(self, "image_roles", tuple(roles))
 
     def to_report(self) -> dict[str, Any]:
         return {
@@ -55,10 +65,12 @@ class GatewayVideoJob:
             "prompt": self.prompt,
             "reference_image_count": len(self.images),
             "reference_images": [_reference_label(image) for image in self.images],
+            "reference_image_roles": list(self.image_roles),
             "duration": self.duration,
             "ratio": self.ratio,
             "resolution": self.resolution,
             "output_path": self.output_path,
+            "reference_audio_present": bool(self.audio_path),
         }
 
 
@@ -137,6 +149,10 @@ def _validate_report_destination(
             if parsed.scheme.lower() in {"http", "https"}:
                 continue
             conflicts.append(("reference image", _resolved_path(image)))
+        if job.audio_path:
+            parsed_audio = urlsplit(job.audio_path)
+            if parsed_audio.scheme.lower() not in {"http", "https", "data"}:
+                conflicts.append(("reference audio", _resolved_path(job.audio_path)))
 
     for label, conflict in conflicts:
         if resolved_destination == conflict:
@@ -414,13 +430,29 @@ def build_gateway_video_jobs(
                 f"Missing production character references for {shot_id}: "
                 f"{', '.join(missing_references)}"
             )
-        images = tuple(
+        character_images = tuple(
             reference_by_id[character_id]
             for character_id in normalized_character_ids
         )
         expected_assets = shot.get("expected_assets")
         expected_assets = expected_assets if isinstance(expected_assets, dict) else {}
+        keyframes: list[tuple[str, str]] = []
+        for field, role in (("first_frame", "first_frame"), ("last_frame", "last_frame")):
+            value = str(expected_assets.get(field) or "").strip()
+            if value and Path(value).is_file():
+                if not is_supported_image_file(value):
+                    raise GatewayVideoBatchError(
+                        f"Invalid {role} image for {shot_id}: {value}"
+                    )
+                keyframes.append((value, role))
+        images = tuple(value for value, _role in keyframes) + character_images
+        image_roles = tuple(role for _value, role in keyframes) + (
+            "reference_image",
+        ) * len(character_images)
         output_path = str(expected_assets.get("video_clip") or "").strip()
+        audio_path = str(expected_assets.get("voice_audio") or "").strip()
+        if audio_path and not audio_path.lower().startswith(("http://", "https://", "data:")):
+            audio_path = audio_path if Path(audio_path).is_file() else ""
         if not output_path:
             raise GatewayVideoBatchError(
                 f"OpenMontage video output path is missing for {shot_id}."
@@ -446,6 +478,8 @@ def build_gateway_video_jobs(
                 ratio=ratio,
                 resolution=resolution.strip(),
                 output_path=output_path,
+                image_roles=image_roles,
+                audio_path=audio_path,
             )
         )
     if limit:
@@ -757,6 +791,7 @@ def _job_signature(
         "shot_id": job.shot_id,
         "prompt": job.prompt,
         "references": references,
+        "reference_roles": list(job.image_roles),
         "duration": job.duration,
         "ratio": job.ratio,
         "resolution": job.resolution,
@@ -893,6 +928,10 @@ def _execute_gateway_video_jobs(
         state_path = _clip_state_path(output)
         lock_descriptor: int | None = None
         try:
+            job_audio: str | Path | None = job.audio_path or audio
+            job_reference_audio = (
+                _reference_audio_evidence(job_audio) if job_audio is not None else {}
+            )
             endpoint_fingerprint = gateway_endpoint_fingerprint(
                 client.config.base_url
             )
@@ -901,7 +940,7 @@ def _execute_gateway_video_jobs(
                 model=client.config.model,
                 generate_audio=generate_audio,
                 endpoint_fingerprint=endpoint_fingerprint,
-                reference_audio=reference_audio,
+                reference_audio=job_reference_audio or reference_audio,
             )
             _prepare_clip_lock_parent(output)
             lock_descriptor = _acquire_clip_lock(output)
@@ -1011,7 +1050,8 @@ def _execute_gateway_video_jobs(
                 submission = client.prepare_submission(
                     job.prompt,
                     images=list(job.images),
-                    audio=audio,
+                    image_roles=list(job.image_roles),
+                    audio=job_audio,
                     duration=job.duration,
                     ratio=job.ratio,
                     resolution=job.resolution,
@@ -1029,7 +1069,7 @@ def _execute_gateway_video_jobs(
                             model=client.config.model,
                             status="submitting",
                         ),
-                        reference_audio or {},
+                        job_reference_audio or reference_audio or {},
                     ),
                 )
                 report["executed"] = True
@@ -1054,7 +1094,7 @@ def _execute_gateway_video_jobs(
                                 "http_status_code": exc.status_code,
                                 "task_id": "",
                             },
-                            reference_audio or {},
+                            job_reference_audio or reference_audio or {},
                         ),
                     )
                     raise
@@ -1083,7 +1123,7 @@ def _execute_gateway_video_jobs(
                             "task_id": task.task_id,
                             "task_status": task.status,
                         },
-                        reference_audio or {},
+                        job_reference_audio or reference_audio or {},
                     ),
                 )
                 result = client.complete_task(
@@ -1120,7 +1160,7 @@ def _execute_gateway_video_jobs(
                         "output_size_bytes": output.stat().st_size,
                         "task_id": result.task_id,
                     },
-                    reference_audio or {},
+                    job_reference_audio or reference_audio or {},
                 ),
             )
             report["results"].append(result_report)
@@ -1247,7 +1287,14 @@ def render_gateway_video_single(
             f"Gateway video output must use an .mp4 path: {normalized_output}"
         )
 
-    image_values = tuple(str(image) for image in images or ())
+    image_values_list: list[str] = []
+    image_roles: list[str] = []
+    for image in images or ():
+        source = getattr(image, "source", image)
+        role = getattr(image, "role", "reference_image")
+        image_values_list.append(str(source))
+        image_roles.append(str(role))
+    image_values = tuple(image_values_list)
     job = GatewayVideoJob(
         shot_id="single",
         index=1,
@@ -1257,6 +1304,7 @@ def render_gateway_video_single(
         ratio=normalized_ratio,
         resolution=normalized_resolution,
         output_path=normalized_output,
+        image_roles=tuple(image_roles),
     )
     destination = Path(report_path)
     _validate_report_destination(destination, [job])

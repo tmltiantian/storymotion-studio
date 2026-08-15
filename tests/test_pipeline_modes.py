@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from factory.pipeline_contracts import PIPELINE_STAGES, ProjectMode, StageName
-from factory.pipeline_modes import get_mode_adapter
+from factory.pipeline_modes import ModeStep, get_mode_adapter
+
+
+def test_mode_step_requires_an_explicit_implementation_revision() -> None:
+    parameter = inspect.signature(ModeStep).parameters["version"]
+
+    assert parameter.default is inspect.Parameter.empty
+    assert all(
+        step.version >= 2
+        for mode in ProjectMode
+        for step in get_mode_adapter(mode).stage_steps.values()
+    )
 
 
 @pytest.mark.parametrize("mode", tuple(ProjectMode))
