@@ -89,6 +89,8 @@ def test_factory_create_writes_original_project_without_live_calls(
         "两只猫调查窗帘后的声音",
         "--duration",
         "60",
+        "--approval-preset",
+        "quick",
     )
 
     assert code == 0
@@ -99,11 +101,10 @@ def test_factory_create_writes_original_project_without_live_calls(
     source = tmp_path / "runs" / "cat_episode" / "source" / "idea.txt"
     assert source.read_text(encoding="utf-8") == "两只猫调查窗帘后的声音\n"
     spec = json.loads(
-        (tmp_path / "runs" / "cat_episode" / "project.json").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / "runs" / "cat_episode" / "project.json").read_text(encoding="utf-8")
     )
     assert spec["input"]["path"] == str(source)
+    assert spec["policies"]["approval_preset"] == "quick"
 
 
 def test_factory_create_requires_mode_appropriate_input(
@@ -137,12 +138,14 @@ def test_factory_run_passes_through_and_live_only_when_explicit(
     calls = []
     monkeypatch.setattr(
         "factory.pipeline_cli.run_pipeline",
-        lambda project_dir, **kwargs: calls.append((project_dir, kwargs))
-        or PipelineRunResult(
-            True,
-            None,
-            (StageName.CONCEPT,),
-            next_stage=StageName.ASSETS,
+        lambda project_dir, **kwargs: (
+            calls.append((project_dir, kwargs))
+            or PipelineRunResult(
+                True,
+                None,
+                (StageName.CONCEPT,),
+                next_stage=StageName.ASSETS,
+            )
         ),
     )
 
@@ -230,10 +233,10 @@ def test_factory_migrate_uses_read_only_legacy_source(
     calls = []
     monkeypatch.setattr(
         "factory.pipeline_cli.migrate_existing_project",
-        lambda legacy_root, project_dir, **kwargs: calls.append(
-            (legacy_root, project_dir, kwargs)
-        )
-        or {"success": True, "project_id": kwargs["project_id"]},
+        lambda legacy_root, project_dir, **kwargs: (
+            calls.append((legacy_root, project_dir, kwargs))
+            or {"success": True, "project_id": kwargs["project_id"]}
+        ),
     )
 
     code, payload = _run(
@@ -268,12 +271,10 @@ def test_factory_approve_passes_note_and_evidence_to_store(
     calls = []
     monkeypatch.setattr(
         "factory.pipeline_cli.approve_stage",
-        lambda project_dir, stage, **kwargs: calls.append(
-            (project_dir, stage, kwargs)
-        )
-        or type(
-            "Package", (), {"next_stage": StageName.DELIVER}
-        )(),
+        lambda project_dir, stage, **kwargs: (
+            calls.append((project_dir, stage, kwargs))
+            or type("Package", (), {"next_stage": StageName.DELIVER})()
+        ),
     )
 
     code, payload = _run(
@@ -286,6 +287,8 @@ def test_factory_approve_passes_note_and_evidence_to_store(
         "cat_episode",
         "--stage",
         "eval",
+        "--revision",
+        "4",
         "--note",
         "逐镜检查通过",
         "--evidence",
@@ -294,6 +297,45 @@ def test_factory_approve_passes_note_and_evidence_to_store(
 
     assert code == 0
     assert calls[0][1] is StageName.EVAL
+    assert calls[0][2]["revision"] == 4
     assert calls[0][2]["note"] == "逐镜检查通过"
     assert calls[0][2]["evidence"] == (evidence,)
     assert payload["next_stage"] == "deliver"
+
+
+def test_factory_request_changes_passes_revision_and_reason_to_store(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    config = _config(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        "factory.pipeline_cli.request_stage_changes",
+        lambda project_dir, stage, **kwargs: (
+            calls.append((project_dir, stage, kwargs))
+            or type("Package", (), {"next_stage": StageName.SCRIPT})()
+        ),
+    )
+
+    code, payload = _run(
+        monkeypatch,
+        capsys,
+        "--config",
+        str(config),
+        "factory",
+        "request-changes",
+        "cat_episode",
+        "--stage",
+        "script",
+        "--revision",
+        "2",
+        "--reason",
+        "shorten the second scene",
+    )
+
+    assert code == 0
+    assert calls[0][1] is StageName.SCRIPT
+    assert calls[0][2] == {
+        "revision": 2,
+        "reason": "shorten the second scene",
+    }
+    assert payload["review_state"] == "changes_requested"

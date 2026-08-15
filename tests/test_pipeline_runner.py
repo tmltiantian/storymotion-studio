@@ -1,12 +1,30 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
+
 from factory.pipeline_context import StageContext, StageExecution
-from factory.pipeline_contracts import ProjectMode, ProjectSpec, StageName, StageState
+from factory.pipeline_contracts import (
+    PIPELINE_STAGES,
+    ProjectMode,
+    ProjectSpec,
+    ReviewPolicy,
+    ReviewState,
+    StageName,
+    StageState,
+)
 from factory.pipeline_runner import pipeline_status, resume_pipeline, run_pipeline
 from factory.pipeline_modes import ModeAdapter, ModeStep, get_mode_adapter
-from factory.pipeline_store import create_project, load_production_package, update_stage
+from factory.pipeline_review import ApprovalPreset, ReviewConfig
+from factory.pipeline_store import (
+    approve_review_bundle,
+    create_project,
+    load_production_package,
+    request_stage_changes,
+    update_stage,
+)
 
 
 def _project(tmp_path: Path, mode: ProjectMode = ProjectMode.ORIGINAL) -> Path:
@@ -41,6 +59,222 @@ def _passing_executor(calls: list[StageName]):
         )
 
     return execute
+
+
+def _review_config(**overrides: ReviewPolicy) -> ReviewConfig:
+    policies = {stage: ReviewPolicy.AUTOMATIC for stage in PIPELINE_STAGES}
+    policies.update({StageName(stage): policy for stage, policy in overrides.items()})
+    return ReviewConfig(ApprovalPreset.QUICK, policies)
+
+
+def test_manual_policy_runs_stage_then_waits_for_review(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    calls: list[StageName] = []
+
+    result = run_pipeline(
+        root,
+        through=StageName.SCRIPT,
+        executor=_passing_executor(calls),
+        review_config=_review_config(script=ReviewPolicy.MANUAL),
+    )
+    record = load_production_package(root).stages[1]
+
+    assert calls == [StageName.CONCEPT, StageName.SCRIPT]
+    assert record.state is StageState.PASSED
+    assert record.review_policy is ReviewPolicy.MANUAL
+    assert record.review_state is ReviewState.AWAITING_REVIEW
+    assert record.review_blocks_progress is True
+    assert record.revision == 1
+    assert result.next_stage is StageName.SCRIPT
+
+
+def test_grouped_policy_runs_members_and_stops_at_group_terminal(
+    tmp_path: Path,
+) -> None:
+    root = _project(tmp_path)
+    calls: list[StageName] = []
+    grouped = _review_config(
+        script=ReviewPolicy.GROUPED,
+        storyboard=ReviewPolicy.GROUPED,
+        assets=ReviewPolicy.GROUPED,
+        audio=ReviewPolicy.GROUPED,
+    )
+
+    result = run_pipeline(
+        root,
+        through=StageName.AUDIO,
+        executor=_passing_executor(calls),
+        review_config=grouped,
+    )
+    package = load_production_package(root)
+    records = package.stages[1:5]
+
+    assert calls == list(PIPELINE_STAGES[:5])
+    assert all(record.state is StageState.PASSED for record in records)
+    assert all(record.review_state is ReviewState.AWAITING_REVIEW for record in records)
+    assert [record.review_blocks_progress for record in records] == [
+        False,
+        False,
+        False,
+        True,
+    ]
+    assert result.next_stage is StageName.AUDIO
+
+
+def test_grouped_bundle_approval_updates_every_bound_revision(
+    tmp_path: Path,
+) -> None:
+    root = _project(tmp_path)
+    grouped_stages = (
+        StageName.SCRIPT,
+        StageName.STORYBOARD,
+        StageName.ASSETS,
+        StageName.AUDIO,
+    )
+    grouped = _review_config(
+        **{stage.value: ReviewPolicy.GROUPED for stage in grouped_stages}
+    )
+    run_pipeline(
+        root,
+        through=StageName.AUDIO,
+        executor=_passing_executor([]),
+        review_config=grouped,
+    )
+    evidence = tmp_path / "story-review.json"
+    evidence.write_text('{"approved":true}', encoding="utf-8")
+
+    package = approve_review_bundle(
+        root,
+        grouped_stages,
+        note="story package approved",
+        evidence=(evidence,),
+    )
+
+    records = package.stages[1:5]
+    assert all(record.review_state is ReviewState.APPROVED for record in records)
+    assert all(record.review_blocks_progress is False for record in records)
+    assert all(record.revision == 1 for record in records)
+
+
+def test_grouped_bundle_rejects_partial_span_before_updating_reviews(
+    tmp_path: Path,
+) -> None:
+    root = _project(tmp_path)
+    grouped_stages = (
+        StageName.SCRIPT,
+        StageName.STORYBOARD,
+        StageName.ASSETS,
+        StageName.AUDIO,
+    )
+    run_pipeline(
+        root,
+        through=StageName.AUDIO,
+        executor=_passing_executor([]),
+        review_config=_review_config(
+            **{stage.value: ReviewPolicy.GROUPED for stage in grouped_stages}
+        ),
+    )
+    evidence = tmp_path / "story-review.json"
+    evidence.write_text('{"approved":true}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="complete contiguous"):
+        approve_review_bundle(
+            root,
+            (StageName.AUDIO,),
+            note="partial approval",
+            evidence=(evidence,),
+        )
+
+    records = load_production_package(root).stages[1:5]
+    assert all(record.review_state is ReviewState.AWAITING_REVIEW for record in records)
+
+
+def test_automatic_policy_continues_without_user_action(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+
+    result = run_pipeline(
+        root,
+        through=StageName.CONCEPT,
+        executor=_passing_executor([]),
+        review_config=_review_config(),
+    )
+    record = load_production_package(root).stages[0]
+
+    assert result.success is True
+    assert record.state is StageState.PASSED
+    assert record.review_state is ReviewState.AUTO_APPROVED
+    assert record.review_blocks_progress is False
+    assert record.revision == 1
+
+
+def test_not_applicable_policy_skips_executor_and_continues(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    calls: list[StageName] = []
+
+    result = run_pipeline(
+        root,
+        through=StageName.CONCEPT,
+        executor=_passing_executor(calls),
+        review_config=_review_config(concept=ReviewPolicy.NOT_APPLICABLE),
+    )
+    record = load_production_package(root).stages[0]
+
+    assert result.success is True
+    assert calls == []
+    assert record.state is StageState.PASSED
+    assert record.review_state is ReviewState.SKIPPED
+    assert record.review_policy is ReviewPolicy.NOT_APPLICABLE
+
+
+def test_status_exposes_review_progress_fields(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    run_pipeline(
+        root,
+        through=StageName.SCRIPT,
+        executor=_passing_executor([]),
+        review_config=_review_config(script=ReviewPolicy.MANUAL),
+    )
+
+    status = pipeline_status(root)
+
+    assert status["next_stage"] == "script"
+    assert status["review_state"] == "awaiting_review"
+    assert status["review_policy"] == "manual"
+    assert status["current_revision"] == 1
+    assert status["required_action"] == "approve_review_evidence"
+    assert status["stage_details"]["script"]["review_state"] == "awaiting_review"
+    assert status["stage_details"]["script"]["current_revision"] == 1
+
+
+def test_request_changes_records_current_revision_without_blocking_execution(
+    tmp_path: Path,
+) -> None:
+    root = _project(tmp_path)
+    run_pipeline(
+        root,
+        through=StageName.SCRIPT,
+        executor=_passing_executor([]),
+        review_config=_review_config(script=ReviewPolicy.MANUAL),
+    )
+
+    package = request_stage_changes(
+        root,
+        StageName.SCRIPT,
+        revision=1,
+        reason="shorten the second scene",
+    )
+    review = json.loads(
+        (root / "reviews" / "script.review.json").read_text(encoding="utf-8")
+    )
+
+    record = package.stages[1]
+    assert record.state is StageState.PASSED
+    assert record.review_state is ReviewState.CHANGES_REQUESTED
+    assert record.review_blocks_progress is True
+    assert review["revision"] == 1
+    assert review["state"] == "changes_requested"
+    assert review["note"] == "shorten the second scene"
+    assert pipeline_status(root)["required_action"] == "address_review_changes"
 
 
 def test_run_executes_exactly_one_executor_per_stage_through_boundary(
@@ -210,7 +444,9 @@ def test_failed_executor_stops_without_touching_later_stage(tmp_path: Path) -> N
 
     def execute(context: StageContext) -> StageExecution:
         if context.stage is StageName.SCRIPT:
-            return StageExecution.failed("bad script", executor=context.step.executor_id)
+            return StageExecution.failed(
+                "bad script", executor=context.step.executor_id
+            )
         return _passing_executor([])(context)
 
     result = run_pipeline(root, executor=execute)
