@@ -25,7 +25,7 @@ from factory.pipeline_impact import (
 )
 from factory.pipeline_migration import migrate_existing_project
 from factory.pipeline_modes import get_mode_adapter
-from factory import pipeline_store
+from factory import pipeline_impact, pipeline_store
 from factory.pipeline_store import (
     ApprovalInProgressError,
     create_project,
@@ -360,6 +360,77 @@ def test_apply_rejects_added_noncanonical_plan_field(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="content has changed"):
         apply_impact_plan(root, plan.plan_id)
+
+
+def test_apply_rejects_integer_for_canonical_boolean(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    plan = preview_impact(
+        root,
+        ChangeRequest(stage=StageName.EDIT, subtitle_style=True),
+    )
+    path = root / "impact_plans" / f"{plan.plan_id}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["request"]["subtitle_style"] is True
+    payload["request"]["subtitle_style"] = 1
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="canonical|boolean|content has changed"):
+        apply_impact_plan(root, plan.plan_id)
+
+
+def test_preview_fails_closed_when_plan_directory_is_swapped_before_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _project(tmp_path)
+    outside = tmp_path / "outside-publish"
+    outside.mkdir()
+    detached = tmp_path / "detached-plans"
+    request = ChangeRequest(stage=StageName.STORYBOARD, shot_ids=("shot_03",))
+    original_persist = pipeline_impact._persist_immutable_plan
+
+    def swap_then_persist(*args, **kwargs):
+        plans = root / "impact_plans"
+        plans.rename(detached)
+        plans.symlink_to(outside, target_is_directory=True)
+        return original_persist(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_impact, "_persist_immutable_plan", swap_then_persist)
+
+    with pytest.raises(ValueError, match="directory|identity|symlink"):
+        preview_impact(root, request)
+
+    assert not tuple(outside.iterdir())
+
+
+def test_apply_fails_closed_when_plan_directory_is_swapped_after_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _project(tmp_path)
+    plan = preview_impact(
+        root,
+        ChangeRequest(stage=StageName.STORYBOARD, shot_ids=("shot_03",)),
+    )
+    plans = root / "impact_plans"
+    detached = tmp_path / "detached-load-plans"
+    outside = tmp_path / "outside-load"
+    outside.mkdir()
+    shutil.copy2(plans / f"{plan.plan_id}.json", outside / f"{plan.plan_id}.json")
+    original_safe_dir = pipeline_impact._safe_plans_dir
+
+    def check_then_swap(project_root, *, create):
+        checked = original_safe_dir(project_root, create=create)
+        if not create:
+            plans.rename(detached)
+            plans.symlink_to(outside, target_is_directory=True)
+        return checked
+
+    monkeypatch.setattr(pipeline_impact, "_safe_plans_dir", check_then_swap)
+
+    with pytest.raises(ValueError, match="directory|identity|symlink"):
+        pipeline_impact._load_plan(root, plan.plan_id)
 
 
 def test_preview_and_apply_reject_symlinked_project_and_plan_paths(
