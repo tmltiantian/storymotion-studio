@@ -9,6 +9,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -195,6 +196,77 @@ describe("production workbench shell", () => {
     expect(trigger).toHaveFocus();
   });
 
+  it("completes project creation under React StrictMode", async () => {
+    let resolveCreate: (job: JobAccepted) => void = () => undefined;
+    const pending = new Promise<JobAccepted>((resolve) => {
+      resolveCreate = resolve;
+    });
+    const api = projectsApi();
+    api.createProject.mockImplementation(() => pending);
+    window.history.replaceState({}, "", "/projects");
+    const user = userEvent.setup();
+    render(
+      <StrictMode>
+        <App api={api} />
+      </StrictMode>,
+    );
+    await screen.findByText(project.title);
+    const trigger = screen.getByRole("button", { name: "新建项目" });
+
+    await user.click(trigger);
+    expect(screen.getByRole("textbox", { name: "项目 ID" })).toHaveFocus();
+    await user.type(screen.getByRole("textbox", { name: "项目 ID" }), "episode_05");
+    await user.type(screen.getByRole("textbox", { name: "项目标题" }), "雨夜归档");
+    await user.type(screen.getByRole("textbox", { name: "创作构想" }), "一卷在雨夜归档的旧胶片。" );
+    await user.click(screen.getByRole("button", { name: "创建项目" }));
+
+    expect(api.createProject).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "正在创建" })).toBeDisabled();
+    await act(async () =>
+      resolveCreate({ job_id: "e".repeat(32), status: "queued" }),
+    );
+
+    expect(await screen.findByText("项目已进入创建队列")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "正在创建" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "完成" }));
+    expect(trigger).toHaveFocus();
+  });
+
+  it("recovers from a create error under React StrictMode", async () => {
+    let rejectCreate: (error: unknown) => void = () => undefined;
+    const pending = new Promise<JobAccepted>((_resolve, reject) => {
+      rejectCreate = reject;
+    });
+    const api = projectsApi();
+    api.createProject.mockImplementation(() => pending);
+    window.history.replaceState({}, "", "/projects");
+    const user = userEvent.setup();
+    render(
+      <StrictMode>
+        <App api={api} />
+      </StrictMode>,
+    );
+    await screen.findByText(project.title);
+    const trigger = screen.getByRole("button", { name: "新建项目" });
+
+    await user.click(trigger);
+    expect(screen.getByRole("textbox", { name: "项目 ID" })).toHaveFocus();
+    await user.type(screen.getByRole("textbox", { name: "项目 ID" }), "episode_06");
+    await user.type(screen.getByRole("textbox", { name: "项目标题" }), "失焦来电");
+    await user.type(screen.getByRole("textbox", { name: "创作构想" }), "一次无人接听的深夜来电。" );
+    await user.click(screen.getByRole("button", { name: "创建项目" }));
+
+    expect(api.createProject).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "正在创建" })).toBeDisabled();
+    await act(async () => rejectCreate(new Error("offline")));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法创建项目");
+    expect(screen.getByRole("button", { name: "创建项目" })).toBeEnabled();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "新建项目" })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
   it("traps focus, makes the shell inert, and restores focus after Escape", async () => {
     const api = projectsApi();
     window.history.replaceState({}, "", "/projects");
@@ -242,7 +314,11 @@ describe("production workbench shell", () => {
     });
     window.history.replaceState({}, "", "/projects");
     const user = userEvent.setup();
-    const view = render(<App api={api} />);
+    const view = render(
+      <StrictMode>
+        <App api={api} />
+      </StrictMode>,
+    );
     await screen.findByText(project.title);
     await user.click(screen.getByRole("button", { name: "新建项目" }));
     await user.type(screen.getByRole("textbox", { name: "项目 ID" }), "episode_04");
@@ -257,6 +333,7 @@ describe("production workbench shell", () => {
     expect(api.createProject).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("dialog", { name: "新建项目" })).toBeVisible();
     expect(pendingButton).toBeDisabled();
+    expect(submissionSignal?.aborted).toBe(false);
 
     view.unmount();
     expect(submissionSignal?.aborted).toBe(true);

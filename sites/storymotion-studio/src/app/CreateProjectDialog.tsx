@@ -71,6 +71,7 @@ export function CreateProjectDialog({
   const submittingRef = useRef(false);
 
   useLayoutEffect(() => {
+    mountedRef.current = true;
     const shell = document.querySelector<HTMLElement>(".app-shell");
     const hadInert = shell?.hasAttribute("inert") ?? false;
     const previousAriaHidden = shell?.getAttribute("aria-hidden") ?? null;
