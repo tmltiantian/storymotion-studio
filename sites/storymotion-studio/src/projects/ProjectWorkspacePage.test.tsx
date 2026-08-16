@@ -173,7 +173,10 @@ function workspaceApi(
   };
 }
 
-function videoWorkspaceFixture(job: JobDetail | null = null): VideoWorkspace {
+function videoWorkspaceFixture(
+  job: JobDetail | null = null,
+  recovery: VideoWorkspace["failed_job_recovery"] = null,
+): VideoWorkspace {
   return {
     schema_version: "motion-comic-factory.video-workspace.v1",
     project_id: "episode_01",
@@ -181,7 +184,9 @@ function videoWorkspaceFixture(job: JobDetail | null = null): VideoWorkspace {
       { shot_id: "shot_03", duration_seconds: 5 },
       { shot_id: "shot_04", duration_seconds: 4 },
     ],
+    selected_shot_ids: ["shot_03", "shot_04"],
     job,
+    failed_job_recovery: recovery,
   };
 }
 
@@ -404,7 +409,10 @@ describe("project review workspace", () => {
     const api = workspaceApi(selected, projectFixture(selected));
     const failed = videoJob("failed");
     const running = { ...videoJob("running"), resume_count: 1 };
-    vi.mocked(api.getVideoWorkspace).mockResolvedValue(videoWorkspaceFixture(failed));
+    vi.mocked(api.getVideoWorkspace).mockResolvedValue(videoWorkspaceFixture(failed, {
+      mode: "poll_only",
+      shot_ids: ["shot_03", "shot_04"],
+    }));
     vi.mocked(api.getJob).mockResolvedValueOnce(failed).mockResolvedValue(running);
     vi.mocked(api.resumeJob).mockResolvedValue({ job_id: failed.job_id, status: "queued" });
     const user = userEvent.setup();
@@ -416,6 +424,31 @@ describe("project review workspace", () => {
     expect(await screen.findByText("生成中")).toBeVisible();
     expect(api.generateVideo).not.toHaveBeenCalled();
     expect(api.testVideo).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["new_submission_required", "此作业需重新确认后提交"],
+    ["historical", "历史作业，与当前修订不一致"],
+  ] as const)("exposes fresh preflight for a %s failed job", async (mode, historyLabel) => {
+    const selected = videoStageFixture();
+    const api = workspaceApi(selected, projectFixture(selected));
+    const failed = videoJob("failed");
+    vi.mocked(api.getVideoWorkspace).mockResolvedValue(videoWorkspaceFixture(failed, {
+      mode,
+      shot_ids: mode === "historical" ? [] : ["shot_03"],
+    }));
+    vi.mocked(api.getJob).mockResolvedValue(failed);
+    const user = userEvent.setup();
+    renderWorkspace(api, "/projects/episode_01/stages/video");
+
+    expect(await screen.findByText(historyLabel)).toBeVisible();
+    expect(await screen.findByText("视频生成预检")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "恢复生成" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
+    await user.click(await screen.findByRole("button", { name: "批量生成所选镜头" }));
+
+    expect(api.generateVideo).toHaveBeenCalledTimes(1);
+    expect(api.resumeJob).not.toHaveBeenCalled();
   });
 
   it("prefills a timecoded video issue and claims success only after persistence", async () => {
@@ -431,15 +464,19 @@ describe("project review workspace", () => {
     const video = await screen.findByTestId("stage-video") as HTMLVideoElement;
     video.currentTime = 2.375;
 
-    await user.click(screen.getByRole("button", { name: "在当前时间标记问题" }));
+    await user.click(screen.getByRole("button", { name: "退回修改" }));
     const description = screen.getByRole("textbox", { name: "问题说明" });
+    await user.type(description, "角色动作断裂。");
+
+    await user.click(screen.getByRole("button", { name: "在当前时间标记问题" }));
     expect(description).toHaveValue(
-      "镜头 shot_03\n候选成果 art_candidate_03\n时间码 2.375 秒\n",
+      "角色动作断裂。\n\n--- 视频时间标记 ---\n镜头 shot_03\n候选成果 art_candidate_03\n时间码 2.375 秒\n--- 标记结束 ---",
     );
+    await user.click(screen.getByRole("button", { name: "在当前时间标记问题" }));
+    expect((description as HTMLTextAreaElement).value.match(/--- 视频时间标记 ---/g)).toHaveLength(1);
     expect(api.requestStageChanges).not.toHaveBeenCalled();
     expect(screen.queryByText("问题已提交到当前修订。")).not.toBeInTheDocument();
 
-    await user.type(description, "角色动作断裂。");
     await user.click(screen.getByRole("button", { name: "退回整阶段" }));
 
     expect(api.requestStageChanges).toHaveBeenCalledWith(
@@ -447,7 +484,7 @@ describe("project review workspace", () => {
       "video",
       {
         revision: 4,
-        reason: "[整体成果需调整] 镜头 shot_03\n候选成果 art_candidate_03\n时间码 2.375 秒\n角色动作断裂。",
+        reason: "[整体成果需调整] 角色动作断裂。\n\n--- 视频时间标记 ---\n镜头 shot_03\n候选成果 art_candidate_03\n时间码 2.375 秒\n--- 标记结束 ---",
       },
       expect.any(AbortSignal),
     );

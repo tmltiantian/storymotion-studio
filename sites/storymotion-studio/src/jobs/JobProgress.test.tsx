@@ -133,6 +133,74 @@ describe("JobProgress recovery", () => {
     expect(client.getJob).toHaveBeenCalledTimes(2);
   });
 
+  it("preserves the last job when an event refresh fails and recovers on fallback", async () => {
+    vi.useFakeTimers();
+    const client = api();
+    const recovered = job("running", {
+      provider_tasks: {
+        ...job().provider_tasks,
+        shot_3: { status: "completed" },
+      },
+      last_event_sequence: 4,
+    });
+    vi.mocked(client.getJob)
+      .mockResolvedValueOnce(job())
+      .mockRejectedValueOnce(new Error("temporary read failure"))
+      .mockResolvedValue(recovered);
+    const connect = vi.fn(async function* (_url: string, options: StreamSseOptions) {
+      yield event(4);
+      yield* idleStream("", options);
+    });
+
+    render(<JobProgress api={client} jobId={job().job_id} connect={connect} />);
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+
+    expect(screen.getByText("已完成 2 / 8 镜")).toBeVisible();
+    expect(screen.queryByText("无法读取作业状态")).not.toBeInTheDocument();
+
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+
+    expect(client.getJob).toHaveBeenCalledTimes(3);
+    expect(screen.getByText("已完成 3 / 8 镜")).toBeVisible();
+  });
+
+  it("re-arms silence fallback after a transient fallback GET failure", async () => {
+    vi.useFakeTimers();
+    const client = api();
+    const recovered = job("running", { result: { total_shots: 9 } });
+    vi.mocked(client.getJob)
+      .mockResolvedValueOnce(job())
+      .mockRejectedValueOnce(new Error("temporary read failure"))
+      .mockResolvedValue(recovered);
+
+    render(<JobProgress api={client} jobId={job().job_id} connect={idleStream} />);
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+
+    expect(client.getJob).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("已完成 2 / 8 镜")).toBeVisible();
+    expect(screen.queryByText("无法读取作业状态")).not.toBeInTheDocument();
+
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+
+    expect(client.getJob).toHaveBeenCalledTimes(3);
+    expect(screen.getByText("已完成 2 / 9 镜")).toBeVisible();
+  });
+
+  it("offers retry when the initial persisted job read fails", async () => {
+    const user = userEvent.setup();
+    const client = api();
+    vi.mocked(client.getJob)
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue(job());
+
+    render(<JobProgress api={client} jobId={job().job_id} connect={idleStream} />);
+
+    await user.click(await screen.findByRole("button", { name: "重新读取作业" }));
+
+    expect(await screen.findByText("已完成 2 / 8 镜")).toBeVisible();
+    expect(client.getJob).toHaveBeenCalledTimes(2);
+  });
+
   it("does not leave duplicate streams or timers under StrictMode and aborts on unmount", async () => {
     let active = 0;
     let maximum = 0;
@@ -202,5 +270,22 @@ describe("JobProgress recovery", () => {
     rerender(<JobProgress api={client} jobId={`${failed.job_id.slice(0, -1)}2`} connect={idleStream} />);
     await user.click(await screen.findByRole("button", { name: "恢复生成" }));
     expect(await screen.findByText("其他进程正在恢复此作业")).toBeVisible();
+  });
+
+  it("hides resume when the workspace requires a newly confirmed submission", async () => {
+    const failed = job("failed");
+    const client = api(failed);
+
+    render(
+      <JobProgress
+        api={client}
+        jobId={failed.job_id}
+        connect={idleStream}
+        allowResume={false}
+      />,
+    );
+
+    expect(await screen.findByText("生成失败")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "恢复生成" })).not.toBeInTheDocument();
   });
 });

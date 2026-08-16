@@ -1340,6 +1340,14 @@
   color: var(--failed);
 }
 
+.job-history-label {
+  margin: 0;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--rule);
+  color: var(--steel);
+  font-size: 11px;
+}
+
 .text-viewer {
   max-height: min(68vh, 720px);
   overflow: auto;

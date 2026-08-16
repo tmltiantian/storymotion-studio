@@ -97,9 +97,18 @@ export function ReviewPanel({
       if (!active) return;
       setChangesOpen(true);
       setCategory("overall");
-      setDescription(
-        `镜头 ${issueDraft.shotId}\n候选成果 ${issueDraft.artifactId}\n时间码 ${String(issueDraft.timeSeconds)} 秒\n`,
-      );
+      const marker = [
+        "--- 视频时间标记 ---",
+        `镜头 ${issueDraft.shotId}`,
+        `候选成果 ${issueDraft.artifactId}`,
+        `时间码 ${String(issueDraft.timeSeconds)} 秒`,
+        "--- 标记结束 ---",
+      ].join("\n");
+      setDescription((current) => {
+        if (current.includes(marker)) return current;
+        const existing = current.trimEnd();
+        return existing ? `${existing}\n\n${marker}` : marker;
+      });
       queueMicrotask(() => descriptionRef.current?.focus());
     });
     return () => {

@@ -155,13 +155,25 @@ function VideoGenerationWorkspace({
   workspace: VideoWorkspace;
 }) {
   const [selectedShotIds, setSelectedShotIds] = useState(
-    () => workspace.shots.map((shot) => shot.shot_id),
+    () => workspace.selected_shot_ids,
   );
   const [job, setJob] = useState<Pick<JobDetail, "job_id" | "status"> | null>(workspace.job);
+  const [failedRecovery, setFailedRecovery] = useState(workspace.failed_job_recovery);
   const updateJob = useCallback((next: JobDetail) => {
     setJob({ job_id: next.job_id, status: next.status });
   }, []);
-  const generationLocked = Boolean(job && ["queued", "running", "failed"].includes(job.status));
+  const activeJob = Boolean(job && ["queued", "running"].includes(job.status));
+  const pollOnlyFailure = Boolean(
+    job?.status === "failed" && failedRecovery?.mode === "poll_only",
+  );
+  const generationLocked = activeJob || pollOnlyFailure;
+  const recoveryLabel = job?.status === "failed"
+    ? failedRecovery?.mode === "historical"
+      ? "历史作业，与当前修订不一致"
+      : failedRecovery?.mode === "new_submission_required"
+        ? "此作业需重新确认后提交"
+        : ""
+    : "";
 
   return (
     <section className="video-generation-workspace" aria-labelledby="video-generation-title">
@@ -192,14 +204,25 @@ function VideoGenerationWorkspace({
         ))}
       </fieldset>
       {job ? (
-        <JobProgress api={api} jobId={job.job_id} onJobChange={updateJob} />
+        <>
+          {recoveryLabel ? <p className="job-history-label">{recoveryLabel}</p> : null}
+          <JobProgress
+            api={api}
+            jobId={job.job_id}
+            onJobChange={updateJob}
+            allowResume={failedRecovery?.mode === "poll_only"}
+          />
+        </>
       ) : null}
       {!generationLocked ? (
         <VideoPreflight
           api={api}
           projectId={projectId}
           shotIds={selectedShotIds}
-          onJobAccepted={(accepted) => setJob(accepted)}
+          onJobAccepted={(accepted) => {
+            setFailedRecovery(null);
+            setJob(accepted);
+          }}
         />
       ) : null}
     </section>
