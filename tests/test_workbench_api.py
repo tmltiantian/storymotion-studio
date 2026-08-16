@@ -41,6 +41,16 @@ class FakeWorkbenchService:
     def list_projects(self):
         return [self.project_detail("episode_01")]
 
+    def video_workspace(self, project_id: str):
+        if project_id != "episode_01":
+            raise KeyError(project_id)
+        return {
+            "schema_version": "motion-comic-factory.video-workspace.v1",
+            "project_id": project_id,
+            "shots": [{"shot_id": "shot_01", "duration_seconds": 5.0}],
+            "job": None,
+        }
+
     def provider_status(self):
         return {
             "capabilities": {
@@ -104,6 +114,18 @@ def test_project_detail_contains_execution_and_review_states(client: TestClient)
 
     assert response.status_code == 200
     assert response.json()["stages"][0]["review_state"] == "awaiting_review"
+
+
+def test_video_workspace_route_returns_path_free_shots_and_persisted_job(client: TestClient):
+    response = client.get("/api/projects/episode_01/video/workspace")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "schema_version": "motion-comic-factory.video-workspace.v1",
+        "project_id": "episode_01",
+        "shots": [{"shot_id": "shot_01", "duration_seconds": 5.0}],
+        "job": None,
+    }
 
 
 def test_media_route_rejects_raw_paths(client: TestClient):

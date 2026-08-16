@@ -63,10 +63,12 @@ export function JobProgress({
   api,
   jobId,
   connect = streamSse,
+  onJobChange,
 }: {
   api: JobProgressApi;
   jobId: string;
   connect?: JobEventConnector;
+  onJobChange?: (job: JobDetail) => void;
 }) {
   const [state, setState] = useState<ViewState>({ status: "loading" });
   const [resumePending, setResumePending] = useState(false);
@@ -86,6 +88,7 @@ export function JobProgress({
     let silenceTimer: number | null = null;
     let lastEventId = "";
     let reconnectDelay = 500;
+    let serverRetryDelay = 500;
 
     const clearSilenceTimer = () => {
       if (silenceTimer !== null) window.clearTimeout(silenceTimer);
@@ -97,6 +100,7 @@ export function JobProgress({
         const next = await api.getJob(jobId);
         if (!active || controller.signal.aborted || jobIdRef.current !== jobId) return null;
         setState({ status: "ready", job: next });
+        onJobChange?.(next);
         const persistedSequence = next.last_event_sequence ?? 0;
         if (persistedSequence > Number(lastEventId || "0")) lastEventId = String(persistedSequence);
         if (isTerminal(next)) {
@@ -132,10 +136,15 @@ export function JobProgress({
           for await (const message of connect(api.jobEventsUrl(jobId), {
             signal: controller.signal,
             lastEventId: lastEventId || undefined,
+            onRetry: (milliseconds) => {
+              serverRetryDelay = Math.min(5000, Math.max(250, milliseconds));
+              reconnectDelay = serverRetryDelay;
+            },
           })) {
             if (!active || controller.signal.aborted) return;
             receivedEvent = true;
-            reconnectDelay = 500;
+            reconnectDelay = serverRetryDelay;
+            if (message.id === "") lastEventId = "";
             const sequence = Number(message.id || "0");
             if (Number.isInteger(sequence) && sequence > Number(lastEventId || "0")) {
               lastEventId = String(sequence);
@@ -158,7 +167,7 @@ export function JobProgress({
         }
         if (!active || controller.signal.aborted) return;
         await abortableDelay(reconnectDelay, controller.signal);
-        if (!receivedEvent) reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+        if (!receivedEvent) reconnectDelay = Math.min(Math.max(reconnectDelay, serverRetryDelay) * 2, 5000);
       }
     };
 
@@ -169,7 +178,7 @@ export function JobProgress({
       clearSilenceTimer();
       controller.abort();
     };
-  }, [api, connect, jobId, recoveryGeneration]);
+  }, [api, connect, jobId, onJobChange, recoveryGeneration]);
 
   const resume = async () => {
     if (resumePending) return;
@@ -182,6 +191,7 @@ export function JobProgress({
       const next = "operation" in response ? response : await api.getJob(jobId);
       if (!mountedRef.current || jobIdRef.current !== ownerJobId) return;
       setState({ status: "ready", job: next });
+      onJobChange?.(next);
       if (!isTerminal(next)) setRecoveryGeneration((value) => value + 1);
     } catch (error) {
       if (!mountedRef.current || jobIdRef.current !== ownerJobId) return;

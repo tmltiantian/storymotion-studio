@@ -1,5 +1,5 @@
 import { Check, ChevronDown, LoaderCircle, RotateCcw } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type {
   ApproveStageRequest,
@@ -17,6 +17,13 @@ type IssueCategory =
   | "overall";
 
 type ScopedCategory = Exclude<IssueCategory, "overall">;
+
+export interface ReviewIssueDraft {
+  key: string;
+  shotId: string;
+  artifactId: string;
+  timeSeconds: number;
+}
 
 const issueCategories: ReadonlyArray<{
   id: IssueCategory;
@@ -58,17 +65,21 @@ export function ReviewPanel({
   onApprove,
   onRequestStageChanges,
   onOpenImpact,
+  issueDraft,
 }: {
   stage: StageDetail;
   pending: boolean;
   onApprove: (request: ApproveStageRequest) => void;
-  onRequestStageChanges: (request: RequestChangesRequest) => void;
+  onRequestStageChanges: (
+    request: RequestChangesRequest,
+  ) => boolean | void | Promise<boolean | void>;
   onOpenImpact: (
     request: ImpactRequest,
     issueLabel: string,
     description: string,
     trigger: HTMLButtonElement,
   ) => void;
+  issueDraft?: ReviewIssueDraft | null;
 }) {
   const [approvalNote, setApprovalNote] = useState("");
   const [selectedEvidence, setSelectedEvidence] = useState<string[]>(
@@ -77,6 +88,24 @@ export function ReviewPanel({
   const [changesOpen, setChangesOpen] = useState(false);
   const [category, setCategory] = useState<IssueCategory | "">("");
   const [description, setDescription] = useState("");
+  const descriptionRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (!issueDraft) return;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setChangesOpen(true);
+      setCategory("overall");
+      setDescription(
+        `镜头 ${issueDraft.shotId}\n候选成果 ${issueDraft.artifactId}\n时间码 ${String(issueDraft.timeSeconds)} 秒\n`,
+      );
+      queueMicrotask(() => descriptionRef.current?.focus());
+    });
+    return () => {
+      active = false;
+    };
+  }, [issueDraft]);
 
   const reviewable =
     stage.execution_state === "passed" &&
@@ -230,6 +259,7 @@ export function ReviewPanel({
             <label>
               <span>问题说明</span>
               <textarea
+                ref={descriptionRef}
                 value={description}
                 onChange={(event) => setDescription(event.target.value)}
                 rows={4}
@@ -243,7 +273,7 @@ export function ReviewPanel({
                 className="command-button change-command"
                 type="button"
                 disabled={!requiredFields}
-                onClick={() => onRequestStageChanges({
+                onClick={() => void onRequestStageChanges({
                   revision: stage.revision,
                   reason: `[${selectedLabel}] ${description.trim()}`,
                 })}

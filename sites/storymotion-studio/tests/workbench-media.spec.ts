@@ -78,6 +78,43 @@ const project = {
 };
 
 async function interceptWorkbench(page: Page) {
+  let generationCalls = 0;
+  let persistedJob = false;
+  let stageResponse = selectedStage;
+  const generationRequest = {
+    schema_version: "motion-comic-factory.video-generation-request.v1",
+    project_id: "episode_01",
+    project_sha256: "a".repeat(64),
+    package_sha256: "b".repeat(64),
+    revision_hashes: { storyboard: "c".repeat(64) },
+    artifact_hashes: { art_storyboard: "d".repeat(64) },
+    approval_hashes: { storyboard: "e".repeat(64) },
+    repair_plan_sha256: "",
+    shot_ids: ["shot_03", "shot_04"],
+    shots: [
+      { shot_id: "shot_03", duration: 5, resolution: "768P" },
+      { shot_id: "shot_04", duration: 4, resolution: "768P" },
+    ],
+    provider: "minimax",
+    model: "MiniMax-H3",
+    resolution: "768P",
+    output_seconds: 9,
+    estimated_cost_yuan: 4.5,
+    price_yuan_per_second: 0.5,
+  };
+  const job = {
+    job_id: "1".repeat(32),
+    project_id: "episode_01",
+    operation: "video_generate",
+    status: "completed",
+    created_at: "2026-08-16T00:00:00Z",
+    updated_at: "2026-08-16T00:01:00Z",
+    provider_tasks: { shot_03: { status: "completed" }, shot_04: { status: "completed" } },
+    result: { total_shots: 2 },
+    error: "",
+    resume_count: 0,
+    last_event_sequence: 4,
+  };
   await page.addInitScript(() => {
     const currentTimes = new WeakMap<HTMLMediaElement, number>();
     Object.defineProperty(HTMLMediaElement.prototype, "currentTime", {
@@ -101,18 +138,46 @@ async function interceptWorkbench(page: Page) {
     };
   });
   await page.route(/\/api\/projects\/episode_01\/stages\/video$/, (route) =>
-    route.fulfill({ json: selectedStage }),
+    route.fulfill({ json: stageResponse }),
   );
+  await page.route(/\/api\/projects\/episode_01\/video\/workspace$/, (route) =>
+    route.fulfill({ json: {
+      schema_version: "motion-comic-factory.video-workspace.v1",
+      project_id: "episode_01",
+      shots: [
+        { shot_id: "shot_03", duration_seconds: 5 },
+        { shot_id: "shot_04", duration_seconds: 4 },
+      ],
+      job: persistedJob ? job : null,
+    } }),
+  );
+  await page.route(/\/api\/projects\/episode_01\/video\/preflight$/, (route) =>
+    route.fulfill({ json: { ...generationRequest, ready: true, blockers: [] } }),
+  );
+  await page.route(/\/api\/projects\/episode_01\/video\/confirm$/, (route) =>
+    route.fulfill({ json: { generation_token: "browser-memory-token", generation_request: generationRequest } }),
+  );
+  await page.route(/\/api\/projects\/episode_01\/video\/generate$/, async (route) => {
+    generationCalls += 1;
+    persistedJob = true;
+    await route.fulfill({ status: 202, json: { job_id: job.job_id, status: "queued" } });
+  });
+  await page.route(new RegExp(`/api/jobs/${job.job_id}$`), (route) => route.fulfill({ json: job }));
+  await page.route(/\/api\/projects\/episode_01\/stages\/video\/request-changes$/, async (route) => {
+    stageResponse = { ...selectedStage, review_state: "changes_requested" } as typeof selectedStage;
+    await route.fulfill({ json: stageResponse });
+  });
   await page.route(/\/api\/projects\/episode_01$/, (route) =>
     route.fulfill({ json: project }),
   );
   await page.route(/\/api\/media\/art_video_[ab]$/, (route) =>
     route.fulfill({ status: 200, contentType: "video/mp4", body: "" }),
   );
+  return { generationCalls: () => generationCalls };
 }
 
 test("video inspection controls remain usable and unobstructed", async ({ page }, testInfo) => {
-  await interceptWorkbench(page);
+  const intercepted = await interceptWorkbench(page);
   await page.goto("/projects/episode_01/stages/video");
 
   const video = page.getByTestId("stage-video");
@@ -135,8 +200,6 @@ test("video inspection controls remain usable and unobstructed", async ({ page }
   await expect.poll(() => video.evaluate((node) => (node as HTMLVideoElement).playbackRate)).toBe(0.5);
   await page.getByRole("button", { name: "静音" }).click();
   await expect.poll(() => video.evaluate((node) => (node as HTMLVideoElement).muted)).toBe(true);
-  await page.getByRole("button", { name: "在当前时间标记问题" }).click();
-  await expect(page.getByRole("alert")).toContainText("已在 3.125 秒标记 shot_03-candidate-1.mp4");
 
   await page.getByRole("combobox", { name: "候选视频" }).selectOption("art_video_b");
   await expect(video).toHaveAttribute("src", "/api/media/art_video_b");
@@ -150,6 +213,29 @@ test("video inspection controls remain usable and unobstructed", async ({ page }
     ));
   });
   expect(overlaps).toBe(false);
+
+  await expect(page.getByText("视频生成预检")).toBeVisible();
+  await page.getByRole("button", { name: "确认费用与输入" }).click();
+  await page.getByRole("button", { name: "批量生成所选镜头" }).click();
+  await expect(page.getByText("生成完成")).toBeVisible();
+  expect(intercepted.generationCalls()).toBe(1);
+  await expect(page.locator("body")).not.toContainText("browser-memory-token");
+
+  await page.reload();
+  await expect(page.getByText("生成完成")).toBeVisible();
+  expect(intercepted.generationCalls()).toBe(1);
+
+  const reloadedVideo = page.getByTestId("stage-video");
+  await page.getByRole("button", { name: "在当前时间标记问题" }).click();
+  await expect(page.getByRole("textbox", { name: "问题说明" })).toHaveValue(
+    "镜头 shot_03\n候选成果 art_video_a\n时间码 3.125 秒\n",
+  );
+  await page.getByRole("textbox", { name: "问题说明" }).fill(
+    "镜头 shot_03\n候选成果 art_video_a\n时间码 3.125 秒\n动作衔接错误。",
+  );
+  await page.getByRole("button", { name: "退回整阶段" }).click();
+  await expect(page.getByText("问题已提交到当前修订。")).toBeVisible();
+  expect(await reloadedVideo.boundingBox()).not.toBeNull();
 
   if (testInfo.project.name === "mobile") {
     const artifact = page.getByRole("region", { name: "视频成果" });

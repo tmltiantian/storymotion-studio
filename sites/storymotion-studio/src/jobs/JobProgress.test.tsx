@@ -105,6 +105,23 @@ describe("JobProgress recovery", () => {
     expect(lastIds[1]).toBe("4");
   });
 
+  it("honors a bounded server retry hint before reconnecting", async () => {
+    vi.useFakeTimers();
+    const client = api();
+    let attempts = 0;
+    const connect = vi.fn(async function* (_url: string, options: StreamSseOptions) {
+      attempts += 1;
+      if (attempts === 1) options.onRetry?.(1200);
+      else yield* idleStream("", options);
+    });
+
+    render(<JobProgress api={client} jobId={job().job_id} connect={connect} />);
+    await act(async () => vi.advanceTimersByTimeAsync(1199));
+    expect(connect).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(connect).toHaveBeenCalledTimes(2);
+  });
+
   it("falls back to persisted GET after five seconds without events", async () => {
     vi.useFakeTimers();
     const client = api();

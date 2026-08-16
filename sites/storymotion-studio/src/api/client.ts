@@ -15,6 +15,7 @@ import type {
   StageName,
   VideoGenerationSubmission,
   VideoPreflight,
+  VideoWorkspace,
   WorkCapability,
   WorkCatalogAdapter,
 } from "./types";
@@ -64,6 +65,7 @@ export interface ApiClient {
     stage: StageName,
     signal?: AbortSignal,
   ): Promise<StageDetail>;
+  getVideoWorkspace(projectId: string, signal?: AbortSignal): Promise<VideoWorkspace>;
   runStage(
     projectId: string,
     stage: StageName,
@@ -183,6 +185,11 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     getStage: (projectId, stage, signal) =>
       request<StageDetail>(
         `/api/projects/${identifier(projectId)}/stages/${identifier(stage)}`,
+        { signal },
+      ),
+    getVideoWorkspace: (projectId, signal) =>
+      request<VideoWorkspace>(
+        `/api/projects/${identifier(projectId)}/video/workspace`,
         { signal },
       ),
     runStage: (projectId, stage, body = {}) =>

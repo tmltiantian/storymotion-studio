@@ -237,6 +237,10 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
     async def stage_detail(project_id: str, stage: str) -> Any:
         return service.stage_detail(_identifier(project_id), _identifier(stage))
 
+    @app.get("/api/projects/{project_id}/video/workspace")
+    async def video_workspace(project_id: str) -> Any:
+        return service.video_workspace(_identifier(project_id))
+
     @app.post("/api/projects/{project_id}/stages/{stage}/run", status_code=202)
     async def run_stage(project_id: str, stage: str, body: RunStageBody) -> Any:
         return service.submit_stage_run(
