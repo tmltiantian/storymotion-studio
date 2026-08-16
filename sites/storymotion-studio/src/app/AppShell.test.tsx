@@ -194,6 +194,7 @@ describe("production workbench shell", () => {
     expect(await screen.findByText("项目已进入创建队列")).toBeVisible();
     expect(screen.getByText("c".repeat(32))).toBeVisible();
     await user.click(screen.getByRole("button", { name: "完成" }));
+    await waitFor(() => expect(api.listProjects).toHaveBeenCalledTimes(2));
     expect(trigger).toHaveFocus();
   });
 

@@ -342,6 +342,7 @@ export function ProjectListPage({ api }: { api: ProjectListApi }) {
         <CreateProjectDialog
           createProject={api.createProject}
           onClose={() => setCreateOpen(false)}
+          onCreated={load}
           returnFocusRef={createTriggerRef}
         />
       ) : null}
