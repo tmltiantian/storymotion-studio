@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -54,6 +55,8 @@ class _Snapshot:
     mode: int
     size: int
     modified_ns: int
+    changed_ns: int
+    link_count: int
     sha256: str
 
 
@@ -82,6 +85,8 @@ def _snapshot(metadata: os.stat_result, digest: str) -> _Snapshot:
         mode=stat.S_IFMT(metadata.st_mode),
         size=metadata.st_size,
         modified_ns=metadata.st_mtime_ns,
+        changed_ns=metadata.st_ctime_ns,
+        link_count=metadata.st_nlink,
         sha256=digest,
     )
 
@@ -93,6 +98,8 @@ def _snapshot_matches(value: _Snapshot, metadata: os.stat_result) -> bool:
         and value.mode == stat.S_IFMT(metadata.st_mode)
         and value.size == metadata.st_size
         and value.modified_ns == metadata.st_mtime_ns
+        and value.changed_ns == metadata.st_ctime_ns
+        and value.link_count == metadata.st_nlink
         and stat.S_ISREG(metadata.st_mode)
     )
 
@@ -118,6 +125,8 @@ def _read_snapshot(anchor: AnchoredDirectory, relative: str) -> _Snapshot:
         listed = os.stat(name, dir_fd=parent, follow_symlinks=False)
         if stat.S_ISLNK(listed.st_mode):
             raise ValueError("showcase source contains a symlink")
+        if listed.st_nlink != 1:
+            raise ValueError("showcase source contains a hard link")
         descriptor = os.open(name, _FILE_FLAGS, dir_fd=parent)
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or not _same_identity(listed, opened):
@@ -263,7 +272,18 @@ def _mkdir_secure(path: Path) -> None:
                 if not stat.S_ISDIR(metadata.st_mode):
                     raise ValueError("archive destination ancestor is not a directory")
             except FileNotFoundError:
-                os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    raced = os.stat(
+                        component,
+                        dir_fd=descriptor,
+                        follow_symlinks=False,
+                    )
+                    if stat.S_ISLNK(raced.st_mode) or not stat.S_ISDIR(raced.st_mode):
+                        raise ValueError(
+                            "archive destination creation raced with an unsafe node"
+                        )
             next_descriptor = os.open(component, _DIRECTORY_FLAGS, dir_fd=descriptor)
             os.close(descriptor)
             descriptor = next_descriptor
@@ -279,11 +299,92 @@ def _existing_digest(parent: int, name: str) -> str | None:
     except OSError as exc:
         raise ValueError("archive destination collision is unsafe") from exc
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
             raise ValueError("archive destination collision is not a regular file")
+        if metadata.st_nlink != 1:
+            raise ValueError("archive destination contains a hard link")
         return _hash_descriptor(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _publish_no_replace(
+    parent: int, temporary_name: str, destination_name: str
+) -> None:
+    try:
+        os.link(
+            temporary_name,
+            destination_name,
+            src_dir_fd=parent,
+            dst_dir_fd=parent,
+            follow_symlinks=False,
+        )
+    except FileExistsError as exc:
+        raise ValueError(
+            "archive destination collision appeared during migration"
+        ) from exc
+    temporary = os.stat(temporary_name, dir_fd=parent, follow_symlinks=False)
+    published = os.stat(destination_name, dir_fd=parent, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(published.st_mode)
+        or (temporary.st_dev, temporary.st_ino) != (published.st_dev, published.st_ino)
+        or published.st_nlink != 2
+    ):
+        try:
+            os.unlink(destination_name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        raise ValueError("archive publication ownership could not be verified")
+    os.unlink(temporary_name, dir_fd=parent)
+    final = os.stat(destination_name, dir_fd=parent, follow_symlinks=False)
+    if (final.st_dev, final.st_ino) != (
+        published.st_dev,
+        published.st_ino,
+    ) or final.st_nlink != 1:
+        raise ValueError("archive publication retained an unsafe hard link")
+    os.fsync(parent)
+
+
+def _write_bytes_no_replace(
+    destination: AnchoredDirectory,
+    relative: str,
+    content: bytes,
+) -> None:
+    parent, name = _open_parent(destination, relative)
+    temporary_name = f".{name}.{uuid4().hex}.tmp"
+    descriptor = -1
+    try:
+        existing = _existing_digest(parent, name)
+        expected = hashlib.sha256(content).hexdigest()
+        if existing is not None:
+            if existing != expected:
+                raise ValueError("archive manifest collision has different content")
+            return
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent,
+        )
+        remaining = memoryview(content)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("archive manifest could not be completed")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        _publish_no_replace(parent, temporary_name, name)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        os.close(parent)
 
 
 def _copy_file_atomic(
@@ -338,15 +439,11 @@ def _copy_file_atomic(
             or not _snapshot_matches(planned.snapshot, current)
         ):
             raise ValueError("showcase source changed during migration")
-        if _existing_digest(destination_parent, destination_path.name) is not None:
-            raise ValueError("archive destination collision appeared during migration")
-        os.replace(
+        _publish_no_replace(
+            destination_parent,
             temporary_name,
             destination_path.name,
-            src_dir_fd=destination_parent,
-            dst_dir_fd=destination_parent,
         )
-        os.fsync(destination_parent)
     finally:
         if temporary_descriptor >= 0:
             os.close(temporary_descriptor)
@@ -396,25 +493,39 @@ def migrate_showcase_media(
             return manifest
         _mkdir_secure(archive_path)
         with AnchoredDirectory.open(archive_path, label="Showcase archive") as archive:
-            for item in plan:
-                _copy_file_atomic(source, archive, item)
-            for item in plan:
-                current = _read_snapshot(source, item.entry.source_relative)
-                if current != item.snapshot:
-                    raise ValueError("showcase source changed during migration")
-                archived = archive.read_bytes(item.entry.archive_relative)
-                if hashlib.sha256(archived).hexdigest() != item.entry.sha256:
-                    raise ValueError("archived file failed SHA-256 verification")
-            encoded = (
-                json.dumps(
-                    manifest.to_dict(),
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
-            ).encode("utf-8")
-            archive.write_bytes_atomic("archive_manifest.json", encoded)
+            fcntl.flock(archive.descriptor, fcntl.LOCK_EX)
+            try:
+                for item in plan:
+                    _copy_file_atomic(source, archive, item)
+                for item in plan:
+                    current = _read_snapshot(source, item.entry.source_relative)
+                    if current != item.snapshot:
+                        raise ValueError("showcase source changed during migration")
+                    parent, name = _open_parent(archive, item.entry.archive_relative)
+                    try:
+                        digest = _existing_digest(parent, name)
+                        metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    finally:
+                        os.close(parent)
+                    if (
+                        digest != item.entry.sha256
+                        or metadata.st_nlink != 1
+                        or (metadata.st_dev, metadata.st_ino)
+                        == (item.snapshot.device, item.snapshot.inode)
+                    ):
+                        raise ValueError("archived file ownership verification failed")
+                encoded = (
+                    json.dumps(
+                        manifest.to_dict(),
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+                _write_bytes_no_replace(archive, "archive_manifest.json", encoded)
+            finally:
+                fcntl.flock(archive.descriptor, fcntl.LOCK_UN)
         return manifest
 
 

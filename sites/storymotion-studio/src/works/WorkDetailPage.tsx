@@ -36,6 +36,12 @@ function MediaPreview({ artifact }: { artifact: Artifact }) {
 }
 
 
+function authorizedDownloadUrl(artifact: Artifact): string | null {
+  const expected = `/api/download/${encodeURIComponent(artifact.artifact_id)}`;
+  return artifact.download_url === expected ? expected : null;
+}
+
+
 function Evidence({ version }: { version: WorkVersion }) {
   return (
     <section className="work-evidence" aria-labelledby="work-evidence-title">
@@ -127,8 +133,8 @@ export function WorkDetailPage({ api }: { api: WorkDetailPageApi }) {
                 </nav>
                 <div className="work-media-stage">
                   {selectedArtifact ? <MediaPreview artifact={selectedArtifact} /> : null}
-                  {selectedArtifact && authorizedArtifactUrl(selectedArtifact) ? (
-                    <a className="text-button work-download" href={authorizedArtifactUrl(selectedArtifact) ?? undefined} download aria-label={`下载 ${selectedArtifact.name}`}><Download aria-hidden="true" size={15} />下载文件</a>
+                  {selectedArtifact && authorizedDownloadUrl(selectedArtifact) ? (
+                    <a className="text-button work-download" href={authorizedDownloadUrl(selectedArtifact) ?? undefined} aria-label={`下载 ${selectedArtifact.name}`}><Download aria-hidden="true" size={15} />下载文件</a>
                   ) : null}
                 </div>
               </div>

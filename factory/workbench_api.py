@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from typing import Annotated, Any, Literal
+from urllib.parse import quote
 
 import uvicorn
 from fastapi import FastAPI, Header, Request
@@ -22,6 +23,17 @@ _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _JOB_ID = re.compile(r"[0-9a-f]{32}")
 _PLAN_ID = re.compile(r"[0-9a-f]{64}")
 _RAW_PATH = re.compile(r"(?<![A-Za-z0-9:])/(?:[^\s,;:'\"]+/)*[^\s,;:'\"]+")
+
+
+def _attachment_header(name: str) -> str:
+    cleaned = str(name).replace("\\", "/").rsplit("/", 1)[-1]
+    cleaned = "".join(character for character in cleaned if ord(character) >= 32)
+    if not cleaned:
+        cleaned = "download"
+    fallback = cleaned.encode("ascii", "ignore").decode("ascii")
+    fallback = re.sub(r"[^A-Za-z0-9._ -]", "_", fallback).strip(" .") or "download"
+    fallback = fallback.replace('"', "_")[:120]
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(cleaned, safe='')}"
 
 
 class _StrictBody(BaseModel):
@@ -170,7 +182,12 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
         allow_credentials=True,
         allow_methods=["GET", "POST", "HEAD", "OPTIONS"],
         allow_headers=["Content-Type", "Last-Event-ID", "Range"],
-        expose_headers=["Accept-Ranges", "Content-Length", "Content-Range"],
+        expose_headers=[
+            "Accept-Ranges",
+            "Content-Disposition",
+            "Content-Length",
+            "Content-Range",
+        ],
     )
 
     @app.exception_handler(RequestValidationError)
@@ -382,7 +399,13 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
             },
         )
 
-    def media_response(artifact_id: str, range_header: str | None, *, head: bool):
+    def media_response(
+        artifact_id: str,
+        range_header: str | None,
+        *,
+        head: bool,
+        attachment: bool = False,
+    ):
         selected = _identifier(artifact_id)
         opened = service.open_media(selected)
         info = opened.info
@@ -391,6 +414,8 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
             "Accept-Ranges": "bytes",
             "Content-Type": str(info["media_type"]),
         }
+        if attachment:
+            headers["Content-Disposition"] = _attachment_header(str(info["name"]))
 
         async def stream(start: int, end: int):
             try:
@@ -451,6 +476,30 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
         range_header: Annotated[str | None, Header(alias="Range")] = None,
     ) -> Response:
         return media_response(artifact_id, range_header, head=False)
+
+    @app.head("/api/download/{artifact_id}")
+    async def head_download(
+        artifact_id: str,
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+    ) -> Response:
+        return media_response(
+            artifact_id,
+            range_header,
+            head=True,
+            attachment=True,
+        )
+
+    @app.get("/api/download/{artifact_id}")
+    async def get_download(
+        artifact_id: str,
+        range_header: Annotated[str | None, Header(alias="Range")] = None,
+    ) -> Response:
+        return media_response(
+            artifact_id,
+            range_header,
+            head=False,
+            attachment=True,
+        )
 
     return app
 

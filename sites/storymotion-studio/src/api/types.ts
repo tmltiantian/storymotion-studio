@@ -46,6 +46,7 @@ export interface Artifact {
   name: string;
   media_type: string;
   media_url: string;
+  download_url?: string;
   kind?: ArtifactKind;
   viewer?: ArtifactViewerMetadata;
   sha256?: string;
@@ -298,6 +299,8 @@ export interface WorkSummary {
   mode: ProjectMode | "historical";
   source: "delivered" | "historical";
   delivered_at: string;
+  delivery_date: string;
+  roles: string[];
   cover?: Artifact;
   current_version?: string;
 }

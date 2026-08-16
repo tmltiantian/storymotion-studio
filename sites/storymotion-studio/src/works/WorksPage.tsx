@@ -1,4 +1,4 @@
-import { AlertCircle, Archive, Clapperboard, LoaderCircle, Search, X } from "lucide-react";
+import { AlertCircle, Archive, Clapperboard, FilterX, LoaderCircle, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 
@@ -34,6 +34,9 @@ function modeLabel(mode: WorkSummary["mode"]): string {
 export function WorksPage({ api }: { api: WorksPageApi }) {
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [query, setQuery] = useState("");
+  const [mode, setMode] = useState("");
+  const [role, setRole] = useState("");
+  const [deliveryDate, setDeliveryDate] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -49,14 +52,33 @@ export function WorksPage({ api }: { api: WorksPageApi }) {
   const visible = useMemo(() => {
     if (state.status !== "ready") return [];
     const selected = query.trim().toLocaleLowerCase("zh-CN");
-    if (!selected) return state.works;
-    return state.works.filter((work) =>
-      [work.title, work.project_id, work.current_version, modeLabel(work.mode)]
+    return state.works.filter((work) => {
+      const matchesText = !selected || [work.title, work.project_id, work.current_version, modeLabel(work.mode), ...work.roles]
         .join(" ")
         .toLocaleLowerCase("zh-CN")
-        .includes(selected),
-    );
-  }, [query, state]);
+        .includes(selected);
+      return matchesText
+        && (!mode || work.mode === mode)
+        && (!role || work.roles.includes(role))
+        && (!deliveryDate || work.delivery_date === deliveryDate);
+    });
+  }, [deliveryDate, mode, query, role, state]);
+
+  const facets = useMemo(() => {
+    if (state.status !== "ready") return { modes: [], roles: [] };
+    return {
+      modes: [...new Set(state.works.map((work) => work.mode))].sort(),
+      roles: [...new Set(state.works.flatMap((work) => work.roles))].sort((left, right) => left.localeCompare(right, "zh-CN")),
+    };
+  }, [state]);
+
+  const hasFilters = Boolean(query || mode || role || deliveryDate);
+  const clearFilters = () => {
+    setQuery("");
+    setMode("");
+    setRole("");
+    setDeliveryDate("");
+  };
 
   return (
     <div className="page-frame compact-page works-page">
@@ -69,23 +91,31 @@ export function WorksPage({ api }: { api: WorksPageApi }) {
       </div>
 
       {state.status === "ready" && state.works.length ? (
-        <label className="works-filter">
-          <Search aria-hidden="true" size={16} />
-          <span className="sr-only">筛选作品</span>
-          <input
-            type="search"
-            aria-label="筛选作品"
-            placeholder="按名称、项目或版本筛选"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-          {query ? (
-            <button className="icon-button" type="button" title="清除筛选" aria-label="清除筛选" onClick={() => setQuery("")}>
-              <X aria-hidden="true" size={15} />
-            </button>
-          ) : <span aria-hidden="true" />}
-          <code>{visible.length} 个结果</code>
-        </label>
+        <div className="works-filter-panel">
+          <label className="works-filter">
+            <Search aria-hidden="true" size={16} />
+            <span className="sr-only">筛选作品</span>
+            <input
+              type="search"
+              aria-label="筛选作品"
+              placeholder="按名称、项目、版本或角色筛选"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            {query ? (
+              <button className="icon-button" type="button" title="清除关键词" aria-label="清除关键词" onClick={() => setQuery("")}>
+                <X aria-hidden="true" size={15} />
+              </button>
+            ) : <span aria-hidden="true" />}
+            <code>{visible.length} 个结果</code>
+          </label>
+          <div className="works-facets" aria-label="作品分类筛选">
+            <label><span>模式</span><select aria-label="作品模式" value={mode} onChange={(event) => setMode(event.target.value)}><option value="">全部模式</option>{facets.modes.map((value) => <option value={value} key={value}>{modeLabel(value)}</option>)}</select></label>
+            <label><span>角色</span><select aria-label="角色" value={role} onChange={(event) => setRole(event.target.value)}><option value="">全部角色</option>{facets.roles.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+            <label><span>交付日期</span><input aria-label="交付日期" type="date" value={deliveryDate} onChange={(event) => setDeliveryDate(event.target.value)} /></label>
+            <button className="text-button filter-reset" type="button" disabled={!hasFilters} onClick={clearFilters}><FilterX aria-hidden="true" size={15} />清除全部筛选</button>
+          </div>
+        </div>
       ) : null}
 
       {state.status === "loading" ? (

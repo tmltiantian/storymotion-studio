@@ -9,25 +9,29 @@ import type { WorkSummary } from "../api/types";
 import { WorksPage } from "./WorksPage";
 
 
-const delivered: WorkSummary = {
+const delivered = {
   work_id: "work_delivered",
   project_id: "interview-cat",
   title: "咪要去面试",
   mode: "replica",
   source: "delivered",
   delivered_at: "2026-08-15T12:00:00Z",
+  delivery_date: "2026-08-15",
+  roles: ["豆包", "奶糖"],
   current_version: "V3.1",
-};
+} as WorkSummary;
 
-const historical: WorkSummary = {
+const historical = {
   work_id: "work_archive",
   project_id: "",
   title: "历史归档",
   mode: "historical",
   source: "historical",
   delivered_at: "",
+  delivery_date: "",
+  roles: ["未知角色"],
   current_version: "4 项素材",
-};
+} as WorkSummary;
 
 
 function renderPage(listWorks = vi.fn().mockResolvedValue([delivered, historical])) {
@@ -62,6 +66,24 @@ describe("WorksPage", () => {
 
     expect(screen.getByRole("heading", { name: "咪要去面试" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "历史归档" })).not.toBeInTheDocument();
+  });
+
+  it("filters by authoritative mode, role and delivery date and can reset", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("咪要去面试");
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "作品模式" }), "replica");
+    await user.selectOptions(screen.getByRole("combobox", { name: "角色" }), "豆包");
+    await user.type(screen.getByLabelText("交付日期"), "2026-08-15");
+    expect(screen.getByRole("heading", { name: "咪要去面试" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "历史归档" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "清除全部筛选" }));
+    expect(screen.getByRole("heading", { name: "历史归档" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "作品模式" })).toHaveValue("");
+    expect(screen.getByRole("combobox", { name: "角色" })).toHaveValue("");
+    expect(screen.getByLabelText("交付日期")).toHaveValue("");
   });
 
   it("renders honest empty and error states", async () => {

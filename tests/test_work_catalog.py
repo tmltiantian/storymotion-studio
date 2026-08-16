@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from factory.work_catalog import build_work_catalog
+from factory.pipeline_contracts import ProjectSpec, StageName
+from factory.pipeline_review import approve_stage_revision, write_stage_revision
+from factory.work_catalog import WorkCatalogCache, build_work_catalog
 from scripts.migrate_showcase_works import migrate_showcase_media
 
 
@@ -35,41 +39,56 @@ def _write_delivered_project(
     project_id: str = "old-city",
     title: str = "旧城来信",
     revision: int = 3,
+    mode: str = "novel",
+    deliver_policy: str = "manual",
+    characters: list[dict[str, str]] | None = None,
 ) -> Path:
     project = runs / project_id
     deliver = project / "stages" / "deliver"
     evaluation = project / "stages" / "eval"
     deliver.mkdir(parents=True)
     evaluation.mkdir(parents=True)
-    master = deliver / "master.mp4"
-    master.write_bytes(b"delivered-master")
+    if mode == "replica":
+        master = deliver / "release" / "final.mp4"
+        master.parent.mkdir()
+        master.write_bytes(b"replica-master")
+    else:
+        master = deliver / "master.mp4"
+        master.write_bytes(b"delivered-master")
     eval_report = evaluation / "eval_result.json"
     eval_report.write_text(
         json.dumps({"automatic_passed": True, "score": 94}), encoding="utf-8"
     )
     delivery_manifest = deliver / "delivery_manifest.json"
-    delivery_manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": "motion-comic-factory.delivery.v1",
-                "project_id": project_id,
-                "master": str(master),
-                "sha256": _sha256(master.read_bytes()),
-                "publication_status": "APPROVED",
-                "delivered_at": "2026-08-15T12:00:00Z",
-            }
-        ),
-        encoding="utf-8",
+    manifest_payload = (
+        {
+            "schema_version": "motion-comic-factory.replica-delivery.v1",
+            "workspace": str(project / "replica-workspace"),
+            "operation": {"operation": "compose", "status": "completed"},
+            "masters": [str(master)],
+            "publication_status": "REVIEW_REQUIRED",
+            "delivered_at": "2026-08-15T12:00:00Z",
+        }
+        if mode == "replica"
+        else {
+            "schema_version": "motion-comic-factory.delivery.v1",
+            "project_id": project_id,
+            "master": str(master),
+            "sha256": _sha256(master.read_bytes()),
+            "publication_status": "REVIEW_REQUIRED",
+            "delivered_at": "2026-08-15T12:00:00Z",
+        }
     )
+    delivery_manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
     project_json = {
         "schema_version": "motion-comic-factory.project-spec.v1",
         "project_id": project_id,
         "title": title,
-        "mode": "novel",
-        "input": {"kind": "novel"},
+        "mode": mode,
+        "input": {"kind": "reference" if mode == "replica" else "novel"},
         "output_dir": str(project / "output"),
         "target": {},
-        "characters": [],
+        "characters": characters or [],
         "providers": {},
         "policies": {},
         "mode_options": {},
@@ -86,20 +105,25 @@ def _write_delivered_project(
             {
                 "stage": stage,
                 "state": "passed",
-                "executor": f"generic.{stage}",
+                "executor": f"{'replica' if mode == 'replica' else 'generic'}.{stage}",
+                "input_signature": "deliver-input" if stage == "deliver" else "",
                 "artifacts": artifacts,
                 "revision": revision if stage == "deliver" else 1,
-                "review_policy": "manual" if stage == "deliver" else "automatic",
-                "review_state": "approved" if stage == "deliver" else "auto_approved",
+                "review_policy": deliver_policy if stage == "deliver" else "automatic",
+                "review_state": (
+                    ("auto_approved" if deliver_policy == "automatic" else "approved")
+                    if stage == "deliver"
+                    else "auto_approved"
+                ),
                 "review_blocks_progress": False,
             }
         )
     package = {
         "schema_version": "motion-comic-factory.production-package.v1",
         "project_id": project_id,
-        "mode": "novel",
+        "mode": mode,
         "spec_path": str(project / "project.json"),
-        "spec_sha256": "0" * 64,
+        "spec_sha256": ProjectSpec.from_dict(project_json).sha256,
         "stages": stage_records,
         "next_stage": "complete",
         "final_outputs": [str(master)],
@@ -108,7 +132,31 @@ def _write_delivered_project(
     (project / "production_package.json").write_text(
         json.dumps(package), encoding="utf-8"
     )
+    for _ in range(revision):
+        write_stage_revision(
+            project,
+            StageName.DELIVER,
+            (delivery_manifest, master),
+            "deliver-input",
+            f"{'replica' if mode == 'replica' else 'generic'}.deliver",
+        )
+    if deliver_policy != "automatic":
+        approve_stage_revision(
+            project,
+            StageName.DELIVER,
+            revision,
+            "Approved for catalog delivery",
+            (master,),
+        )
     return project
+
+
+def _migrate_in_process(source: str, archive: str, queue) -> None:
+    try:
+        manifest = migrate_showcase_media(source, archive)
+        queue.put(("ok", len(manifest.entries)))
+    except Exception as exc:  # pragma: no cover - child process evidence
+        queue.put(("error", type(exc).__name__, str(exc)))
 
 
 def _write_showcase(source: Path) -> dict[str, bytes]:
@@ -132,7 +180,10 @@ def test_catalog_reads_only_authoritative_deliveries_and_archived_media(
     tmp_path: Path,
 ) -> None:
     runs = tmp_path / "runs"
-    _write_delivered_project(runs)
+    _write_delivered_project(
+        runs,
+        characters=[{"character_id": "cat_01", "name": "豆包"}],
+    )
     arbitrary = runs / "looks-finished"
     arbitrary.mkdir(parents=True)
     (arbitrary / "final.mp4").write_bytes(b"must-not-leak")
@@ -150,6 +201,8 @@ def test_catalog_reads_only_authoritative_deliveries_and_archived_media(
     ]
     delivered = catalog.works[0]
     assert delivered.source == "delivered"
+    assert delivered.roles == ("豆包",)
+    assert delivered.delivery_date == "2026-08-15"
     assert delivered.versions[0].label == "V3"
     assert delivered.versions[0].outputs[0].sha256 == _sha256(b"delivered-master")
     assert b"must-not-leak" not in [
@@ -174,6 +227,108 @@ def test_catalog_order_and_opaque_ids_are_deterministic(tmp_path: Path) -> None:
     assert [item.title for item in first.works] == ["晚到", "先到"]
     assert all(item.work_id.startswith("work_") for item in first.works)
     assert all("/" not in item.work_id for item in first.works)
+
+
+def test_catalog_rejects_stale_spec_and_forged_or_absent_delivery_review(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    project = _write_delivered_project(runs, project_id="stale-spec")
+    spec_path = project / "project.json"
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["title"] = "被后改的标题"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    assert build_work_catalog(runs, None).works == ()
+
+    project = _write_delivered_project(runs, project_id="absent-review")
+    (project / "reviews/deliver.review.json").unlink()
+    assert all(
+        work.project_id != "absent-review"
+        for work in build_work_catalog(runs, None).works
+    )
+
+    project = _write_delivered_project(runs, project_id="forged-review")
+    review_path = project / "reviews/deliver.review.json"
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    review["evidence"][0]["sha256"] = "f" * 64
+    review_path.write_text(json.dumps(review), encoding="utf-8")
+    assert all(
+        work.project_id != "forged-review"
+        for work in build_work_catalog(runs, None).works
+    )
+
+
+@pytest.mark.parametrize("mutation", ("stale-revision", "stale-artifact", "skipped"))
+def test_catalog_binds_latest_delivery_revision_and_never_accepts_skipped(
+    tmp_path: Path, mutation: str
+) -> None:
+    runs = tmp_path / "runs"
+    project = _write_delivered_project(runs, revision=2)
+    package_path = project / "production_package.json"
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    deliver = package["stages"][-1]
+    if mutation == "stale-revision":
+        deliver["revision"] = 1
+        package_path.write_text(json.dumps(package), encoding="utf-8")
+    elif mutation == "stale-artifact":
+        (project / "stages/deliver/master.mp4").write_bytes(b"mutated")
+    else:
+        deliver["review_state"] = "skipped"
+        package_path.write_text(json.dumps(package), encoding="utf-8")
+
+    assert build_work_catalog(runs, None).works == ()
+
+
+def test_catalog_accepts_current_automatic_revision_evidence(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    _write_delivered_project(runs, deliver_policy="automatic", revision=1)
+
+    catalog = build_work_catalog(runs, None)
+
+    assert [work.title for work in catalog.works] == ["旧城来信"]
+
+
+@pytest.mark.parametrize("mutation", ("missing-operation", "unregistered-master"))
+def test_catalog_accepts_real_replica_delivery_and_rejects_partial_masters(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    runs = tmp_path / "runs"
+    project = _write_delivered_project(runs, mode="replica", revision=1)
+
+    catalog = build_work_catalog(runs, None)
+
+    assert catalog.works[0].mode == "replica"
+    assert catalog.works[0].versions[0].outputs[0].sha256 == _sha256(b"replica-master")
+
+    manifest_path = project / "stages/deliver/delivery_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if mutation == "missing-operation":
+        manifest.pop("operation")
+    else:
+        manifest["masters"].append(str(project / "stages/deliver/release/missing.mp4"))
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    master = project / "stages/deliver/release/final.mp4"
+    revision = write_stage_revision(
+        project,
+        StageName.DELIVER,
+        (manifest_path, master),
+        "deliver-input",
+        "replica.deliver",
+    )
+    package_path = project / "production_package.json"
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    package["stages"][-1]["revision"] = revision.number
+    package_path.write_text(json.dumps(package), encoding="utf-8")
+    approve_stage_revision(
+        project,
+        StageName.DELIVER,
+        revision.number,
+        "Approved malformed fixture to test parser",
+        (master,),
+    )
+    assert build_work_catalog(runs, None).works == ()
 
 
 @pytest.mark.parametrize(
@@ -293,6 +448,10 @@ def test_real_migration_is_idempotent_and_preserves_sources_and_unclassified(
     assert (archive / "archive_manifest.json").is_file()
     assert all(entry.sha256 and len(entry.sha256) == 64 for entry in first.entries)
     assert all((archive / entry.archive_relative).is_file() for entry in first.entries)
+    assert all(
+        (archive / entry.archive_relative).stat().st_nlink == 1
+        for entry in first.entries
+    )
     assert any(
         entry.classification == "unclassified"
         and entry.source_relative == "favicon.svg"
@@ -324,6 +483,81 @@ def test_migration_rejects_symlinks_and_destination_collisions(tmp_path: Path) -
     collision.write_bytes(b"different")
     with pytest.raises(ValueError, match="collision"):
         migrate_showcase_media(source, tmp_path / "archive")
+
+
+def test_migration_rejects_source_and_destination_hardlinks(tmp_path: Path) -> None:
+    source = tmp_path / "public"
+    _write_showcase(source)
+    external = tmp_path / "external.m4a"
+    os.link(source / "audio/black-cat-approved.m4a", external)
+    with pytest.raises(ValueError, match="hard link"):
+        migrate_showcase_media(source, tmp_path / "archive", dry_run=True)
+
+    external.unlink()
+    dry = migrate_showcase_media(source, tmp_path / "archive", dry_run=True)
+    destination = tmp_path / "archive" / dry.entries[0].archive_relative
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes((source / dry.entries[0].source_relative).read_bytes())
+    os.link(destination, tmp_path / "destination-alias")
+    with pytest.raises(ValueError, match="hard link"):
+        migrate_showcase_media(source, tmp_path / "archive")
+
+
+def test_migration_does_not_replace_concurrent_writer_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import migrate_showcase_works as module
+
+    source = tmp_path / "public"
+    _write_showcase(source)
+    archive = tmp_path / "archive"
+    real_link = module.os.link
+    injected = False
+
+    def race_link(source_name, destination_name, **kwargs):
+        nonlocal injected
+        if not injected and not str(destination_name).endswith("archive_manifest.json"):
+            injected = True
+            descriptor = os.open(
+                destination_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=kwargs["dst_dir_fd"],
+            )
+            os.write(descriptor, b"concurrent owner data")
+            os.close(descriptor)
+        return real_link(source_name, destination_name, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", race_link)
+    with pytest.raises(ValueError, match="collision"):
+        migrate_showcase_media(source, archive)
+    collided = next(archive.rglob("black-cat-approved.m4a"))
+    assert collided.read_bytes() == b"concurrent owner data"
+    assert not (archive / "archive_manifest.json").exists()
+
+
+def test_concurrent_migrations_are_serialized_and_idempotent(tmp_path: Path) -> None:
+    source = tmp_path / "public"
+    _write_showcase(source)
+    archive = tmp_path / "archive"
+    context = multiprocessing.get_context("spawn")
+    queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_migrate_in_process, args=(str(source), str(archive), queue)
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=20)
+        assert process.exitcode == 0
+
+    assert sorted(queue.get(timeout=2) for _ in processes) == [("ok", 7), ("ok", 7)]
+    assert (
+        len(json.loads((archive / "archive_manifest.json").read_text())["entries"]) == 7
+    )
 
 
 def test_migration_rejects_source_mutation_and_cleans_temporary_files(
@@ -362,23 +596,131 @@ def test_interrupted_copy_leaves_no_manifest_or_temporary_file(
     source = tmp_path / "public"
     _write_showcase(source)
     archive = tmp_path / "archive"
-    real_replace = module.os.replace
+    real_link = module.os.link
     interrupted = False
 
-    def fail_first_media_replace(source_name, destination_name, **kwargs):
+    def fail_first_media_publish(source_name, destination_name, **kwargs):
         nonlocal interrupted
         if destination_name != "archive_manifest.json" and not interrupted:
             interrupted = True
             raise OSError("simulated interruption")
-        return real_replace(source_name, destination_name, **kwargs)
+        return real_link(source_name, destination_name, **kwargs)
 
-    monkeypatch.setattr(module.os, "replace", fail_first_media_replace)
+    monkeypatch.setattr(module.os, "link", fail_first_media_publish)
 
     with pytest.raises(OSError, match="simulated interruption"):
         migrate_showcase_media(source, archive)
 
     assert not (archive / "archive_manifest.json").exists()
     assert not list(archive.rglob("*.tmp"))
+
+
+def test_tracked_archive_builds_catalog_in_clean_copy_and_matches_all_sources(
+    tmp_path: Path,
+) -> None:
+    repository = Path(__file__).resolve().parents[1]
+    tracked = repository / "assets/workbench_archive"
+    copied = tmp_path / "clean-copy/assets/workbench_archive"
+    import shutil
+
+    shutil.copytree(tracked, copied)
+    manifest = json.loads(
+        (copied / "archive_manifest.json").read_text(encoding="utf-8")
+    )
+    catalog = build_work_catalog(
+        tmp_path / "clean-copy/runs", copied / "archive_manifest.json"
+    )
+
+    assert manifest["source_file_count"] == 7
+    assert sum(len(work.versions) for work in catalog.works) == 7
+    for entry in manifest["entries"]:
+        payload = (copied / entry["archive_relative"]).read_bytes()
+        assert _sha256(payload) == entry["sha256"]
+    from factory.pipeline_jobs import JobManager
+    from factory.workbench_service import WorkbenchService
+
+    service = WorkbenchService(
+        tmp_path / "clean-copy",
+        job_manager=JobManager(tmp_path / "clean-copy"),
+        provider_profile_loader=lambda: None,
+    )
+    assert len(service.list_works()) == 2
+
+
+def test_catalog_cache_reuses_unchanged_projects_and_invalidates_one_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from factory import work_catalog as module
+
+    runs = tmp_path / "runs"
+    first_project = _write_delivered_project(runs, project_id="first", revision=1)
+    _write_delivered_project(runs, project_id="second", revision=1)
+    calls: list[str] = []
+    original = module._delivered_work
+
+    def counted(project):
+        calls.append(project.canonical_path.name)
+        return original(project)
+
+    monkeypatch.setattr(module, "_delivered_work", counted)
+    cache = WorkCatalogCache(max_entries=8)
+    assert len(cache.build(runs, None).works) == 2
+    assert cache.entry_count <= 8
+    assert len(cache.build(runs, None).works) == 2
+    assert calls == ["first", "second"]
+
+    os.utime(first_project / "production_package.json", None)
+    assert len(cache.build(runs, None).works) == 2
+    assert calls == ["first", "second", "first"]
+
+
+def test_catalog_streams_large_master_without_read_bytes_materialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from factory.secure_posix import AnchoredDirectory
+
+    runs = tmp_path / "runs"
+    project = _write_delivered_project(runs, revision=1)
+    master = project / "stages/deliver/master.mp4"
+    with master.open("wb") as stream:
+        stream.seek(16 * 1024 * 1024 - 1)
+        stream.write(b"x")
+    with master.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    manifest_path = project / "stages/deliver/delivery_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["sha256"] = digest
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    revision = write_stage_revision(
+        project,
+        StageName.DELIVER,
+        (manifest_path, master),
+        "deliver-input",
+        "generic.deliver",
+    )
+    package_path = project / "production_package.json"
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    package["stages"][-1]["revision"] = revision.number
+    package_path.write_text(json.dumps(package), encoding="utf-8")
+    approve_stage_revision(
+        project,
+        StageName.DELIVER,
+        revision.number,
+        "Approved sparse master",
+        (master,),
+    )
+    original = AnchoredDirectory.read_bytes
+
+    def reject_media_materialization(self, path):
+        if Path(path).suffix == ".mp4":
+            raise AssertionError("catalog must stream media evidence")
+        return original(self, path)
+
+    monkeypatch.setattr(AnchoredDirectory, "read_bytes", reject_media_materialization)
+
+    catalog = build_work_catalog(runs, None)
+
+    assert catalog.works[0].versions[0].outputs[0].size_bytes == 16 * 1024 * 1024
 
 
 def test_migration_rejects_unsafe_roots(tmp_path: Path) -> None:
