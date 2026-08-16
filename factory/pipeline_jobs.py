@@ -488,6 +488,38 @@ class JobManager:
             self._recover_transitions_locked()
             return self._get_locked(job_id)
 
+    def project_jobs(
+        self,
+        project_id: str,
+        *,
+        operations: tuple[str, ...] = (),
+    ) -> tuple[JobRecord, ...]:
+        normalized_project = _safe_project_id(project_id)
+        normalized_operations = frozenset(
+            _validate_metadata_name(item, "operation") for item in operations
+        )
+        with self._mutation_lock():
+            self._recover_transitions_locked()
+            records = tuple(
+                JobRecord.from_dict(_read_object(path, anchor=self._anchor))
+                for path in self._job_record_paths_locked()
+            )
+        return tuple(
+            sorted(
+                (
+                    record
+                    for record in records
+                    if record.project_id == normalized_project
+                    and (
+                        not normalized_operations
+                        or record.operation in normalized_operations
+                    )
+                ),
+                key=lambda record: (record.updated_at, record.created_at, record.job_id),
+                reverse=True,
+            )
+        )
+
     def _get_locked(self, job_id: str) -> JobRecord:
         path = self._job_path(job_id)
         if not _regular_file_exists(path, anchor=self._anchor):

@@ -130,7 +130,7 @@ export function VideoViewer({
             <span>仅播放台词时段</span>
           </label>
         ) : null}
-        {onIssueAtTime ? (
+        {onIssueAtTime && selected.viewer?.shot_id ? (
           <button
             className="text-button issue-time-button"
             type="button"

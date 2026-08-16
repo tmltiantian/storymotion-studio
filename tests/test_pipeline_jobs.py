@@ -21,6 +21,30 @@ def test_job_survives_manager_restart(tmp_path: Path) -> None:
     assert (tmp_path / "runs/.workbench/jobs" / f"{job_id}.json").is_file()
 
 
+def test_project_jobs_returns_only_selected_project_operations_newest_first(
+    tmp_path: Path,
+) -> None:
+    manager = JobManager(tmp_path)
+    old = manager.submit(project_id="episode_01", operation="video_test", payload={})
+    manager.start(old)
+    manager.complete(old, result={})
+    ignored = manager.submit(project_id="episode_01", operation="run_stage", payload={})
+    manager.start(ignored)
+    manager.complete(ignored, result={})
+    latest = manager.submit(
+        project_id="episode_01", operation="video_generate", payload={}
+    )
+    other = manager.submit(project_id="episode_02", operation="video_generate", payload={})
+
+    records = manager.project_jobs(
+        "episode_01", operations=("video_test", "video_generate")
+    )
+
+    assert [record.job_id for record in records] == [latest, old]
+    assert ignored not in {record.job_id for record in records}
+    assert other not in {record.job_id for record in records}
+
+
 def test_same_project_rejects_second_mutating_job_after_restart(
     tmp_path: Path,
 ) -> None:

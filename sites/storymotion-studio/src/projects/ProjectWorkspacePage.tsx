@@ -21,15 +21,19 @@ import type {
   ApproveStageRequest,
   Artifact,
   ImpactRequest,
+  JobDetail,
   ProjectDetail,
   RequestChangesRequest,
   StageDetail,
   StageName,
+  VideoWorkspace,
 } from "../api/types";
 import { STAGES } from "../app/AppShell";
+import { JobProgress } from "../jobs/JobProgress";
+import { VideoPreflight } from "../jobs/VideoPreflight";
 import { StageViewer } from "../stages/StageViewer";
 import { ImpactDialog } from "./ImpactDialog";
-import { ReviewPanel } from "./ReviewPanel";
+import { ReviewPanel, type ReviewIssueDraft } from "./ReviewPanel";
 import { StageRail, stageLabel } from "./StageRail";
 import { useContainedSurface } from "./useContainedSurface";
 
@@ -37,15 +41,23 @@ export type ProjectWorkspaceApi = Pick<
   ApiClient,
   | "getProject"
   | "getStage"
+  | "getVideoWorkspace"
   | "approveStage"
   | "requestStageChanges"
   | "previewImpact"
   | "applyImpact"
+  | "preflightVideo"
+  | "confirmVideo"
+  | "testVideo"
+  | "generateVideo"
+  | "getJob"
+  | "resumeJob"
+  | "jobEventsUrl"
 >;
 
 type WorkspaceState =
   | { status: "loading" }
-  | { status: "ready"; project: ProjectDetail; stage: StageDetail }
+  | { status: "ready"; project: ProjectDetail; stage: StageDetail; videoWorkspace: VideoWorkspace | null }
   | { status: "busy" }
   | { status: "error" };
 
@@ -133,6 +145,67 @@ function ArtifactWorkspace({
   );
 }
 
+function VideoGenerationWorkspace({
+  api,
+  projectId,
+  workspace,
+}: {
+  api: ProjectWorkspaceApi;
+  projectId: string;
+  workspace: VideoWorkspace;
+}) {
+  const [selectedShotIds, setSelectedShotIds] = useState(
+    () => workspace.shots.map((shot) => shot.shot_id),
+  );
+  const [job, setJob] = useState<Pick<JobDetail, "job_id" | "status"> | null>(workspace.job);
+  const updateJob = useCallback((next: JobDetail) => {
+    setJob({ job_id: next.job_id, status: next.status });
+  }, []);
+  const generationLocked = Boolean(job && ["queued", "running", "failed"].includes(job.status));
+
+  return (
+    <section className="video-generation-workspace" aria-labelledby="video-generation-title">
+      <div className="video-generation-heading">
+        <div>
+          <p className="eyebrow">GENERATION</p>
+          <h2 id="video-generation-title">视频生成</h2>
+        </div>
+      </div>
+      <fieldset className="video-shot-selection" disabled={generationLocked}>
+        <legend>生成镜头</legend>
+        {workspace.shots.map((shot) => (
+          <label key={shot.shot_id}>
+            <input
+              type="checkbox"
+              checked={selectedShotIds.includes(shot.shot_id)}
+              onChange={() => setSelectedShotIds((current) => (
+                current.includes(shot.shot_id)
+                  ? current.filter((item) => item !== shot.shot_id)
+                  : workspace.shots
+                    .filter((item) => [...current, shot.shot_id].includes(item.shot_id))
+                    .map((item) => item.shot_id)
+              ))}
+            />
+            <span>{shot.shot_id}</span>
+            <time>{shot.duration_seconds.toFixed(2)} 秒</time>
+          </label>
+        ))}
+      </fieldset>
+      {job ? (
+        <JobProgress api={api} jobId={job.job_id} onJobChange={updateJob} />
+      ) : null}
+      {!generationLocked ? (
+        <VideoPreflight
+          api={api}
+          projectId={projectId}
+          shotIds={selectedShotIds}
+          onJobAccepted={(accepted) => setJob(accepted)}
+        />
+      ) : null}
+    </section>
+  );
+}
+
 function NavigationDrawer({
   project,
   selectedStage,
@@ -201,6 +274,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
   const [message, setMessage] = useState<WorkspaceMessage | null>(null);
   const [mutationPending, setMutationPending] = useState(false);
   const [impactDraft, setImpactDraft] = useState<ImpactDraft | null>(null);
+  const [reviewIssue, setReviewIssue] = useState<ReviewIssueDraft | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawerTriggerRef = useRef<HTMLButtonElement>(null);
   const impactTriggerRef = useRef<HTMLElement>(null);
@@ -230,20 +304,35 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
       let project: ProjectDetail;
       let selected: StageName;
       let stage: StageDetail;
+      let videoWorkspace: VideoWorkspace | null = null;
       if (selectedRouteStage) {
-        [project, stage] = await Promise.all([
+        const [loadedProject, loadedStage, loadedVideoWorkspace] = await Promise.all([
           api.getProject(id, controller.signal),
           api.getStage(id, selectedRouteStage, controller.signal),
+          selectedRouteStage === "video"
+            ? api.getVideoWorkspace(id, controller.signal)
+            : Promise.resolve(null),
         ]);
+        project = loadedProject;
+        stage = loadedStage;
+        videoWorkspace = loadedVideoWorkspace;
         selected = selectedRouteStage;
       } else {
         project = await api.getProject(id, controller.signal);
         selected = project.next_stage === "complete" ? "deliver" : project.next_stage;
-        stage = await api.getStage(id, selected, controller.signal);
+        [stage, videoWorkspace] = await Promise.all([
+          api.getStage(id, selected, controller.signal),
+          selected === "video"
+            ? api.getVideoWorkspace(id, controller.signal)
+            : Promise.resolve(null),
+        ]);
       }
       if (!mountedRef.current || generation !== loadGeneration.current) return;
       if (stage.stage !== selected) throw new Error("Stage response mismatch");
-      setState({ status: "ready", project, stage });
+      if (videoWorkspace && videoWorkspace.project_id !== project.project_id) {
+        throw new Error("Video workspace response mismatch");
+      }
+      setState({ status: "ready", project, stage, videoWorkspace });
     } catch (error) {
       if (!mountedRef.current || generation !== loadGeneration.current) return;
       setState({ status: errorCode(error) === "busy" ? "busy" : "error" });
@@ -260,6 +349,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
       setMutationPending(false);
       setMessage(null);
       setImpactDraft(null);
+      setReviewIssue(null);
       setDrawerOpen(false);
       if (!invalidStageRoute) void load(false);
     });
@@ -278,8 +368,8 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
 
   const runMutation = useCallback(async (
     operation: (signal: AbortSignal) => Promise<unknown>,
-  ) => {
-    if (mutationOwnerRef.current) return;
+  ): Promise<boolean> => {
+    if (mutationOwnerRef.current) return false;
     const owner: MutationOwner = {
       token: Symbol("workspace-mutation"),
       routeGeneration: routeGenerationRef.current,
@@ -297,13 +387,15 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
     );
     try {
       await operation(owner.controller.signal);
-      if (!isCurrentOwner()) return;
+      if (!isCurrentOwner()) return false;
       await load(false);
-      if (!isCurrentOwner()) return;
+      if (!isCurrentOwner()) return false;
+      return true;
     } catch (error) {
-      if (!isCurrentOwner() || owner.controller.signal.aborted) return;
+      if (!isCurrentOwner() || owner.controller.signal.aborted) return false;
       if (errorCode(error) === "stale_confirmation") await load(false);
       if (isCurrentOwner()) setMessage(mutationMessage(error));
+      return false;
     } finally {
       if (mutationOwnerRef.current?.token === owner.token) {
         mutationOwnerRef.current = null;
@@ -393,17 +485,32 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
         ) : null}
         <ArtifactWorkspace
           stage={stage}
-          onIssueAtTime={(time, artifact) => setMessage({
-            text: `已在 ${time.toFixed(3)} 秒标记 ${artifact.name}`,
-            tone: "neutral",
-          })}
+          onIssueAtTime={(time, artifact) => {
+            const shotId = artifact.viewer?.shot_id?.trim();
+            if (!shotId) return;
+            setReviewIssue({
+              key: `${artifact.artifact_id}:${time}`,
+              shotId,
+              artifactId: artifact.artifact_id,
+              timeSeconds: time,
+            });
+          }}
         />
+        {stage.stage === "video" && state.videoWorkspace ? (
+          <VideoGenerationWorkspace
+            key={`${project.project_id}:${state.videoWorkspace.job?.job_id ?? "new"}`}
+            api={api}
+            projectId={project.project_id}
+            workspace={state.videoWorkspace}
+          />
+        ) : null}
       </div>
 
       <ReviewPanel
         key={`${stage.stage}-${stage.revision}-${stage.artifacts.map((item) => item.artifact_id).join("-")}`}
         stage={stage}
         pending={mutationPending}
+        issueDraft={reviewIssue}
         onApprove={(request: ApproveStageRequest) => void runMutation(async (signal) => {
           const result = await api.approveStage(
             project.project_id,
@@ -418,9 +525,16 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
           }
           return result;
         })}
-        onRequestStageChanges={(request: RequestChangesRequest) => void runMutation((signal) =>
-          api.requestStageChanges(project.project_id, stage.stage, request, signal),
-        )}
+        onRequestStageChanges={async (request: RequestChangesRequest) => {
+          const issue = reviewIssue;
+          const success = await runMutation((signal) =>
+            api.requestStageChanges(project.project_id, stage.stage, request, signal));
+          if (success && issue) {
+            setReviewIssue(null);
+            setMessage({ text: "问题已提交到当前修订。", tone: "neutral" });
+          }
+          return success;
+        }}
         onOpenImpact={(request, issueLabel, description, trigger) => {
           impactTriggerRef.current = trigger;
           setImpactDraft({ request, issueLabel, description, trigger });

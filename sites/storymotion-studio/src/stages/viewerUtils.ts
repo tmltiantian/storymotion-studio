@@ -2,6 +2,21 @@ import type { Artifact } from "../api/types";
 
 export const MAX_TEXT_BYTES = 1024 * 1024;
 
+const TEXT_MEDIA_TYPES = new Set([
+  "text/plain",
+  "text/markdown",
+  "text/csv",
+  "text/tab-separated-values",
+  "text/vtt",
+  "application/json",
+  "application/x-subrip",
+]);
+
+function isAllowedTextMediaType(value: string): boolean {
+  const mediaType = value.split(";", 1)[0].trim().toLowerCase();
+  return TEXT_MEDIA_TYPES.has(mediaType) || /^application\/[a-z0-9.+-]+\+json$/.test(mediaType);
+}
+
 export function authorizedArtifactUrl(artifact: Artifact): string | null {
   try {
     const base = typeof window === "undefined" ? "http://localhost" : window.location.origin;
@@ -33,8 +48,12 @@ export async function fetchArtifactText(
     headers: { Accept: "text/plain, application/json" },
   });
   if (!response.ok) throw new Error("media_request_failed");
-  const announced = Number(response.headers.get("Content-Length") ?? "0");
-  if (Number.isFinite(announced) && announced > maxBytes) {
+  if (!isAllowedTextMediaType(response.headers.get("Content-Type") ?? "")) {
+    throw new Error("media_type_not_allowed");
+  }
+  const rawLength = response.headers.get("Content-Length")?.trim() ?? "";
+  const announced = /^\d+$/.test(rawLength) ? Number(rawLength) : null;
+  if (announced !== null && Number.isSafeInteger(announced) && announced > maxBytes) {
     throw new Error("media_too_large");
   }
   if (!response.body) {

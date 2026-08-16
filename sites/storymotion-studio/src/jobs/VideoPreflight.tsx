@@ -118,6 +118,7 @@ export function VideoPreflight({
     current &&
     confirmedIdentity === current.identity,
   );
+  const testSelectionAllowed = selectedShotIds.length >= 1 && selectedShotIds.length <= 3;
 
   const confirm = async () => {
     if (!current || !canConfirm) return;
@@ -214,8 +215,8 @@ export function VideoPreflight({
       {message ? <div className="preflight-message" role="status">{message}</div> : null}
       <div className="preflight-actions">
         <button className="text-button" type="button" disabled={!canConfirm} onClick={() => void confirm()}><Check aria-hidden="true" size={15} />{confirming ? "正在确认" : "确认费用与输入"}</button>
-        <button className="text-button" type="button" disabled={!isConfirmed || Boolean(submitting)} onClick={() => void submit("test")}><FlaskConical aria-hidden="true" size={15} />{submitting === "test" ? "正在提交" : "试生成所选镜头"}</button>
-        <button className="command-button" type="button" disabled={!isConfirmed || Boolean(submitting)} onClick={() => void submit("batch")}><Video aria-hidden="true" size={15} />{submitting === "batch" ? "正在提交" : "批量生成全片"}</button>
+        <button className="text-button" type="button" title={testSelectionAllowed ? "试生成所选镜头" : "试生成需选择一至三个镜头"} disabled={!isConfirmed || !testSelectionAllowed || Boolean(submitting)} onClick={() => void submit("test")}><FlaskConical aria-hidden="true" size={15} />{submitting === "test" ? "正在提交" : "试生成所选镜头"}</button>
+        <button className="command-button" type="button" disabled={!isConfirmed || Boolean(submitting)} onClick={() => void submit("batch")}><Video aria-hidden="true" size={15} />{submitting === "batch" ? "正在提交" : "批量生成所选镜头"}</button>
       </div>
     </section>
   );

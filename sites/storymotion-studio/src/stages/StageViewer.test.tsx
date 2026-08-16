@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -63,6 +63,32 @@ const videoArtifacts = [
     media_url: "/api/media/art_video_b",
     kind: "video",
     viewer: { fps: 30, width: 1920, height: 1080, shot_id: "shot_03" },
+  },
+] as Artifact[];
+
+const multipleShotVideos = [
+  ...videoArtifacts,
+  {
+    artifact_id: "art_video_shot_04",
+    name: "shot_04.mp4",
+    media_type: "video/mp4",
+    media_url: "/api/media/art_video_shot_04",
+    kind: "video",
+    viewer: { fps: 25, width: 1080, height: 1920, shot_id: "shot_04" },
+  },
+  {
+    artifact_id: "art_video_ungrouped_a",
+    name: "assembly-a.mp4",
+    media_type: "video/mp4",
+    media_url: "/api/media/art_video_ungrouped_a",
+    kind: "video",
+  },
+  {
+    artifact_id: "art_video_ungrouped_b",
+    name: "assembly-b.mp4",
+    media_type: "video/mp4",
+    media_url: "/api/media/art_video_ungrouped_b",
+    kind: "video",
   },
 ] as Artifact[];
 
@@ -135,6 +161,16 @@ describe("StageViewer registry", () => {
     expect(screen.queryByRole("checkbox", { name: "仅播放台词时段" })).not.toBeInTheDocument();
   });
 
+  it("groups candidates only within an authoritative shot and keeps other videos independent", () => {
+    render(<StageViewer stage="video" artifacts={multipleShotVideos} />);
+
+    expect(screen.getAllByTestId("stage-video")).toHaveLength(4);
+    expect(screen.getAllByRole("combobox", { name: "候选视频" })).toHaveLength(1);
+    expect(screen.getByRole("option", { name: "shot_03-candidate-1.mp4" })).toBeVisible();
+    expect(screen.getByRole("option", { name: "shot_03-candidate-2.mp4" })).toBeVisible();
+    expect(screen.queryByRole("option", { name: "shot_04.mp4" })).not.toBeInTheDocument();
+  });
+
   it("uses only registered media IDs and safely falls back for unsupported files", () => {
     const unsupported = {
       artifact_id: "art_archive",
@@ -181,6 +217,44 @@ describe("StageViewer registry", () => {
     expect(fetchMock.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
     unmount();
     expect((fetchMock.mock.calls[0]?.[1]?.signal as AbortSignal).aborted).toBe(true);
+  });
+
+  it("rejects HTML text responses and bounds bodies when content length is missing or malformed", async () => {
+    const artifact = {
+      artifact_id: "art_script",
+      name: "script.txt",
+      media_type: "text/plain",
+      media_url: "/api/media/art_script",
+      kind: "text",
+    } as Artifact;
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("<b>unsafe</b>", { headers: { "Content-Type": "text/html" } }))
+      .mockResolvedValueOnce(new Response("plain", { headers: { "Content-Type": "text/plain", "Content-Length": "not-a-number" } }));
+
+    const first = render(<StageViewer stage="script" artifacts={[artifact]} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法读取成果文件");
+    first.unmount();
+    render(<StageViewer stage="script" artifacts={[artifact]} />);
+    expect(await screen.findByText("plain")).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears audio state on rejection, ended, error, and unmount", async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockRejectedValueOnce(new Error("blocked"));
+    const view = render(<StageViewer stage="audio" artifacts={audioArtifacts} />);
+    await userEvent.click(screen.getByRole("button", { name: "播放 voiceover.m4a" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("音频无法播放");
+
+    play.mockResolvedValue(undefined);
+    await userEvent.click(screen.getByRole("button", { name: "播放 voiceover.m4a" }));
+    expect(await screen.findByRole("button", { name: "暂停 voiceover.m4a" })).toBeVisible();
+    const audio = screen.getAllByTestId("stage-audio")[0] as HTMLAudioElement;
+    fireEvent.ended(audio);
+    expect(screen.getByRole("button", { name: "播放 voiceover.m4a" })).toBeVisible();
+    fireEvent.error(audio);
+    expect(await screen.findByRole("alert")).toHaveTextContent("音频无法播放");
+    view.unmount();
+    expect(audio.pause).toHaveBeenCalled();
   });
 
   it("renders structured evaluation checks and safely falls back for unknown JSON", async () => {

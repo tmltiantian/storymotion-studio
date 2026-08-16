@@ -39,6 +39,7 @@ from .pipeline_store import (
     request_stage_changes,
 )
 from .provider_profile import ProviderProfile, resolve_provider_profile
+from .schema import episode_from_dict
 from .secure_posix import AnchoredDirectory
 from .shot_audio import write_shot_audio_assets
 from .video_handoff import write_video_handoff
@@ -411,6 +412,52 @@ class WorkbenchService:
         project = self.project_detail(project_id)
         return next(item for item in project["stages"] if item["stage"] == target.value)
 
+    def video_workspace(self, project_id: str) -> dict[str, Any]:
+        project = self._project_dir(project_id)
+        spec, _package = self._load_project_records(project)
+        registered = self._registered_json(
+            project_id,
+            stage="storyboard",
+            name="episode.json",
+        )
+        shots: list[dict[str, Any]] = []
+        if registered is not None:
+            _episode_ref, payload = registered
+            try:
+                episode = episode_from_dict(payload)
+            except (KeyError, TypeError, ValueError):
+                episode = None
+            if episode is not None and episode.project_id == spec.project_id:
+                seen: set[str] = set()
+                for shot in sorted(episode.shots, key=lambda item: item.index):
+                    shot_id = str(shot.id).strip()
+                    duration = float(shot.duration_seconds)
+                    if (
+                        not shot_id
+                        or shot_id in seen
+                        or not math.isfinite(duration)
+                        or duration <= 0
+                    ):
+                        shots = []
+                        break
+                    seen.add(shot_id)
+                    shots.append(
+                        {
+                            "shot_id": self._public_text(shot_id),
+                            "duration_seconds": duration,
+                        }
+                    )
+        jobs = self.jobs.project_jobs(
+            project_id,
+            operations=("video_test", "video_generate"),
+        )
+        return {
+            "schema_version": "motion-comic-factory.video-workspace.v1",
+            "project_id": spec.project_id,
+            "shots": shots,
+            "job": self._job_public(jobs[0]) if jobs else None,
+        }
+
     def _artifact_list(
         self, project_id: str, values: Sequence[str]
     ) -> list[dict[str, Any]]:
@@ -520,30 +567,35 @@ class WorkbenchService:
             return None
         return None
 
-    def _audio_dialogues(self, ref: _ArtifactRef) -> list[dict[str, Any]]:
+    def _registered_audio_timings(
+        self, project_id: str
+    ) -> tuple[_ArtifactRef, list[dict[str, Any]]] | None:
         registered = self._registered_json(
-            ref.project_id,
+            project_id,
             stage="audio",
             name="audio_manifest.json",
         )
         if registered is None:
-            return []
+            return None
         _manifest_ref, payload = registered
         if payload.get("schema_version") != "motion-comic-factory.audio.v1":
-            return []
+            return None
+        manifest_project = str(payload.get("project_id") or project_id)
+        if manifest_project != project_id:
+            return None
         source = self._register_artifact(
-            ref.project_id,
+            project_id,
             str(payload.get("voiceover_audio") or ""),
         )
-        if source is None or source.artifact_id != ref.artifact_id:
-            return []
+        if source is None:
+            return None
         raw_timings = payload.get("timings")
         if not isinstance(raw_timings, list):
-            return []
+            return None
         dialogues: list[dict[str, Any]] = []
         for index, item in enumerate(raw_timings):
             if not isinstance(item, Mapping):
-                return []
+                return None
             shot_id = str(item.get("shot_id") or "").strip()
             speaker = str(
                 item.get("speaker_name") or item.get("speaker") or ""
@@ -552,7 +604,7 @@ class WorkbenchService:
                 start = float(item["start_seconds"])
                 end = float(item["end_seconds"])
             except (KeyError, TypeError, ValueError):
-                return []
+                return None
             if (
                 not shot_id
                 or not speaker
@@ -561,9 +613,10 @@ class WorkbenchService:
                 or start < 0
                 or end <= start
             ):
-                return []
+                return None
             dialogue = {
-                "dialogue_id": f"{shot_id}:{index}",
+                "dialogue_id": self._public_text(f"{shot_id}:{index}"),
+                "shot_id": shot_id,
                 "speaker": self._public_text(speaker),
                 "start_seconds": start,
                 "end_seconds": end,
@@ -572,7 +625,71 @@ class WorkbenchService:
             if text:
                 dialogue["text"] = self._public_text(text)
             dialogues.append(dialogue)
-        return dialogues
+        return source, dialogues
+
+    def _audio_dialogues(self, ref: _ArtifactRef) -> list[dict[str, Any]]:
+        registered = self._registered_audio_timings(ref.project_id)
+        if registered is None:
+            return []
+        source, rows = registered
+        if source.artifact_id != ref.artifact_id:
+            return []
+        return [
+            {key: value for key, value in row.items() if key != "shot_id"}
+            for row in rows
+        ]
+
+    def _video_dialogues(
+        self, project_id: str, shot_id: str
+    ) -> list[dict[str, Any]]:
+        timings = self._registered_audio_timings(project_id)
+        episode_record = self._registered_json(
+            project_id,
+            stage="storyboard",
+            name="episode.json",
+        )
+        if timings is None or episode_record is None:
+            return []
+        _source, rows = timings
+        _episode_ref, payload = episode_record
+        try:
+            episode = episode_from_dict(payload)
+        except (KeyError, TypeError, ValueError):
+            return []
+        if episode.project_id != project_id:
+            return []
+        shot_start = 0.0
+        selected_duration: float | None = None
+        for shot in sorted(episode.shots, key=lambda item: item.index):
+            duration = float(shot.duration_seconds)
+            if not math.isfinite(duration) or duration <= 0:
+                return []
+            if shot.id == shot_id:
+                selected_duration = duration
+                break
+            shot_start += duration
+        if selected_duration is None:
+            return []
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            if row["shot_id"] != shot_id:
+                continue
+            start = float(row["start_seconds"]) - shot_start
+            end = float(row["end_seconds"]) - shot_start
+            if start < -0.001 or end <= start or end > selected_duration + 0.001:
+                return []
+            result.append(
+                {
+                    **{
+                        key: value
+                        for key, value in row.items()
+                        if key not in {"shot_id", "start_seconds", "end_seconds"}
+                    },
+                    "start_seconds": max(0.0, round(start, 3)),
+                    "end_seconds": min(selected_duration, round(end, 3)),
+                }
+            )
+        return result
 
     def _video_viewer_metadata(self, ref: _ArtifactRef) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -604,7 +721,10 @@ class WorkbenchService:
         if registered is None:
             return result
         _manifest_ref, payload = registered
-        if payload.get("schema_version") != "motion-comic-factory.video.v1":
+        if (
+            payload.get("schema_version") != "motion-comic-factory.video.v1"
+            or payload.get("project_id") != ref.project_id
+        ):
             return result
         clip_by_shot = payload.get("clip_by_shot")
         if isinstance(clip_by_shot, Mapping):
@@ -612,6 +732,11 @@ class WorkbenchService:
                 candidate = self._register_artifact(ref.project_id, str(raw_path))
                 if candidate is not None and candidate.artifact_id == ref.artifact_id:
                     result["shot_id"] = self._public_text(str(shot_id))
+                    dialogues = self._video_dialogues(
+                        ref.project_id, str(shot_id)
+                    )
+                    if dialogues:
+                        result["dialogues"] = dialogues
                     break
         return result
 

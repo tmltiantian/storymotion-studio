@@ -11,15 +11,18 @@ import {
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   Artifact,
   ImpactPlan,
   ImpactRequest,
+  JobDetail,
   ProjectDetail,
   StageDetail,
   StageName,
+  VideoPreflight,
+  VideoWorkspace,
 } from "../api/types";
 import {
   ProjectWorkspacePage,
@@ -145,6 +148,7 @@ function workspaceApi(
   return {
     getProject: vi.fn().mockResolvedValue(project),
     getStage: vi.fn().mockResolvedValue(selected),
+    getVideoWorkspace: vi.fn().mockResolvedValue(videoWorkspaceFixture()),
     approveStage: vi.fn().mockResolvedValue({
       ...selected,
       review_state: "approved",
@@ -156,7 +160,97 @@ function workspaceApi(
     }),
     previewImpact: vi.fn().mockResolvedValue(impactFixture()),
     applyImpact: vi.fn().mockResolvedValue(project),
+    preflightVideo: vi.fn().mockResolvedValue(videoPreflightFixture()),
+    confirmVideo: vi.fn().mockResolvedValue({
+      generation_token: "memory-only-token",
+      generation_request: generationRequest(videoPreflightFixture()),
+    }),
+    testVideo: vi.fn().mockResolvedValue({ job_id: "1".repeat(32), status: "queued" }),
+    generateVideo: vi.fn().mockResolvedValue({ job_id: "1".repeat(32), status: "queued" }),
+    getJob: vi.fn().mockResolvedValue(videoJob("completed")),
+    resumeJob: vi.fn().mockResolvedValue(videoJob("running")),
+    jobEventsUrl: vi.fn().mockReturnValue(`/api/jobs/${"1".repeat(32)}/events`),
   };
+}
+
+function videoWorkspaceFixture(job: JobDetail | null = null): VideoWorkspace {
+  return {
+    schema_version: "motion-comic-factory.video-workspace.v1",
+    project_id: "episode_01",
+    shots: [
+      { shot_id: "shot_03", duration_seconds: 5 },
+      { shot_id: "shot_04", duration_seconds: 4 },
+    ],
+    job,
+  };
+}
+
+function videoPreflightFixture(): VideoPreflight {
+  return {
+    schema_version: "motion-comic-factory.video-generation-request.v1",
+    project_id: "episode_01",
+    project_sha256: "a".repeat(64),
+    package_sha256: "b".repeat(64),
+    revision_hashes: { storyboard: "c".repeat(64) },
+    artifact_hashes: { art_storyboard: "d".repeat(64) },
+    approval_hashes: { storyboard: "e".repeat(64) },
+    repair_plan_sha256: "",
+    shot_ids: ["shot_03", "shot_04"],
+    shots: [
+      { shot_id: "shot_03", duration: 5, resolution: "768P" },
+      { shot_id: "shot_04", duration: 4, resolution: "768P" },
+    ],
+    provider: "minimax",
+    model: "MiniMax-H3",
+    resolution: "768P",
+    output_seconds: 9,
+    estimated_cost_yuan: 4.5,
+    price_yuan_per_second: 0.5,
+    ready: true,
+    blockers: [],
+  };
+}
+
+function generationRequest(value: VideoPreflight) {
+  const request = { ...value };
+  delete (request as Partial<VideoPreflight>).ready;
+  delete (request as Partial<VideoPreflight>).blockers;
+  return request;
+}
+
+function videoJob(status: JobDetail["status"]): JobDetail {
+  return {
+    job_id: "1".repeat(32),
+    project_id: "episode_01",
+    operation: "video_generate",
+    status,
+    created_at: "2026-08-16T00:00:00Z",
+    updated_at: "2026-08-16T00:01:00Z",
+    provider_tasks: {
+      shot_03: { status: "completed" },
+      shot_04: { status: "completed" },
+    },
+    result: { total_shots: 2 },
+    error: status === "failed" ? "interrupted" : "",
+    resume_count: 0,
+    last_event_sequence: 4,
+  };
+}
+
+function videoStageFixture(): StageDetail {
+  return stageFixture({
+    stage: "video",
+    artifacts: [
+      {
+        artifact_id: "art_candidate_03",
+        name: "shot_03.mp4",
+        media_type: "video/mp4",
+        media_url: "/api/media/art_candidate_03",
+        kind: "video",
+        viewer: { shot_id: "shot_03", fps: 25, width: 1080, height: 1920 },
+      },
+    ],
+  });
 }
 
 function LocationProbe() {
@@ -221,6 +315,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+beforeEach(() => {
+  vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+  vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
+});
+
 describe("project review workspace", () => {
   it("loads a deep-linked project and stage in parallel and shows both states", async () => {
     let resolveProject: (value: ProjectDetail) => void = () => undefined;
@@ -262,6 +361,97 @@ describe("project review workspace", () => {
 
     expect(open).toHaveAttribute("href", "/api/media/art_storyboard_preview");
     expect(image.compareDocumentPosition(review) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("runs the paid video flow once and recovers the persisted job on remount", async () => {
+    const selected = videoStageFixture();
+    const project = projectFixture(selected);
+    const persisted = videoJob("completed");
+    const api = workspaceApi(selected, project);
+    let discoveredJob: JobDetail | null = null;
+    vi.mocked(api.getVideoWorkspace).mockImplementation(async () => videoWorkspaceFixture(discoveredJob));
+    vi.mocked(api.generateVideo).mockImplementation(async () => {
+      discoveredJob = persisted;
+      return { job_id: persisted.job_id, status: "queued" };
+    });
+    const user = userEvent.setup();
+    const first = renderWorkspace(api, "/projects/episode_01/stages/video");
+
+    expect(await screen.findByText("视频生成预检")).toBeVisible();
+    const shots = screen.getByRole("group", { name: "生成镜头" });
+    expect(within(shots).getByRole("checkbox", { name: /shot_03/ })).toBeChecked();
+    expect(within(shots).getByRole("checkbox", { name: /shot_04/ })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
+    await user.click(await screen.findByRole("button", { name: "批量生成所选镜头" }));
+
+    expect(api.confirmVideo).toHaveBeenCalledWith("episode_01", ["shot_03", "shot_04"]);
+    expect(api.generateVideo).toHaveBeenCalledTimes(1);
+    expect(api.generateVideo).toHaveBeenCalledWith("episode_01", {
+      generation_token: "memory-only-token",
+      generation_request: generationRequest(videoPreflightFixture()),
+    });
+    expect(await screen.findByText("生成完成")).toBeVisible();
+    first.unmount();
+
+    renderWorkspace(api, "/projects/episode_01/stages/video");
+    expect(await screen.findByText("生成完成")).toBeVisible();
+    expect(api.getVideoWorkspace).toHaveBeenLastCalledWith("episode_01", expect.any(AbortSignal));
+    expect(api.generateVideo).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers a failed persisted video job and resumes without generating again", async () => {
+    const selected = videoStageFixture();
+    const api = workspaceApi(selected, projectFixture(selected));
+    const failed = videoJob("failed");
+    const running = { ...videoJob("running"), resume_count: 1 };
+    vi.mocked(api.getVideoWorkspace).mockResolvedValue(videoWorkspaceFixture(failed));
+    vi.mocked(api.getJob).mockResolvedValueOnce(failed).mockResolvedValue(running);
+    vi.mocked(api.resumeJob).mockResolvedValue({ job_id: failed.job_id, status: "queued" });
+    const user = userEvent.setup();
+    renderWorkspace(api, "/projects/episode_01/stages/video");
+
+    await user.click(await screen.findByRole("button", { name: "恢复生成" }));
+
+    expect(api.resumeJob).toHaveBeenCalledWith(failed.job_id);
+    expect(await screen.findByText("生成中")).toBeVisible();
+    expect(api.generateVideo).not.toHaveBeenCalled();
+    expect(api.testVideo).not.toHaveBeenCalled();
+  });
+
+  it("prefills a timecoded video issue and claims success only after persistence", async () => {
+    const selected = videoStageFixture();
+    const changed = { ...selected, review_state: "changes_requested" as const };
+    const api = workspaceApi(selected, projectFixture(selected));
+    vi.mocked(api.getProject)
+      .mockResolvedValueOnce(projectFixture(selected))
+      .mockResolvedValueOnce(projectFixture(changed));
+    vi.mocked(api.getStage).mockResolvedValueOnce(selected).mockResolvedValueOnce(changed);
+    const user = userEvent.setup();
+    renderWorkspace(api, "/projects/episode_01/stages/video");
+    const video = await screen.findByTestId("stage-video") as HTMLVideoElement;
+    video.currentTime = 2.375;
+
+    await user.click(screen.getByRole("button", { name: "在当前时间标记问题" }));
+    const description = screen.getByRole("textbox", { name: "问题说明" });
+    expect(description).toHaveValue(
+      "镜头 shot_03\n候选成果 art_candidate_03\n时间码 2.375 秒\n",
+    );
+    expect(api.requestStageChanges).not.toHaveBeenCalled();
+    expect(screen.queryByText("问题已提交到当前修订。")).not.toBeInTheDocument();
+
+    await user.type(description, "角色动作断裂。");
+    await user.click(screen.getByRole("button", { name: "退回整阶段" }));
+
+    expect(api.requestStageChanges).toHaveBeenCalledWith(
+      "episode_01",
+      "video",
+      {
+        revision: 4,
+        reason: "[整体成果需调整] 镜头 shot_03\n候选成果 art_candidate_03\n时间码 2.375 秒\n角色动作断裂。",
+      },
+      expect.any(AbortSignal),
+    );
+    expect(await screen.findByText("问题已提交到当前修订。")).toBeVisible();
   });
 
   it("exposes all nine stages as stable links with textual current semantics", async () => {

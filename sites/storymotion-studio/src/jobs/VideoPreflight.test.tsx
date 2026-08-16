@@ -70,11 +70,11 @@ describe("VideoPreflight paid gate", () => {
 
     expect(await screen.findByText("shot_02、shot_03")).toBeVisible();
     expect(screen.getByText("¥18.60")).toBeVisible();
-    const batch = screen.getByRole("button", { name: "批量生成全片" });
+    const batch = screen.getByRole("button", { name: "批量生成所选镜头" });
     expect(batch).toBeDisabled();
 
     await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
-    expect(await screen.findByRole("button", { name: "批量生成全片" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "批量生成所选镜头" })).toBeEnabled();
     expect(document.body).not.toHaveTextContent("secret-generation-token");
   });
 
@@ -87,7 +87,7 @@ describe("VideoPreflight paid gate", () => {
 
     await screen.findByText("¥18.14");
     await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
-    const batch = await screen.findByRole("button", { name: "批量生成全片" });
+    const batch = await screen.findByRole("button", { name: "批量生成所选镜头" });
     await user.dblClick(batch);
 
     expect(client.generateVideo).toHaveBeenCalledTimes(1);
@@ -111,7 +111,29 @@ describe("VideoPreflight paid gate", () => {
       generation_token: "secret-generation-token",
       generation_request: request(),
     });
-    expect(screen.getByRole("button", { name: "批量生成全片" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "批量生成所选镜头" })).toBeDisabled();
+  });
+
+  it("keeps test generation disabled when more than three shots are selected", async () => {
+    const user = userEvent.setup();
+    const canonical = request({
+      shot_ids: ["shot_01", "shot_02", "shot_03", "shot_04"],
+      shots: ["shot_01", "shot_02", "shot_03", "shot_04"].map((shot_id) => ({
+        shot_id,
+        duration: 5,
+        resolution: "720x1280",
+      })),
+      output_seconds: 20,
+    });
+    const client = api({ ...canonical, ready: true, blockers: [] });
+    vi.mocked(client.confirmVideo).mockResolvedValue(confirmed(canonical));
+    render(<VideoPreflight api={client} projectId="episode_01" shotIds={canonical.shot_ids} />);
+
+    await screen.findByText("shot_01、shot_02、shot_03、shot_04");
+    await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
+
+    expect(screen.getByRole("button", { name: "试生成所选镜头" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "批量生成所选镜头" })).toBeEnabled();
   });
 
   it("invalidates confirmation when selection or preflight identity changes", async () => {
@@ -122,7 +144,7 @@ describe("VideoPreflight paid gate", () => {
     );
     await screen.findByText("¥18.60");
     await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
-    expect(screen.getByRole("button", { name: "批量生成全片" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "批量生成所选镜头" })).toBeEnabled();
 
     vi.mocked(client.preflightVideo).mockResolvedValueOnce(
       estimate({
@@ -137,7 +159,7 @@ describe("VideoPreflight paid gate", () => {
     rerender(<VideoPreflight api={client} projectId="episode_01" shotIds={["shot_03"]} />);
 
     expect(await screen.findByText("seedance-2-0")).toBeVisible();
-    expect(screen.getByRole("button", { name: "批量生成全片" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "批量生成所选镜头" })).toBeDisabled();
     expect(client.preflightVideo).toHaveBeenLastCalledWith("episode_01", ["shot_03"]);
   });
 
@@ -160,7 +182,7 @@ describe("VideoPreflight paid gate", () => {
     await act(async () => resolveConfirm(confirmed()));
 
     await screen.findByText("shot_03");
-    expect(screen.getByRole("button", { name: "批量生成全片" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "批量生成所选镜头" })).toBeDisabled();
   });
 
   it("requires a new preflight after stale confirmation and keeps blockers disabled", async () => {
@@ -179,7 +201,7 @@ describe("VideoPreflight paid gate", () => {
 
     expect(await screen.findByText("分镜修订已变化")).toBeVisible();
     expect(screen.getByRole("button", { name: "确认费用与输入" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "批量生成全片" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "批量生成所选镜头" })).toBeDisabled();
     await waitFor(() => expect(client.preflightVideo).toHaveBeenCalledTimes(2));
   });
 });

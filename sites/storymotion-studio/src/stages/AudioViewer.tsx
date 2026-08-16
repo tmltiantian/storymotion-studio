@@ -1,5 +1,5 @@
 import { Pause, Play } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { Artifact, DialogueTiming } from "../api/types";
 import { authorizedArtifactUrl, formatMediaTime } from "./viewerUtils";
@@ -7,13 +7,16 @@ import { authorizedArtifactUrl, formatMediaTime } from "./viewerUtils";
 export function AudioViewer({
   artifact,
   onActivate,
+  onRelease,
 }: {
   artifact: Artifact;
   onActivate: (artifactId: string, media: HTMLAudioElement) => void;
+  onRelease: (artifactId: string, media: HTMLAudioElement) => void;
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const segmentEndRef = useRef<number | null>(null);
   const [playing, setPlaying] = useState(false);
+  const [playError, setPlayError] = useState(false);
   const url = authorizedArtifactUrl(artifact);
   const dialogues = artifact.viewer?.dialogues ?? [];
 
@@ -27,8 +30,33 @@ export function AudioViewer({
     } else {
       segmentEndRef.current = null;
     }
-    await audio.play();
-    setPlaying(true);
+    setPlayError(false);
+    try {
+      await audio.play();
+      setPlaying(true);
+    } catch {
+      segmentEndRef.current = null;
+      setPlaying(false);
+      setPlayError(true);
+      onRelease(artifact.artifact_id, audio);
+    }
+  };
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    return () => {
+      if (!audio) return;
+      audio.pause();
+      segmentEndRef.current = null;
+      onRelease(artifact.artifact_id, audio);
+    };
+  }, [artifact.artifact_id, onRelease]);
+
+  const release = () => {
+    const audio = audioRef.current;
+    segmentEndRef.current = null;
+    setPlaying(false);
+    if (audio) onRelease(artifact.artifact_id, audio);
   };
 
   if (!url) return <div className="viewer-state viewer-state-error">{artifact.name} 无法安全打开</div>;
@@ -42,9 +70,15 @@ export function AudioViewer({
         preload="metadata"
         onPlay={() => {
           if (audioRef.current) onActivate(artifact.artifact_id, audioRef.current);
+          setPlayError(false);
           setPlaying(true);
         }}
-        onPause={() => setPlaying(false)}
+        onPause={release}
+        onEnded={release}
+        onError={() => {
+          setPlayError(true);
+          release();
+        }}
         onTimeUpdate={() => {
           const audio = audioRef.current;
           if (audio && segmentEndRef.current !== null && audio.currentTime >= segmentEndRef.current) {
@@ -53,6 +87,7 @@ export function AudioViewer({
           }
         }}
       />
+      {playError ? <p className="viewer-honesty" role="alert">音频无法播放</p> : null}
       <button
         className="text-button audio-master-button"
         type="button"

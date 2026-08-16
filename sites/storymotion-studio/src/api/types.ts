@@ -237,6 +237,18 @@ export interface JobEvent {
   created_at: string;
 }
 
+export interface VideoWorkspaceShot {
+  shot_id: string;
+  duration_seconds: number;
+}
+
+export interface VideoWorkspace {
+  schema_version: "motion-comic-factory.video-workspace.v1";
+  project_id: string;
+  shots: VideoWorkspaceShot[];
+  job: JobDetail | null;
+}
+
 export interface ProviderCapability {
   provider: string;
   model: string;

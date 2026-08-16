@@ -217,6 +217,183 @@ def test_artifact_viewer_projection_uses_registered_audio_manifest_without_paths
     assert "voiceover_audio" not in encoded
 
 
+def test_video_workspace_and_dialogues_use_registered_authoritative_contracts(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "runs" / "episode_video"
+    storyboard = project / "stages" / "storyboard"
+    audio_dir = project / "stages" / "audio"
+    video_dir = project / "stages" / "video"
+    for directory in (storyboard, audio_dir, video_dir):
+        directory.mkdir(parents=True)
+    episode = storyboard / "episode.json"
+    episode.write_text(
+        json.dumps(
+            {
+                "project_id": "episode_video",
+                "title": "Video Episode",
+                "language": "zh-CN",
+                "style": "motion comic",
+                "target_aspect_ratio": "9:16",
+                "target_resolution": "1080x1920",
+                "characters": [],
+                "shots": [
+                    {
+                        "id": "shot_01",
+                        "index": 1,
+                        "scene_title": "一",
+                        "action": "等待",
+                        "visual_prompt": "室内",
+                        "camera": "locked",
+                        "duration_seconds": 4.0,
+                        "audio_mood": "quiet",
+                        "dialogue": [],
+                    },
+                    {
+                        "id": "shot_02",
+                        "index": 2,
+                        "scene_title": "二",
+                        "action": "回应",
+                        "visual_prompt": "室内",
+                        "camera": "medium",
+                        "duration_seconds": 5.0,
+                        "audio_mood": "warm",
+                        "dialogue": [],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    voiceover = audio_dir / "voiceover.m4a"
+    voiceover.write_bytes(b"voice")
+    audio_manifest = audio_dir / "audio_manifest.json"
+    audio_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "motion-comic-factory.audio.v1",
+                "project_id": "episode_video",
+                "voiceover_audio": str(voiceover.resolve()),
+                "timings": [
+                    {
+                        "shot_id": "shot_02",
+                        "speaker_name": "旁白",
+                        "start_seconds": 4.5,
+                        "end_seconds": 5.75,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    clip = video_dir / "shot_02.mp4"
+    clip.write_bytes(b"video")
+    video_manifest = video_dir / "video_manifest.json"
+    video_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "motion-comic-factory.video.v1",
+                "project_id": "episode_video",
+                "clip_by_shot": {"shot_02": str(clip.resolve())},
+            }
+        ),
+        encoding="utf-8",
+    )
+    spec = ProjectSpec(
+        project_id="episode_video",
+        title="Video Episode",
+        mode=ProjectMode.ORIGINAL,
+        input={"kind": "idea", "text": "Video viewer"},
+        output_dir=project / "output",
+        target={"fps": 25, "resolution": "1080x1920"},
+    )
+    package = create_project(project, spec)
+    replacements = {
+        "storyboard": (episode,),
+        "audio": (audio_manifest, voiceover),
+        "video": (video_manifest, clip),
+    }
+    stages = tuple(
+        replace(item, state=StageState.PASSED, artifacts=replacements[item.stage.value])
+        if item.stage.value in replacements
+        else item
+        for item in package.stages
+    )
+    (project / "production_package.json").write_text(
+        json.dumps(package.with_stages(stages).to_dict(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    manager = JobManager(tmp_path)
+    old_job = manager.submit(
+        project_id="episode_video",
+        operation="video_test",
+        payload={"generation_request": _video_request("episode_video")},
+    )
+    manager.start(old_job)
+    manager.complete(old_job, result={})
+    latest_job = manager.submit(
+        project_id="episode_video",
+        operation="video_generate",
+        payload={"generation_request": _video_request("episode_video")},
+    )
+    service = WorkbenchService(
+        tmp_path,
+        job_manager=manager,
+        provider_profile_loader=lambda: None,
+    )
+
+    workspace = service.video_workspace("episode_video")
+    detail = service.stage_detail("episode_video", "video")
+    descriptor = next(item for item in detail["artifacts"] if item["name"] == "shot_02.mp4")
+    encoded = json.dumps({"workspace": workspace, "detail": detail}, ensure_ascii=False)
+
+    assert workspace == {
+        "schema_version": "motion-comic-factory.video-workspace.v1",
+        "project_id": "episode_video",
+        "shots": [
+            {"shot_id": "shot_01", "duration_seconds": 4.0},
+            {"shot_id": "shot_02", "duration_seconds": 5.0},
+        ],
+        "job": service.job_detail(latest_job),
+    }
+    assert descriptor["viewer"] == {
+        "size_bytes": len(b"video"),
+        "fps": 25,
+        "width": 1080,
+        "height": 1920,
+        "shot_id": "shot_02",
+        "dialogues": [
+            {
+                "dialogue_id": "shot_02:0",
+                "speaker": "旁白",
+                "start_seconds": 0.5,
+                "end_seconds": 1.75,
+            }
+        ],
+    }
+    assert str(tmp_path) not in encoded
+    assert "generation_request" not in encoded
+
+    video_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "motion-comic-factory.video.v1",
+                "project_id": "another_project",
+                "clip_by_shot": {"shot_02": str(clip.resolve())},
+            }
+        ),
+        encoding="utf-8",
+    )
+    changed = service.stage_detail("episode_video", "video")
+    changed_descriptor = next(
+        item for item in changed["artifacts"] if item["name"] == "shot_02.mp4"
+    )
+    assert "shot_id" not in changed_descriptor["viewer"]
+    assert "dialogues" not in changed_descriptor["viewer"]
+
+
 def test_job_detail_includes_persisted_last_event_sequence(
     service: WorkbenchService,
 ) -> None:

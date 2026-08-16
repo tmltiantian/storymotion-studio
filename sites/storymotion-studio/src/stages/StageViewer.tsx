@@ -1,5 +1,5 @@
 import { FileDown, FileWarning } from "lucide-react";
-import { useRef } from "react";
+import { useCallback, useRef } from "react";
 
 import type { Artifact, ArtifactKind, StageName } from "../api/types";
 import { AudioViewer } from "./AudioViewer";
@@ -59,23 +59,37 @@ export function StageViewer({
   onIssueAtTime?: (time: number, artifact: Artifact) => void;
 }) {
   const activeAudio = useRef<{ id: string; media: HTMLAudioElement } | null>(null);
-  const videoArtifacts = artifacts.filter((artifact) => viewerKind(stage, artifact) === "video");
-  const firstVideoId = videoArtifacts[0]?.artifact_id;
+  const activateAudio = useCallback((id: string, media: HTMLAudioElement) => {
+    if (activeAudio.current && activeAudio.current.media !== media) {
+      activeAudio.current.media.pause();
+    }
+    activeAudio.current = { id, media };
+  }, []);
+  const releaseAudio = useCallback((id: string, media: HTMLAudioElement) => {
+    if (activeAudio.current?.id === id && activeAudio.current.media === media) {
+      activeAudio.current = null;
+    }
+  }, []);
+  const renderedVideoShots = new Set<string>();
   return (
     <div className="stage-viewer-list">
       {artifacts.map((artifact) => {
         const kind = viewerKind(stage, artifact);
         if (kind === "video") {
-          if (artifact.artifact_id !== firstVideoId) return null;
-          return <ArtifactFrame artifact={artifact} key="stage-video-viewer"><VideoViewer artifacts={videoArtifacts} onIssueAtTime={onIssueAtTime} /></ArtifactFrame>;
+          const shotId = artifact.viewer?.shot_id?.trim();
+          if (shotId) {
+            if (renderedVideoShots.has(shotId)) return null;
+            renderedVideoShots.add(shotId);
+          }
+          const candidates = shotId
+            ? artifacts.filter((item) => viewerKind(stage, item) === "video" && item.viewer?.shot_id?.trim() === shotId)
+            : [artifact];
+          return <ArtifactFrame artifact={artifact} key={`stage-video-${shotId || artifact.artifact_id}`}><VideoViewer artifacts={candidates} onIssueAtTime={onIssueAtTime} /></ArtifactFrame>;
         }
         if (kind === "image") return <ArtifactFrame artifact={artifact} key={artifact.artifact_id}><ImageViewer artifact={artifact} /></ArtifactFrame>;
         if (kind === "audio") return (
           <ArtifactFrame artifact={artifact} key={artifact.artifact_id}>
-            <AudioViewer artifact={artifact} onActivate={(id, media) => {
-              if (activeAudio.current && activeAudio.current.id !== id) activeAudio.current.media.pause();
-              activeAudio.current = { id, media };
-            }} />
+            <AudioViewer artifact={artifact} onActivate={activateAudio} onRelease={releaseAudio} />
           </ArtifactFrame>
         );
         if (kind === "eval") return <ArtifactFrame artifact={artifact} key={artifact.artifact_id}><EvalViewer artifact={artifact} /></ArtifactFrame>;

@@ -72,4 +72,23 @@ describe("Task 5 API contracts", () => {
 
     expect(response).toEqual({ job_id: "b".repeat(32), status: "queued" });
   });
+
+  it("loads the authoritative video workspace through the project contract", async () => {
+    const payload = {
+      schema_version: "motion-comic-factory.video-workspace.v1",
+      project_id: "episode_01",
+      shots: [{ shot_id: "shot_03", duration_seconds: 5 }],
+      job: null,
+    };
+    const fetchFake = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } }),
+    );
+    const client = createApiClient({ baseUrl: "http://127.0.0.1:8787", fetch: fetchFake });
+
+    await expect(client.getVideoWorkspace("episode_01")).resolves.toEqual(payload);
+    expect(fetchFake).toHaveBeenCalledWith(
+      "http://127.0.0.1:8787/api/projects/episode_01/video/workspace",
+      expect.objectContaining({ headers: expect.objectContaining({ Accept: "application/json" }) }),
+    );
+  });
 });
