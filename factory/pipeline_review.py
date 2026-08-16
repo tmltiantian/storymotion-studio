@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .file_io import sha256_file, write_json_atomic
 from .media_types import validate_media_type
@@ -336,6 +336,28 @@ def _delivery_artifact_snapshot(
     }
 
 
+def canonical_review_snapshot(
+    review: StageReview,
+    artifact_snapshot: Callable[[ArtifactRevision], Mapping[str, str]],
+) -> dict[str, Any]:
+    evidence: list[dict[str, str]] = []
+    for artifact in review.evidence:
+        snapshot = dict(artifact_snapshot(artifact))
+        if set(snapshot) != {"path", "sha256", "media_type"}:
+            raise ValueError("Review evidence snapshot is invalid")
+        evidence.append(snapshot)
+    return {
+        "schema_version": REVIEW_SCHEMA,
+        "stage": review.stage.value,
+        "revision": review.revision,
+        "state": review.state.value,
+        "note": review.note,
+        "evidence": evidence,
+        "created_at": review.created_at,
+        "transaction_id": review.transaction_id,
+    }
+
+
 def delivery_eval_evidence(project_dir: str | Path) -> dict[str, Any]:
     root = Path(project_dir).expanduser().resolve()
     package = ProductionPackage.from_dict(
@@ -414,23 +436,14 @@ def delivery_eval_evidence(project_dir: str | Path) -> dict[str, Any]:
         ):
             raise ValueError("EVAL must have current durable approval before delivery")
         review = validation.review
-        review_snapshot: dict[str, Any] = {
-            "schema_version": REVIEW_SCHEMA,
-            "stage": review.stage.value,
-            "revision": review.revision,
-            "state": review.state.value,
-            "note": review.note,
-            "evidence": [
-                _delivery_artifact_snapshot(
-                    root,
-                    artifact,
-                    require_project_path=False,
-                )
-                for artifact in review.evidence
-            ],
-            "created_at": review.created_at,
-            "transaction_id": review.transaction_id,
-        }
+        review_snapshot = canonical_review_snapshot(
+            review,
+            lambda artifact: _delivery_artifact_snapshot(
+                root,
+                artifact,
+                require_project_path=False,
+            ),
+        )
         evidence["review"] = {
             "snapshot": review_snapshot,
             "sha256": canonical_json_digest(review_snapshot),
@@ -527,7 +540,13 @@ def _transaction_ownership_issue(
     return ""
 
 
-def validate_stage_review(project_dir: str | Path, stage: StageName) -> ReviewValidation:
+def validate_stage_review(
+    project_dir: str | Path,
+    stage: StageName,
+    *,
+    expected_revision: StageRevision | None = None,
+    expected_review: StageReview | None = None,
+) -> ReviewValidation:
     target = StageName(stage)
     try:
         from .pipeline_store import (
@@ -550,6 +569,8 @@ def validate_stage_review(project_dir: str | Path, stage: StageName) -> ReviewVa
         review = StageReview.from_dict(payload)
         if review.stage is not target or review.state is not ReviewState.APPROVED:
             return ReviewValidation(False, "Review record is not an approval")
+        if expected_review is not None and review != expected_review:
+            return ReviewValidation(False, "Review record changed during validation")
         ownership_issue = _transaction_ownership_issue(project_dir, review)
         if ownership_issue:
             return ReviewValidation(False, ownership_issue, review)
@@ -557,6 +578,8 @@ def validate_stage_review(project_dir: str | Path, stage: StageName) -> ReviewVa
         if not revisions or review.revision != revisions[-1].number:
             return ReviewValidation(False, "Review does not apply to the latest revision")
         revision = _current_revision(project_dir, target, review.revision)
+        if expected_revision is not None and revision != expected_revision:
+            return ReviewValidation(False, "Review does not match the bound revision")
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return ReviewValidation(False, f"Review record is unreadable: {exc}")
     integrity_issue = _artifact_integrity_issue(revision.artifacts)

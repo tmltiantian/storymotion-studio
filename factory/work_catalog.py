@@ -30,9 +30,12 @@ from .pipeline_review import (
     REVIEW_SCHEMA,
     REVISIONS_SCHEMA,
     ApprovalPreset,
+    ArtifactRevision,
     ReviewConfig,
+    StageReview,
     StageRevision,
     canonical_json_digest,
+    canonical_review_snapshot,
     resolve_review_config,
     validate_stage_review,
 )
@@ -629,57 +632,36 @@ def _delivery_eval_reports(
         if not isinstance(review, Mapping) or set(review) != {"snapshot", "sha256"}:
             return ()
         review_snapshot = review.get("snapshot")
+        if not isinstance(review_snapshot, Mapping):
+            return ()
+        try:
+            durable_payload = _read_json(project, "reviews/eval.review.json")
+            if durable_payload.get("schema_version") != REVIEW_SCHEMA:
+                return ()
+            durable_review = StageReview.from_dict(durable_payload)
+        except (KeyError, OSError, TypeError, ValueError):
+            return ()
+        validation = validate_stage_review(
+            project.canonical_path,
+            StageName.EVAL,
+            expected_revision=selected,
+            expected_review=durable_review,
+        )
+        if not validation.valid or validation.review != durable_review:
+            return ()
+        try:
+            durable_snapshot = canonical_review_snapshot(
+                durable_review,
+                lambda artifact: _catalog_review_artifact_snapshot(project, artifact),
+            )
+        except (OSError, TypeError, ValueError):
+            return ()
         if (
-            not isinstance(review_snapshot, Mapping)
+            dict(review_snapshot) != durable_snapshot
             or str(review.get("sha256") or "")
-            != canonical_json_digest(review_snapshot)
-            or set(review_snapshot)
-            != {
-                "schema_version",
-                "stage",
-                "revision",
-                "state",
-                "note",
-                "evidence",
-                "created_at",
-                "transaction_id",
-            }
-            or review_snapshot.get("schema_version") != REVIEW_SCHEMA
-            or review_snapshot.get("stage") != StageName.EVAL.value
-            or review_snapshot.get("revision") != revision_number
-            or review_snapshot.get("state") != ReviewState.APPROVED.value
-            or not isinstance(review_snapshot.get("note"), str)
-            or not str(review_snapshot.get("note") or "").strip()
-            or not isinstance(review_snapshot.get("created_at"), str)
-            or not isinstance(review_snapshot.get("transaction_id"), str)
+            != canonical_json_digest(durable_snapshot)
         ):
             return ()
-        review_evidence = review_snapshot.get("evidence")
-        if not isinstance(review_evidence, list) or not review_evidence:
-            return ()
-        seen_review_evidence: set[str] = set()
-        for item in review_evidence:
-            if not isinstance(item, Mapping) or set(item) != {
-                "path",
-                "sha256",
-                "media_type",
-            }:
-                return ()
-            evidence_path = str(item.get("path") or "")
-            evidence_digest = str(item.get("sha256") or "")
-            try:
-                validate_media_type(item.get("media_type"))
-            except ValueError:
-                return ()
-            if (
-                not evidence_path
-                or len(evidence_path) > 4096
-                or any(unicodedata.category(character) == "Cc" for character in evidence_path)
-                or evidence_path in seen_review_evidence
-                or _HASH.fullmatch(evidence_digest) is None
-            ):
-                return ()
-            seen_review_evidence.add(evidence_path)
     requested: dict[str, str] = {}
     for item in raw_reports:
         if not isinstance(item, Mapping) or set(item) != {
@@ -708,6 +690,27 @@ def _delivery_eval_reports(
         )
         for relative, digest in sorted(requested.items())
     )
+
+
+def _catalog_review_artifact_snapshot(
+    project: AnchoredDirectory,
+    artifact: ArtifactRevision,
+) -> dict[str, str]:
+    path = Path(artifact.path).expanduser()
+    try:
+        relative = project.relative_path(path)
+    except ValueError:
+        stored_path = str(path.resolve())
+    else:
+        relative, evidence = _stream_file_evidence(project, relative)
+        if evidence.sha256 != artifact.sha256:
+            raise ValueError("Review evidence changed after approval")
+        stored_path = relative.as_posix()
+    return {
+        "path": stored_path,
+        "sha256": artifact.sha256,
+        "media_type": artifact.media_type,
+    }
 
 
 def _review_config(spec: ProjectSpec) -> ReviewConfig:
