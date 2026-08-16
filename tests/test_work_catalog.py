@@ -14,6 +14,7 @@ import pytest
 from factory.pipeline_contracts import ProjectSpec, StageName
 from factory.pipeline_review import (
     approve_stage_revision,
+    canonical_json_digest,
     delivery_eval_evidence,
     write_stage_revision,
 )
@@ -191,6 +192,45 @@ def _write_delivered_project(
     return project
 
 
+def _publish_updated_delivery_manifest(project: Path, note: str) -> None:
+    project_payload = json.loads((project / "project.json").read_text(encoding="utf-8"))
+    mode = project_payload["mode"]
+    manifest_path = project / "stages/deliver/delivery_manifest.json"
+    master = (
+        project / "stages/deliver/release/final.mp4"
+        if mode == "replica"
+        else project / "stages/deliver/master.mp4"
+    )
+    revision = write_stage_revision(
+        project,
+        StageName.DELIVER,
+        (manifest_path, master),
+        "deliver-input",
+        f"{'replica' if mode == 'replica' else 'generic'}.deliver",
+    )
+    package_path = project / "production_package.json"
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    package["stages"][-1]["revision"] = revision.number
+    package_path.write_text(json.dumps(package), encoding="utf-8")
+    approve_stage_revision(
+        project,
+        StageName.DELIVER,
+        revision.number,
+        note,
+        (master,),
+    )
+
+
+def _refresh_embedded_eval_digests(evidence: dict[str, object]) -> None:
+    review = evidence["review"]
+    assert isinstance(review, dict)
+    snapshot = review["snapshot"]
+    assert isinstance(snapshot, dict)
+    review["sha256"] = canonical_json_digest(snapshot)
+    unsigned = {key: value for key, value in evidence.items() if key != "snapshot_sha256"}
+    evidence["snapshot_sha256"] = canonical_json_digest(unsigned)
+
+
 def _migrate_in_process(source: str, archive: str, queue) -> None:
     try:
         manifest = migrate_showcase_media(source, archive)
@@ -346,6 +386,126 @@ def test_catalog_accepts_delivery_bound_automatic_eval_without_review_file(
 
 
 @pytest.mark.parametrize(
+    ("mode", "eval_policy"),
+    (("novel", "manual"), ("replica", "grouped")),
+)
+def test_catalog_accepts_exact_durable_human_eval_snapshot(
+    tmp_path: Path,
+    mode: str,
+    eval_policy: str,
+) -> None:
+    runs = tmp_path / "runs"
+    _write_delivered_project(
+        runs,
+        mode=mode,
+        eval_policy=eval_policy,
+        revision=1,
+    )
+
+    catalog = build_work_catalog(runs, None)
+
+    assert [item.name for item in catalog.works[0].versions[0].eval_reports] == [
+        "eval_result.json"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mode", "eval_policy"),
+    (("novel", "manual"), ("replica", "grouped")),
+)
+@pytest.mark.parametrize(
+    "mutation",
+    ("note", "evidence", "transaction_id", "created_at"),
+)
+def test_catalog_rejects_self_consistent_forged_human_eval_snapshot(
+    tmp_path: Path,
+    mode: str,
+    eval_policy: str,
+    mutation: str,
+) -> None:
+    runs = tmp_path / "runs"
+    project = _write_delivered_project(
+        runs,
+        mode=mode,
+        eval_policy=eval_policy,
+        revision=1,
+    )
+    manifest_path = project / "stages/deliver/delivery_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    evidence = manifest["eval_evidence"]
+    snapshot = evidence["review"]["snapshot"]
+    if mutation == "note":
+        snapshot["note"] = "FORGED BUT SELF-CONSISTENT"
+    elif mutation == "evidence":
+        snapshot["evidence"][0]["media_type"] = "text/plain"
+    elif mutation == "transaction_id":
+        snapshot["transaction_id"] = "forged-transaction"
+    else:
+        snapshot["created_at"] = "2026-08-16T00:00:00+00:00"
+    _refresh_embedded_eval_digests(evidence)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    _publish_updated_delivery_manifest(project, "Approved forged EVAL fixture")
+
+    catalog = build_work_catalog(runs, None)
+
+    assert len(catalog.works) == 1
+    assert catalog.works[0].versions[0].eval_reports == ()
+
+
+@pytest.mark.parametrize("mutation", ("changed", "missing"))
+def test_catalog_cache_invalidates_changed_or_missing_durable_eval_review(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    runs = tmp_path / "runs"
+    project = _write_delivered_project(runs, revision=1)
+    cache = WorkCatalogCache()
+    assert len(cache.build(runs, None).works[0].versions[0].eval_reports) == 1
+    review_path = project / "reviews/eval.review.json"
+    if mutation == "changed":
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        review["note"] = "Durable review changed after delivery"
+        review_path.write_text(json.dumps(review), encoding="utf-8")
+    else:
+        review_path.unlink()
+
+    updated = cache.build(runs, None)
+
+    assert len(updated.works) == 1
+    assert updated.works[0].versions[0].eval_reports == ()
+
+
+def test_catalog_cache_tracks_external_durable_eval_review_evidence(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    project = _write_delivered_project(runs, revision=1)
+    report = project / "stages/eval/eval_result.json"
+    external = tmp_path / "eval-approval-proof.txt"
+    external.write_text("approved EVAL proof", encoding="utf-8")
+    approve_stage_revision(
+        project,
+        StageName.EVAL,
+        1,
+        "Approved EVAL with external evidence",
+        (report, external),
+    )
+    manifest_path = project / "stages/deliver/delivery_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["eval_evidence"] = delivery_eval_evidence(project)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    _publish_updated_delivery_manifest(project, "Approved external EVAL evidence")
+    cache = WorkCatalogCache()
+    assert len(cache.build(runs, None).works[0].versions[0].eval_reports) == 1
+
+    external.write_text("changed EVAL proof", encoding="utf-8")
+
+    updated = cache.build(runs, None)
+    assert len(updated.works) == 1
+    assert updated.works[0].versions[0].eval_reports == ()
+
+
+@pytest.mark.parametrize(
     "mutation",
     ("snapshot_digest", "revision_digest", "review_digest", "review_snapshot"),
 )
@@ -494,15 +654,14 @@ def test_catalog_uses_delivery_bound_eval_after_edit_or_package_injection(
         for work in build_work_catalog(runs, None).works
         if work.project_id == "stale-eval"
     )
-    assert [item.name for item in selected.versions[0].eval_reports] == [
-        "eval_result.json"
-    ]
+    assert selected.versions[0].eval_reports == ()
 
 
-def test_catalog_keeps_eval_bound_to_delivery_until_redelivery(tmp_path: Path) -> None:
+def test_catalog_omits_stale_human_eval_until_matching_redelivery(
+    tmp_path: Path,
+) -> None:
     runs = tmp_path / "runs"
     project = _write_delivered_project(runs, revision=1)
-    original_report = project / "stages/eval/eval_result.json"
     newer_report = project / "stages/eval/eval_result-v2.json"
     newer_report.write_text(json.dumps({"automatic_passed": True, "score": 99}))
     eval_revision = write_stage_revision(
@@ -533,9 +692,7 @@ def test_catalog_keeps_eval_bound_to_delivery_until_redelivery(tmp_path: Path) -
 
     before_redelivery = build_work_catalog(runs, None).works[0].versions[0]
 
-    assert [report.name for report in before_redelivery.eval_reports] == [
-        original_report.name
-    ]
+    assert before_redelivery.eval_reports == ()
 
     manifest_path = project / "stages/deliver/delivery_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
