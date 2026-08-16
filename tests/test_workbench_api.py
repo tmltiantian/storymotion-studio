@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from factory.pipeline_jobs import JobManager
 from factory.pipeline_store import create_project
 from factory.workbench_api import create_workbench_app, run_workbench_api
 from factory.workbench_service import WorkbenchService
+from factory.work_catalog import WorkCatalog
 from scripts.migrate_showcase_works import migrate_showcase_media
 
 
@@ -281,7 +284,9 @@ def test_catalog_media_rejects_replacement_after_authorization(tmp_path: Path) -
     }
 
 
-def test_catalog_media_detects_in_place_mutation_during_stream(tmp_path: Path) -> None:
+def test_catalog_media_serves_verified_snapshot_after_in_place_mutation(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "public/audio"
     source.mkdir(parents=True)
     (source / "black-cat-approved.m4a").write_bytes(b"0123456789")
@@ -299,8 +304,147 @@ def test_catalog_media_detects_in_place_mutation_during_stream(tmp_path: Path) -
     archived = next(archive.rglob("black-cat-approved.m4a"))
     archived.write_bytes(b"abcdefghij")
 
-    with pytest.raises(OSError, match="changed while reading"):
-        b"".join(opened.iter_range(start=0, end=9, chunk_size=3))
+    assert b"".join(opened.iter_range(start=0, end=9, chunk_size=3)) == b"0123456789"
+    assert opened.closed
+
+
+def test_catalog_media_range_never_mixes_bytes_after_source_mutation(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "public/audio"
+    source.mkdir(parents=True)
+    original = b"0123456789abcdef"
+    (source / "black-cat-approved.m4a").write_bytes(original)
+    archive = tmp_path / "assets/workbench_archive"
+    migrate_showcase_media(source.parent, archive)
+    service = WorkbenchService(
+        tmp_path,
+        archive_manifest=archive / "archive_manifest.json",
+        job_manager=JobManager(tmp_path),
+        provider_profile_loader=lambda: None,
+    )
+    detail = service.work_detail(service.list_works()[0]["work_id"])
+    artifact_id = detail["versions"][0]["outputs"][0]["artifact_id"]
+    opened = service.open_media(artifact_id)
+    chunks = opened.iter_range(start=2, end=13, chunk_size=4)
+    first = next(chunks)
+    archived = next(archive.rglob("black-cat-approved.m4a"))
+    timestamps = archived.stat().st_atime_ns, archived.stat().st_mtime_ns
+    archived.write_bytes(b"X" * len(original))
+    os.utime(archived, ns=timestamps)
+
+    assert first + b"".join(chunks) == original[2:14]
+    assert opened.closed
+
+
+def test_catalog_media_binding_updates_when_archive_path_moves(tmp_path: Path) -> None:
+    source = tmp_path / "public/audio"
+    source.mkdir(parents=True)
+    content = b"approved-voice"
+    (source / "black-cat-approved.m4a").write_bytes(content)
+    archive = tmp_path / "assets/workbench_archive"
+    migrate_showcase_media(source.parent, archive)
+    service = WorkbenchService(
+        tmp_path,
+        archive_manifest=archive / "archive_manifest.json",
+        job_manager=JobManager(tmp_path),
+        provider_profile_loader=lambda: None,
+    )
+    detail = service.work_detail(service.list_works()[0]["work_id"])
+    artifact_id = detail["versions"][0]["outputs"][0]["artifact_id"]
+    manifest_path = archive / "archive_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    old_relative = manifest["entries"][0]["archive_relative"]
+    new_relative = "linked/moved/black-cat-approved.m4a"
+    (archive / "linked/moved").mkdir()
+    (archive / old_relative).rename(archive / new_relative)
+    manifest["entries"][0]["archive_relative"] = new_relative
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert service.read_media(artifact_id)[1] == content
+
+
+def test_work_catalog_redacts_and_bounds_all_public_metadata(tmp_path: Path) -> None:
+    source = tmp_path / "public/audio"
+    source.mkdir(parents=True)
+    (source / "black-cat-approved.m4a").write_bytes(b"approved-voice")
+    archive = tmp_path / "assets/workbench_archive"
+    migrate_showcase_media(source.parent, archive)
+    manifest_path = archive / "archive_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entry = manifest["entries"][0]
+    entry["title"] = "/Users/private/.env"
+    entry["version_label"] = "https://provider.example/private"
+    entry["metadata"]["role"] = "sk-secretToken123"
+    entry["metadata"]["description"] = (
+        "保留中文说明 " + "长" * 900 + " https://provider.example/v1"
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    service = WorkbenchService(
+        tmp_path,
+        archive_manifest=manifest_path,
+        job_manager=JobManager(tmp_path),
+        provider_profile_loader=lambda: None,
+    )
+
+    listed = service.list_works()
+    detail = service.work_detail(listed[0]["work_id"])
+    serialized = json.dumps({"listed": listed, "detail": detail}, ensure_ascii=False)
+
+    assert "/Users/" not in serialized
+    assert "sk-secret" not in serialized
+    assert "http://" not in serialized and "https://" not in serialized
+    assert len(listed[0]["title"]) <= 120
+    assert all(len(role) <= 80 for role in listed[0]["roles"])
+    assert len(detail["versions"][0]["label"]) <= 80
+    assert len(detail["versions"][0]["iteration_summary"]) <= 500
+    assert "保留中文说明" in detail["versions"][0]["iteration_summary"]
+    assert (
+        detail["versions"][0]["outputs"][0]["rights"]["redistribution_status"]
+        == "unverified"
+    )
+
+
+def test_catalog_snapshot_cannot_overwrite_newer_index_under_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = WorkbenchService(
+        tmp_path,
+        job_manager=JobManager(tmp_path),
+        provider_profile_loader=lambda: None,
+    )
+    old = WorkCatalog(works=(), warnings=("old",))
+    new = WorkCatalog(works=(), warnings=("new",))
+    first_started = threading.Event()
+    release_first = threading.Event()
+    calls = 0
+    call_lock = threading.Lock()
+
+    def sequenced_catalog():
+        nonlocal calls
+        with call_lock:
+            calls += 1
+            current = calls
+        if current == 1:
+            first_started.set()
+            assert release_first.wait(timeout=2)
+            return old
+        return new
+
+    monkeypatch.setattr(service, "_work_catalog", sequenced_catalog)
+    first = threading.Thread(target=service._catalog_snapshot)
+    second = threading.Thread(target=service._catalog_snapshot)
+    first.start()
+    assert first_started.wait(timeout=2)
+    second.start()
+    time.sleep(0.02)
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert calls == 2
+    assert service._catalog_index_catalog == new
 
 
 def test_download_route_sets_safe_attachment_headers_for_get_head_and_range(

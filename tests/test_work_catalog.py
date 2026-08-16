@@ -106,13 +106,27 @@ def _write_delivered_project(
                 "stage": stage,
                 "state": "passed",
                 "executor": f"{'replica' if mode == 'replica' else 'generic'}.{stage}",
-                "input_signature": "deliver-input" if stage == "deliver" else "",
+                "input_signature": (
+                    "deliver-input"
+                    if stage == "deliver"
+                    else "eval-input"
+                    if stage == "eval"
+                    else ""
+                ),
                 "artifacts": artifacts,
                 "revision": revision if stage == "deliver" else 1,
-                "review_policy": deliver_policy if stage == "deliver" else "automatic",
+                "review_policy": (
+                    deliver_policy
+                    if stage == "deliver"
+                    else "manual"
+                    if stage == "eval"
+                    else "automatic"
+                ),
                 "review_state": (
                     ("auto_approved" if deliver_policy == "automatic" else "approved")
                     if stage == "deliver"
+                    else "approved"
+                    if stage == "eval"
                     else "auto_approved"
                 ),
                 "review_blocks_progress": False,
@@ -131,6 +145,20 @@ def _write_delivered_project(
     }
     (project / "production_package.json").write_text(
         json.dumps(package), encoding="utf-8"
+    )
+    write_stage_revision(
+        project,
+        StageName.EVAL,
+        (eval_report,),
+        "eval-input",
+        f"{'replica' if mode == 'replica' else 'generic'}.eval",
+    )
+    approve_stage_revision(
+        project,
+        StageName.EVAL,
+        1,
+        "Approved EVAL evidence",
+        (eval_report,),
     )
     for _ in range(revision):
         write_stage_revision(
@@ -280,13 +308,62 @@ def test_catalog_binds_latest_delivery_revision_and_never_accepts_skipped(
     assert build_work_catalog(runs, None).works == ()
 
 
-def test_catalog_accepts_current_automatic_revision_evidence(tmp_path: Path) -> None:
+def test_catalog_rejects_automatic_delivery_without_human_approval(
+    tmp_path: Path,
+) -> None:
     runs = tmp_path / "runs"
     _write_delivered_project(runs, deliver_policy="automatic", revision=1)
 
     catalog = build_work_catalog(runs, None)
 
-    assert [work.title for work in catalog.works] == ["旧城来信"]
+    assert catalog.works == ()
+
+
+def test_catalog_omits_eval_evidence_after_edit_new_file_or_stale_review(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    project = _write_delivered_project(runs, revision=1)
+    report = project / "stages/eval/eval_result.json"
+
+    assert len(build_work_catalog(runs, None).works[0].versions[0].eval_reports) == 1
+
+    report.write_text(json.dumps({"automatic_passed": False}), encoding="utf-8")
+    assert build_work_catalog(runs, None).works[0].versions[0].eval_reports == ()
+
+    project = _write_delivered_project(runs, project_id="new-eval", revision=1)
+    injected = project / "stages/eval/injected.json"
+    injected.write_text(json.dumps({"score": 100}), encoding="utf-8")
+    package_path = project / "production_package.json"
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    package["eval_reports"] = [str(injected)]
+    package_path.write_text(json.dumps(package), encoding="utf-8")
+    selected = next(
+        work
+        for work in build_work_catalog(runs, None).works
+        if work.project_id == "new-eval"
+    )
+    assert selected.versions[0].eval_reports == ()
+
+    project = _write_delivered_project(runs, project_id="stale-eval", revision=1)
+    report = project / "stages/eval/eval_result.json"
+    revision = write_stage_revision(
+        project,
+        StageName.EVAL,
+        (report,),
+        "eval-input",
+        "generic.eval",
+    )
+    package_path = project / "production_package.json"
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    package["stages"][-2]["revision"] = revision.number
+    package_path.write_text(json.dumps(package), encoding="utf-8")
+    selected = next(
+        work
+        for work in build_work_catalog(runs, None).works
+        if work.project_id == "stale-eval"
+    )
+    assert selected.versions[0].eval_reports == ()
 
 
 @pytest.mark.parametrize("mutation", ("missing-operation", "unregistered-master"))
@@ -328,6 +405,38 @@ def test_catalog_accepts_real_replica_delivery_and_rejects_partial_masters(
         "Approved malformed fixture to test parser",
         (master,),
     )
+    assert build_work_catalog(runs, None).works == ()
+
+
+def test_catalog_rejects_replica_master_aliases_after_normalization(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    project = _write_delivered_project(runs, mode="replica", revision=1)
+    manifest_path = project / "stages/deliver/delivery_manifest.json"
+    master = project / "stages/deliver/release/final.mp4"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["masters"] = [str(master), "stages/deliver/release/final.mp4"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    revision = write_stage_revision(
+        project,
+        StageName.DELIVER,
+        (manifest_path, master),
+        "deliver-input",
+        "replica.deliver",
+    )
+    package_path = project / "production_package.json"
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    package["stages"][-1]["revision"] = revision.number
+    package_path.write_text(json.dumps(package), encoding="utf-8")
+    approve_stage_revision(
+        project,
+        StageName.DELIVER,
+        revision.number,
+        "Approved after alias mutation",
+        (master,),
+    )
+
     assert build_work_catalog(runs, None).works == ()
 
 
@@ -615,6 +724,104 @@ def test_interrupted_copy_leaves_no_manifest_or_temporary_file(
     assert not list(archive.rglob("*.tmp"))
 
 
+def test_migration_rejects_destination_replacement_after_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import migrate_showcase_works as module
+
+    source = tmp_path / "public"
+    _write_showcase(source)
+    archive = tmp_path / "archive"
+    original = module._existing_digest
+    calls: dict[str, int] = {}
+    replaced = False
+
+    def replace_after_digest(parent: int, name: str):
+        nonlocal replaced
+        digest = original(parent, name)
+        calls[name] = calls.get(name, 0) + 1
+        if digest is not None and calls[name] >= 2 and not replaced:
+            replaced = True
+            descriptor = os.open(name, os.O_RDONLY, dir_fd=parent)
+            try:
+                content = b""
+                while chunk := os.read(descriptor, 1024):
+                    content += chunk
+            finally:
+                os.close(descriptor)
+            replacement = f".{name}.replacement"
+            candidate = os.open(
+                replacement,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent,
+            )
+            os.write(candidate, content)
+            os.close(candidate)
+            os.rename(replacement, name, src_dir_fd=parent, dst_dir_fd=parent)
+        return digest
+
+    monkeypatch.setattr(module, "_existing_digest", replace_after_digest)
+
+    with pytest.raises(ValueError, match="ownership verification"):
+        migrate_showcase_media(source, archive)
+
+    assert replaced
+    assert not (archive / "archive_manifest.json").exists()
+
+
+def test_migration_recovers_its_own_publish_after_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import migrate_showcase_works as module
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    source = tmp_path / "public"
+    _write_showcase(source)
+    archive = tmp_path / "archive"
+    real_unlink = module.os.unlink
+
+    def crash_before_temp_unlink(name, **kwargs):
+        if str(name).endswith(".tmp"):
+            raise SimulatedCrash
+        return real_unlink(name, **kwargs)
+
+    monkeypatch.setattr(module.os, "unlink", crash_before_temp_unlink)
+    with pytest.raises(SimulatedCrash):
+        migrate_showcase_media(source, archive)
+    monkeypatch.setattr(module.os, "unlink", real_unlink)
+
+    manifest = migrate_showcase_media(source, archive)
+
+    assert len(manifest.entries) == 7
+    assert not list(archive.rglob("*.tmp"))
+    assert not list(archive.rglob("*.publish.json"))
+    assert all(
+        (archive / entry.archive_relative).stat().st_nlink == 1
+        for entry in manifest.entries
+    )
+
+
+def test_archive_manifest_marks_redistribution_rights_unverified(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "public"
+    _write_showcase(source)
+
+    manifest = migrate_showcase_media(source, tmp_path / "archive", dry_run=True)
+
+    assert len(manifest.entries) == 7
+    for entry in manifest.entries:
+        assert entry.rights["origin"] == "legacy_storymotion_showcase"
+        assert entry.rights["creator"] == "unverified"
+        assert entry.rights["license"] == "unverified"
+        assert entry.rights["commercial_use"] == "unverified"
+        assert entry.rights["redistribution_status"] == "unverified"
+        assert "do not redistribute" in entry.rights["distribution_warning"].lower()
+
+
 def test_tracked_archive_builds_catalog_in_clean_copy_and_matches_all_sources(
     tmp_path: Path,
 ) -> None:
@@ -672,6 +879,111 @@ def test_catalog_cache_reuses_unchanged_projects_and_invalidates_one_entry(
     os.utime(first_project / "production_package.json", None)
     assert len(cache.build(runs, None).works) == 2
     assert calls == ["first", "second", "first"]
+
+
+def test_catalog_cache_discards_parse_when_authoritative_dependency_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from factory import work_catalog as module
+
+    runs = tmp_path / "runs"
+    project = _write_delivered_project(runs, revision=1)
+    original = module._delivered_work
+    changed = False
+
+    def mutate_after_parse(anchor):
+        nonlocal changed
+        work = original(anchor)
+        if not changed:
+            changed = True
+            package_path = project / "production_package.json"
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+            package["stages"][-1]["review_state"] = "skipped"
+            package_path.write_text(json.dumps(package), encoding="utf-8")
+        return work
+
+    monkeypatch.setattr(module, "_delivered_work", mutate_after_parse)
+
+    assert WorkCatalogCache().build(runs, None).works == ()
+
+
+def test_catalog_cache_tracks_non_public_revision_artifacts(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    project = _write_delivered_project(runs, revision=1)
+    manifest = project / "stages/deliver/delivery_manifest.json"
+    master = project / "stages/deliver/master.mp4"
+    notes = project / "stages/deliver/release-notes.txt"
+    notes.write_text("approved notes", encoding="utf-8")
+    revision = write_stage_revision(
+        project,
+        StageName.DELIVER,
+        (manifest, master, notes),
+        "deliver-input",
+        "generic.deliver",
+    )
+    package_path = project / "production_package.json"
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    package["stages"][-1]["revision"] = revision.number
+    package["stages"][-1]["artifacts"] = [str(manifest), str(master), str(notes)]
+    package_path.write_text(json.dumps(package), encoding="utf-8")
+    approve_stage_revision(
+        project,
+        StageName.DELIVER,
+        revision.number,
+        "Approved notes",
+        (master,),
+    )
+    cache = WorkCatalogCache()
+    assert len(cache.build(runs, None).works) == 1
+
+    notes.write_text("edited after approval", encoding="utf-8")
+
+    assert cache.build(runs, None).works == ()
+
+
+def test_catalog_cache_tracks_external_review_evidence(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    project = _write_delivered_project(runs, revision=1)
+    master = project / "stages/deliver/master.mp4"
+    external = tmp_path / "approval-proof.txt"
+    external.write_text("approved proof", encoding="utf-8")
+    approve_stage_revision(
+        project,
+        StageName.DELIVER,
+        1,
+        "Approved with external proof",
+        (master, external),
+    )
+    cache = WorkCatalogCache()
+    assert len(cache.build(runs, None).works) == 1
+
+    external.write_text("changed proof", encoding="utf-8")
+
+    assert cache.build(runs, None).works == ()
+
+
+def test_catalog_snapshot_avoids_lru_thrash_above_project_capacity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from factory import work_catalog as module
+
+    runs = tmp_path / "runs"
+    for project_id in ("first", "second", "third"):
+        _write_delivered_project(runs, project_id=project_id, revision=1)
+    original = module._delivered_work
+    calls = 0
+
+    def counted(project):
+        nonlocal calls
+        calls += 1
+        return original(project)
+
+    monkeypatch.setattr(module, "_delivered_work", counted)
+    cache = WorkCatalogCache(max_entries=2)
+
+    assert len(cache.build(runs, None).works) == 3
+    assert len(cache.build(runs, None).works) == 3
+    assert calls == 3
 
 
 def test_catalog_streams_large_master_without_read_bytes_materialization(

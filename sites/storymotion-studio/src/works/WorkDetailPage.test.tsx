@@ -34,6 +34,10 @@ const work = {
           kind: "video",
           viewer: { size_bytes: 2048, width: 1080, height: 1920 },
           sha256: "a".repeat(64),
+          rights: {
+            redistribution_status: "unverified",
+            distribution_warning: "Rights documentation is unavailable; do not redistribute publicly until cleared.",
+          },
         },
       ],
       eval_reports: [
@@ -86,6 +90,7 @@ describe("WorkDetailPage", () => {
       "/api/download/art_master",
     );
     expect(screen.getByText("逐镜返修通过")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("do not redistribute publicly");
 
     await user.selectOptions(screen.getByLabelText("作品版本"), "version_30");
     expect(screen.getByText("这个版本没有可预览的媒体")).toBeInTheDocument();
