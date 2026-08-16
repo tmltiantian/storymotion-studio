@@ -38,6 +38,16 @@ from .secure_posix import AnchoredDirectory
 ARCHIVE_MANIFEST_SCHEMA = "storymotion.archive-manifest.v1"
 _HASH = re.compile(r"[0-9a-f]{64}")
 _SAFE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_UNVERIFIED_RIGHTS = {
+    "origin": "unverified",
+    "creator": "unverified",
+    "license": "unverified",
+    "commercial_use": "unverified",
+    "redistribution_status": "unverified",
+    "distribution_warning": (
+        "Rights documentation is incomplete; do not redistribute publicly until cleared."
+    ),
+}
 
 
 def _archive_text(value: Any, *, label: str, maximum: int) -> str:
@@ -226,16 +236,15 @@ class ArchiveEntry:
                 for key, value in self.metadata.items()
             },
         )
-        object.__setattr__(
-            self,
-            "rights",
-            {
-                _archive_text(key, label="rights key", maximum=128): _archive_text(
-                    value, label="rights value", maximum=2048
-                )
-                for key, value in self.rights.items()
-            },
-        )
+        normalized_rights = {
+            _archive_text(key, label="rights key", maximum=128): _archive_text(
+                value, label="rights value", maximum=2048
+            )
+            for key, value in self.rights.items()
+        }
+        if not set(_UNVERIFIED_RIGHTS).issubset(normalized_rights):
+            normalized_rights = dict(_UNVERIFIED_RIGHTS)
+        object.__setattr__(self, "rights", normalized_rights)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -509,6 +518,80 @@ def _stage_revision(
     return evidence
 
 
+def _delivery_eval_reports(
+    project: AnchoredDirectory,
+    manifest: Mapping[str, Any],
+) -> tuple[CatalogArtifact, ...]:
+    binding = manifest.get("eval_evidence")
+    if not isinstance(binding, Mapping) or binding.get("stage") != StageName.EVAL.value:
+        return ()
+    try:
+        revision_number = int(binding["revision"])
+    except (KeyError, TypeError, ValueError):
+        return ()
+    review = binding.get("review")
+    raw_reports = binding.get("reports")
+    if (
+        revision_number < 1
+        or not isinstance(review, Mapping)
+        or int(review.get("revision") or 0) != revision_number
+        or not _HASH.fullmatch(str(review.get("sha256") or ""))
+        or not isinstance(raw_reports, list)
+        or not raw_reports
+    ):
+        return ()
+    payload = _read_json(project, "reviews/eval.revisions.json")
+    raw_revisions = payload.get("revisions")
+    if (
+        payload.get("schema_version") != REVISIONS_SCHEMA
+        or payload.get("stage") != StageName.EVAL.value
+        or not isinstance(raw_revisions, list)
+    ):
+        return ()
+    revisions = tuple(StageRevision.from_dict(item) for item in raw_revisions)
+    selected = next(
+        (revision for revision in revisions if revision.number == revision_number),
+        None,
+    )
+    if (
+        selected is None
+        or selected.stage is not StageName.EVAL
+        or selected.input_signature != str(binding.get("input_signature") or "")
+        or selected.executor != str(binding.get("executor") or "")
+    ):
+        return ()
+    revision_artifacts: dict[str, str] = {}
+    for artifact in selected.artifacts:
+        relative = project.relative_path(artifact.path).as_posix()
+        if relative in revision_artifacts:
+            return ()
+        revision_artifacts[relative] = artifact.sha256
+    requested: dict[str, str] = {}
+    for item in raw_reports:
+        if not isinstance(item, Mapping):
+            return ()
+        relative = project.relative_path(str(item.get("path") or "")).as_posix()
+        digest = str(item.get("sha256") or "")
+        if (
+            relative in requested
+            or not PurePosixPath(relative).is_relative_to(PurePosixPath("stages/eval"))
+            or not _HASH.fullmatch(digest)
+            or revision_artifacts.get(relative) != digest
+        ):
+            return ()
+        requested[relative] = digest
+    return tuple(
+        _artifact_from_project(
+            project,
+            relative,
+            allowed_prefix="stages/eval",
+            expected_sha256=digest,
+            kind="eval",
+        )
+        for relative, digest in sorted(requested.items())
+    )
+
+
 def _review_config(spec: ProjectSpec) -> ReviewConfig:
     adapter = get_mode_adapter(spec.mode)
     raw_preset = spec.policies.get("approval_preset")
@@ -684,37 +767,8 @@ def _delivered_work(project: AnchoredDirectory) -> WorkRecord:
         raise ValueError("delivery manifest is not authoritative")
     manifest = _read_json(project, manifest_relative.as_posix())
     masters = _manifest_masters(project, package, deliver, manifest, revision_evidence)
-    eval_reports: tuple[CatalogArtifact, ...] = ()
-    evaluation = next(
-        record for record in package.stages if record.stage is StageName.EVAL
-    )
     try:
-        if evaluation.state is not StageState.PASSED or evaluation.revision is None:
-            raise ValueError("eval is not passed")
-        eval_evidence = _stage_revision(project, evaluation, StageName.EVAL)
-        _review_is_current(
-            project,
-            evaluation,
-            StageName.EVAL,
-            review_config.policy_for(StageName.EVAL),
-        )
-        requested_reports = {
-            project.relative_path(raw_path).as_posix()
-            for raw_path in package.eval_reports
-        }
-        registered_reports = set(eval_evidence)
-        if not requested_reports.issubset(registered_reports):
-            raise ValueError("eval reports are not registered in the current revision")
-        eval_reports = tuple(
-            _artifact_from_project(
-                project,
-                relative,
-                allowed_prefix="stages/eval",
-                expected_sha256=eval_evidence[relative].sha256,
-                kind="eval",
-            )
-            for relative in sorted(requested_reports)
-        )
+        eval_reports = _delivery_eval_reports(project, manifest)
     except (FileNotFoundError, KeyError, OSError, TypeError, ValueError):
         eval_reports = ()
     revision = deliver.revision
@@ -940,25 +994,54 @@ def _registered_evidence_paths(project: Path) -> tuple[Path, ...]:
             for item in value:
                 visit(item)
 
-    reviews = project / "reviews"
-    if reviews.is_dir() and not reviews.is_symlink():
-        for path in sorted(reviews.glob("*.json")):
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    paths = [
+        project / "reviews" / f"{stage}.{kind}.json"
+        for stage in (StageName.EVAL.value, StageName.DELIVER.value)
+        for kind in ("revisions", "review")
+    ]
+    paths.append(project / "stages" / "deliver" / "delivery_manifest.json")
+    for path in paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        visit(payload)
+    try:
+        package = json.loads(
+            (project / "production_package.json").read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        package = {}
+    if isinstance(package, Mapping):
+        for record in package.get("stages") or ():
+            if not isinstance(record, Mapping) or record.get("stage") not in {
+                StageName.EVAL.value,
+                StageName.DELIVER.value,
+            }:
                 continue
-            visit(payload)
+            for raw_path in record.get("artifacts") or ():
+                if isinstance(raw_path, str):
+                    candidate = Path(raw_path).expanduser()
+                    found.add(
+                        candidate if candidate.is_absolute() else project / candidate
+                    )
     return tuple(sorted(found, key=str))
 
 
 def _authoritative_project_paths(project: Path) -> tuple[Path, ...]:
-    values = {project, project / "project.json", project / "production_package.json"}
-    for root in (
-        project / "reviews",
-        project / "stages" / "deliver",
-        project / "stages" / "eval",
-    ):
-        values.update(_dependency_tree_paths(root))
+    values = {
+        project,
+        project / "project.json",
+        project / "production_package.json",
+    }
+    values.update(
+        project / "reviews" / f"{stage}.{kind}.json"
+        for stage in (StageName.EVAL.value, StageName.DELIVER.value)
+        for kind in ("revisions", "review")
+    )
+    transaction_root = project / "reviews" / ".transactions"
+    if transaction_root.exists() or transaction_root.is_symlink():
+        values.update(_dependency_tree_paths(transaction_root))
     values.update(_registered_evidence_paths(project))
     return tuple(sorted(values, key=str))
 
@@ -974,15 +1057,55 @@ def _catalog_dependency_snapshot(
     runs: Path,
     archive_manifest: str | Path | ArchiveManifest | Mapping[str, Any] | None,
 ) -> tuple[tuple[Path, _StatIdentity | None], ...]:
-    paths: set[Path] = set(_dependency_tree_paths(runs))
+    paths: set[Path] = {runs}
     if runs.is_dir() and not runs.is_symlink():
         for project in runs.iterdir():
-            if project.is_dir() and _SAFE_TOKEN.fullmatch(project.name):
+            if (
+                not project.is_symlink()
+                and project.is_dir()
+                and _SAFE_TOKEN.fullmatch(project.name)
+            ):
+                paths.add(project)
                 paths.update(_authoritative_project_paths(project))
-    if isinstance(archive_manifest, (str, Path)):
-        manifest_path = Path(archive_manifest).expanduser().absolute()
-        paths.update(_dependency_tree_paths(manifest_path.parent))
+    paths.update(_archive_dependency_paths(archive_manifest))
     return tuple((path, _dependency_identity(path)) for path in sorted(paths, key=str))
+
+
+def _archive_source_key(
+    archive_manifest: str | Path | ArchiveManifest | Mapping[str, Any] | None,
+) -> str:
+    if isinstance(archive_manifest, (str, Path)):
+        return f"path:{Path(archive_manifest).expanduser().absolute()}"
+    if isinstance(archive_manifest, ArchiveManifest):
+        encoded = json.dumps(
+            archive_manifest.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest = hashlib.sha256(encoded).hexdigest()
+        return f"object:{archive_manifest.archive_root}:{digest}"
+    return repr(archive_manifest)
+
+
+def _archive_dependency_paths(
+    archive_manifest: str | Path | ArchiveManifest | Mapping[str, Any] | None,
+) -> tuple[Path, ...]:
+    if archive_manifest is None:
+        return ()
+    paths: set[Path] = set()
+    if isinstance(archive_manifest, (str, Path)):
+        paths.add(Path(archive_manifest).expanduser().absolute())
+    try:
+        manifest = _load_archive_manifest(archive_manifest)
+    except (OSError, TypeError, ValueError):
+        return tuple(sorted(paths, key=str))
+    if manifest is not None and manifest.archive_root is not None:
+        paths.add(manifest.archive_root)
+        paths.update(
+            manifest.archive_root / entry.archive_relative for entry in manifest.entries
+        )
+    return tuple(sorted(paths, key=str))
 
 
 class WorkCatalogCache:
@@ -1064,12 +1187,9 @@ class WorkCatalogCache:
             self._archive = None
             self._archive_source = ""
             return [], []
-        source = (
-            str(archive_manifest) if isinstance(archive_manifest, (str, Path)) else ""
-        )
+        source = _archive_source_key(archive_manifest)
         if (
-            source
-            and source == self._archive_source
+            source == self._archive_source
             and self._archive is not None
             and _dependencies_current(self._archive.dependencies)
         ):
@@ -1078,12 +1198,8 @@ class WorkCatalogCache:
         if manifest is None:
             return [], []
         works, warnings = _archive_works(manifest)
-        if source and manifest.archive_root is not None:
-            paths = [Path(source).expanduser().absolute()]
-            paths.extend(
-                manifest.archive_root / entry.archive_relative
-                for entry in manifest.entries
-            )
+        if manifest.archive_root is not None:
+            paths = _archive_dependency_paths(archive_manifest)
             self._archive = _CachedArchive(
                 tuple(works),
                 tuple(warnings),
@@ -1101,9 +1217,7 @@ class WorkCatalogCache:
             runs = Path(runs_dir).expanduser()
             source_key = (
                 str(runs.absolute()),
-                str(archive_manifest)
-                if isinstance(archive_manifest, (str, Path))
-                else repr(archive_manifest),
+                _archive_source_key(archive_manifest),
             )
             for attempt in range(2):
                 before = _catalog_dependency_snapshot(runs, archive_manifest)

@@ -13,6 +13,7 @@ from .pipeline_context import StageContext, StageExecution
 from .pipeline_contracts import StageState
 from .pipeline_executors import register_executor
 from .pipeline_eval import build_specialist_eval
+from .pipeline_review import delivery_eval_evidence
 
 
 def _source(context: StageContext) -> Path:
@@ -347,6 +348,7 @@ def execute_deliver(context: StageContext) -> StageExecution:
             "operation": detail,
             "masters": [str(path.resolve()) for path in media],
             "publication_status": "REVIEW_REQUIRED",
+            "eval_evidence": delivery_eval_evidence(context.project_dir),
         },
     )
     if code != 0 or not media:

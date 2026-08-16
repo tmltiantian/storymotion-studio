@@ -6,11 +6,12 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,9 @@ from factory.secure_posix import AnchoredDirectory  # noqa: E402
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
+_TRANSACTION_NAMESPACE = ".storymotion-migration-transactions"
+_TRANSACTION_SCHEMA = "storymotion.archive-publish.v2"
+_TRANSACTION_ID = re.compile(r"tx-[0-9a-f]{32}")
 _APPROVED_AUDIO: dict[str, dict[str, str]] = {
     "audio/black-cat-approved.m4a": {
         "version_label": "黑白猫定版音色",
@@ -103,6 +107,28 @@ class _DestinationEvidence:
         if self.descriptor >= 0:
             os.close(self.descriptor)
             self.descriptor = -1
+
+
+@dataclass
+class _PublishTransaction:
+    namespace: int
+    descriptor: int
+    transaction_id: str
+    destination: str
+    expected_sha256: str
+    payload_descriptor: int = -1
+    payload_metadata: os.stat_result | None = None
+
+    def close(self) -> None:
+        if self.payload_descriptor >= 0:
+            os.close(self.payload_descriptor)
+            self.payload_descriptor = -1
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+        if self.namespace >= 0:
+            os.close(self.namespace)
+            self.namespace = -1
 
 
 def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
@@ -368,158 +394,439 @@ def _existing_digest(parent: int, name: str) -> _DestinationEvidence | None:
             os.close(descriptor)
 
 
-def _journal_name(destination_name: str) -> str:
-    return f".{destination_name}.publish.json"
+def _private_directory(descriptor: int) -> os.stat_result:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or metadata.st_uid != os.geteuid()
+    ):
+        raise ValueError("archive transaction namespace is not private")
+    return metadata
+
+
+def _transaction_namespace(destination: AnchoredDirectory) -> int:
+    descriptor = destination.open_directory(_TRANSACTION_NAMESPACE, create=True)
+    try:
+        _private_directory(descriptor)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _journal_payload(
+    transaction: _PublishTransaction,
+    *,
+    phase: str,
+    payload_metadata: os.stat_result | None = None,
+    payload_size: int | None = None,
+    payload_sha256: str = "",
+) -> dict[str, Any]:
+    namespace = _private_directory(transaction.namespace)
+    owned = _private_directory(transaction.descriptor)
+    payload: dict[str, Any] = {
+        "schema_version": _TRANSACTION_SCHEMA,
+        "transaction_id": transaction.transaction_id,
+        "destination": transaction.destination,
+        "expected_sha256": transaction.expected_sha256,
+        "phase": phase,
+        "owner_uid": os.geteuid(),
+        "namespace": {"device": namespace.st_dev, "inode": namespace.st_ino},
+        "transaction": {"device": owned.st_dev, "inode": owned.st_ino},
+    }
+    if payload_metadata is not None:
+        payload["payload"] = {
+            "name": "payload.tmp",
+            "device": payload_metadata.st_dev,
+            "inode": payload_metadata.st_ino,
+            "mode": stat.S_IMODE(payload_metadata.st_mode),
+            "size": payload_size
+            if payload_size is not None
+            else payload_metadata.st_size,
+            "sha256": payload_sha256,
+        }
+    return payload
 
 
 def _write_journal(
-    parent: int,
-    destination_name: str,
-    temporary_name: str,
-    expected_sha256: str,
+    transaction: _PublishTransaction, payload: Mapping[str, Any]
 ) -> None:
-    journal_name = _journal_name(destination_name)
-    payload = json.dumps(
-        {
-            "schema_version": "storymotion.archive-publish.v1",
-            "destination": destination_name,
-            "temporary": temporary_name,
-            "sha256": expected_sha256,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    temporary_name = f".journal.{uuid4().hex}.tmp"
     descriptor = os.open(
-        journal_name,
+        temporary_name,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
         0o600,
-        dir_fd=parent,
+        dir_fd=transaction.descriptor,
     )
+    published = False
     try:
-        remaining = memoryview(payload)
+        remaining = memoryview(encoded)
         while remaining:
             written = os.write(descriptor, remaining)
             if written <= 0:
                 raise OSError("archive publication journal could not be completed")
             remaining = remaining[written:]
         os.fsync(descriptor)
-    finally:
         os.close(descriptor)
-    os.fsync(parent)
-
-
-def _read_journal(parent: int, destination_name: str) -> dict[str, str] | None:
-    try:
-        descriptor = os.open(
-            _journal_name(destination_name), _FILE_FLAGS, dir_fd=parent
+        descriptor = -1
+        os.rename(
+            temporary_name,
+            "journal.json",
+            src_dir_fd=transaction.descriptor,
+            dst_dir_fd=transaction.descriptor,
         )
+        published = True
+        os.fsync(transaction.descriptor)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if not published:
+            try:
+                os.unlink(temporary_name, dir_fd=transaction.descriptor)
+            except FileNotFoundError:
+                pass
+
+
+def _begin_transaction(
+    destination: AnchoredDirectory,
+    relative: str,
+    expected_sha256: str,
+) -> _PublishTransaction:
+    namespace = _transaction_namespace(destination)
+    transaction_id = f"tx-{uuid4().hex}"
+    try:
+        os.mkdir(transaction_id, mode=0o700, dir_fd=namespace)
+        descriptor = os.open(transaction_id, _DIRECTORY_FLAGS, dir_fd=namespace)
+    except BaseException:
+        os.close(namespace)
+        raise
+    transaction = _PublishTransaction(
+        namespace,
+        descriptor,
+        transaction_id,
+        PurePosixPath(relative).as_posix(),
+        expected_sha256,
+    )
+    try:
+        _private_directory(descriptor)
+        _write_journal(transaction, _journal_payload(transaction, phase="initialized"))
+        return transaction
+    except BaseException:
+        transaction.close()
+        raise
+
+
+def _create_payload(transaction: _PublishTransaction) -> int:
+    descriptor = os.open(
+        "payload.tmp",
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=transaction.descriptor,
+    )
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_nlink != 1
+        or metadata.st_size != 0
+    ):
+        os.close(descriptor)
+        raise ValueError("archive transaction payload is unsafe")
+    transaction.payload_descriptor = descriptor
+    transaction.payload_metadata = metadata
+    _write_journal(
+        transaction,
+        _journal_payload(
+            transaction,
+            phase="payload_created",
+            payload_metadata=metadata,
+            payload_size=0,
+        ),
+    )
+    return descriptor
+
+
+def _payload_ready(transaction: _PublishTransaction, *, size: int, digest: str) -> None:
+    if transaction.payload_metadata is None:
+        raise ValueError("archive transaction payload identity is missing")
+    current = os.fstat(transaction.payload_descriptor)
+    if (
+        (current.st_dev, current.st_ino)
+        != (transaction.payload_metadata.st_dev, transaction.payload_metadata.st_ino)
+        or current.st_size != size
+        or digest != transaction.expected_sha256
+    ):
+        raise ValueError("archive transaction payload evidence is invalid")
+    _write_journal(
+        transaction,
+        _journal_payload(
+            transaction,
+            phase="payload_ready",
+            payload_metadata=transaction.payload_metadata,
+            payload_size=size,
+            payload_sha256=digest,
+        ),
+    )
+
+
+def _read_transaction_journal(descriptor: int) -> Mapping[str, Any] | None:
+    try:
+        journal = os.open("journal.json", _FILE_FLAGS, dir_fd=descriptor)
     except FileNotFoundError:
         return None
     try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096:
-            raise ValueError("archive publication journal is unsafe")
-        payload = b""
-        while chunk := os.read(descriptor, 4096):
-            payload += chunk
-        value = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("archive publication journal is invalid") from exc
-    finally:
-        os.close(descriptor)
-    if not isinstance(value, dict):
-        raise ValueError("archive publication journal is invalid")
-    return {str(key): str(item) for key, item in value.items()}
-
-
-def _recover_publication(parent: int, destination_name: str, expected: str) -> None:
-    journal = _read_journal(parent, destination_name)
-    if journal is None:
-        return
-    temporary_name = journal.get("temporary", "")
-    if (
-        journal.get("schema_version") != "storymotion.archive-publish.v1"
-        or journal.get("destination") != destination_name
-        or journal.get("sha256") != expected
-        or not temporary_name.startswith(f".{destination_name}.")
-        or not temporary_name.endswith(".tmp")
-        or "/" in temporary_name
-    ):
-        raise ValueError("archive publication journal is not owned by this migration")
-    try:
-        temporary = os.stat(temporary_name, dir_fd=parent, follow_symlinks=False)
-    except FileNotFoundError:
-        temporary = None
-    try:
-        final = os.stat(destination_name, dir_fd=parent, follow_symlinks=False)
-    except FileNotFoundError:
-        final = None
-    if temporary is not None and final is not None:
+        metadata = os.fstat(journal)
         if (
-            not stat.S_ISREG(temporary.st_mode)
-            or (temporary.st_dev, temporary.st_ino) != (final.st_dev, final.st_ino)
-            or temporary.st_nlink != 2
-            or final.st_nlink != 2
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+            or metadata.st_size > 8192
         ):
-            raise ValueError("archive publication recovery ownership is invalid")
-        os.unlink(temporary_name, dir_fd=parent)
-    elif temporary is not None:
-        evidence = _existing_digest(parent, temporary_name)
-        try:
-            if evidence is None or evidence.sha256 != expected:
-                raise ValueError("archive publication recovery digest is invalid")
-        finally:
-            if evidence is not None:
-                evidence.close()
-        _publish_no_replace(parent, temporary_name, destination_name)
-    elif final is None:
-        raise ValueError("archive publication recovery has no owned payload")
-    evidence = _existing_digest(parent, destination_name)
-    try:
-        if evidence is None or evidence.sha256 != expected:
-            raise ValueError("archive publication recovery digest is invalid")
+            return None
+        content = b""
+        while chunk := os.read(journal, 8192):
+            content += chunk
+        value = json.loads(content.decode("utf-8"))
+        return value if isinstance(value, Mapping) else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
     finally:
-        if evidence is not None:
-            evidence.close()
-    os.unlink(_journal_name(destination_name), dir_fd=parent)
-    os.fsync(parent)
+        os.close(journal)
+
+
+def _journal_owned(
+    transaction_id: str,
+    namespace: int,
+    descriptor: int,
+    journal: Mapping[str, Any],
+) -> bool:
+    namespace_stat = _private_directory(namespace)
+    transaction_stat = _private_directory(descriptor)
+    return (
+        journal.get("schema_version") == _TRANSACTION_SCHEMA
+        and journal.get("transaction_id") == transaction_id
+        and journal.get("owner_uid") == os.geteuid()
+        and journal.get("namespace")
+        == {"device": namespace_stat.st_dev, "inode": namespace_stat.st_ino}
+        and journal.get("transaction")
+        == {"device": transaction_stat.st_dev, "inode": transaction_stat.st_ino}
+    )
+
+
+def _finish_transaction(transaction: _PublishTransaction) -> None:
+    names = set(os.listdir(transaction.descriptor))
+    if names != {"journal.json"}:
+        raise ValueError("archive transaction contains unowned residue")
+    os.unlink("journal.json", dir_fd=transaction.descriptor)
+    os.fsync(transaction.descriptor)
+    os.rmdir(transaction.transaction_id, dir_fd=transaction.namespace)
+    os.fsync(transaction.namespace)
+
+
+def _abort_transaction(transaction: _PublishTransaction) -> None:
+    if transaction.payload_descriptor >= 0:
+        os.close(transaction.payload_descriptor)
+        transaction.payload_descriptor = -1
+    try:
+        payload = os.stat(
+            "payload.tmp", dir_fd=transaction.descriptor, follow_symlinks=False
+        )
+    except FileNotFoundError:
+        payload = None
+    if payload is not None and transaction.payload_metadata is not None:
+        if (payload.st_dev, payload.st_ino) != (
+            transaction.payload_metadata.st_dev,
+            transaction.payload_metadata.st_ino,
+        ):
+            raise ValueError("archive transaction payload ownership changed")
+        os.unlink("payload.tmp", dir_fd=transaction.descriptor)
+    _finish_transaction(transaction)
 
 
 def _publish_no_replace(
-    parent: int, temporary_name: str, destination_name: str
+    source_parent: int,
+    destination_parent: int,
+    temporary_name: str,
+    destination_name: str,
 ) -> None:
     try:
         os.link(
             temporary_name,
             destination_name,
-            src_dir_fd=parent,
-            dst_dir_fd=parent,
+            src_dir_fd=source_parent,
+            dst_dir_fd=destination_parent,
             follow_symlinks=False,
         )
     except FileExistsError as exc:
         raise ValueError(
             "archive destination collision appeared during migration"
         ) from exc
-    temporary = os.stat(temporary_name, dir_fd=parent, follow_symlinks=False)
-    published = os.stat(destination_name, dir_fd=parent, follow_symlinks=False)
+    temporary = os.stat(temporary_name, dir_fd=source_parent, follow_symlinks=False)
+    published = os.stat(
+        destination_name, dir_fd=destination_parent, follow_symlinks=False
+    )
     if (
         not stat.S_ISREG(published.st_mode)
         or (temporary.st_dev, temporary.st_ino) != (published.st_dev, published.st_ino)
         or published.st_nlink != 2
     ):
         try:
-            os.unlink(destination_name, dir_fd=parent)
+            os.unlink(destination_name, dir_fd=destination_parent)
         except FileNotFoundError:
             pass
         raise ValueError("archive publication ownership could not be verified")
-    os.unlink(temporary_name, dir_fd=parent)
-    final = os.stat(destination_name, dir_fd=parent, follow_symlinks=False)
+    os.unlink(temporary_name, dir_fd=source_parent)
+    final = os.stat(destination_name, dir_fd=destination_parent, follow_symlinks=False)
     if (final.st_dev, final.st_ino) != (
         published.st_dev,
         published.st_ino,
     ) or final.st_nlink != 1:
         raise ValueError("archive publication retained an unsafe hard link")
-    os.fsync(parent)
+    os.fsync(source_parent)
+    os.fsync(destination_parent)
+
+
+def _recover_transaction(
+    transaction: _PublishTransaction,
+    destination_parent: int,
+    destination_name: str,
+    journal: Mapping[str, Any],
+) -> None:
+    raw_payload = journal.get("payload")
+    if not isinstance(raw_payload, Mapping):
+        try:
+            unbound = os.stat(
+                "payload.tmp",
+                dir_fd=transaction.descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            _finish_transaction(transaction)
+            return
+        if (
+            journal.get("phase") != "initialized"
+            or not stat.S_ISREG(unbound.st_mode)
+            or stat.S_IMODE(unbound.st_mode) != 0o600
+            or unbound.st_uid != os.geteuid()
+            or unbound.st_nlink != 1
+            or unbound.st_size != 0
+        ):
+            raise ValueError(
+                "archive transaction has payload without ownership evidence"
+            )
+        os.unlink("payload.tmp", dir_fd=transaction.descriptor)
+        _finish_transaction(transaction)
+        return
+    if raw_payload.get("name") != "payload.tmp" or raw_payload.get("mode") != 0o600:
+        raise ValueError("archive transaction payload evidence is invalid")
+    try:
+        payload = os.stat(
+            "payload.tmp", dir_fd=transaction.descriptor, follow_symlinks=False
+        )
+    except FileNotFoundError:
+        payload = None
+    try:
+        final = os.stat(
+            destination_name, dir_fd=destination_parent, follow_symlinks=False
+        )
+    except FileNotFoundError:
+        final = None
+    expected_identity = (raw_payload.get("device"), raw_payload.get("inode"))
+    if payload is not None and (
+        not stat.S_ISREG(payload.st_mode)
+        or stat.S_IMODE(payload.st_mode) != 0o600
+        or payload.st_uid != os.geteuid()
+        or (payload.st_dev, payload.st_ino) != expected_identity
+    ):
+        raise ValueError("archive transaction payload ownership is invalid")
+    if final is not None and (
+        not stat.S_ISREG(final.st_mode)
+        or (final.st_dev, final.st_ino) != expected_identity
+    ):
+        raise ValueError("archive transaction destination ownership is invalid")
+    if payload is not None and final is not None:
+        if payload.st_nlink != 2 or final.st_nlink != 2:
+            raise ValueError("archive transaction link ownership is invalid")
+        os.unlink("payload.tmp", dir_fd=transaction.descriptor)
+    elif payload is not None:
+        descriptor = os.open("payload.tmp", _FILE_FLAGS, dir_fd=transaction.descriptor)
+        try:
+            digest = _hash_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
+        if (
+            journal.get("phase") != "payload_ready"
+            or raw_payload.get("sha256") != transaction.expected_sha256
+            or raw_payload.get("size") != payload.st_size
+            or digest != transaction.expected_sha256
+        ):
+            os.unlink("payload.tmp", dir_fd=transaction.descriptor)
+            _finish_transaction(transaction)
+            return
+        _publish_no_replace(
+            transaction.descriptor,
+            destination_parent,
+            "payload.tmp",
+            destination_name,
+        )
+    elif final is None:
+        _finish_transaction(transaction)
+        return
+    evidence = _existing_digest(destination_parent, destination_name)
+    try:
+        if evidence is None or evidence.sha256 != transaction.expected_sha256:
+            raise ValueError("archive transaction recovery digest is invalid")
+    finally:
+        if evidence is not None:
+            evidence.close()
+    _finish_transaction(transaction)
+
+
+def _recover_publication(
+    destination: AnchoredDirectory,
+    relative: str,
+    expected: str,
+) -> None:
+    namespace = _transaction_namespace(destination)
+    destination_parent, destination_name = _open_parent(destination, relative)
+    try:
+        for transaction_id in sorted(os.listdir(namespace)):
+            if not _TRANSACTION_ID.fullmatch(transaction_id):
+                continue
+            try:
+                descriptor = os.open(transaction_id, _DIRECTORY_FLAGS, dir_fd=namespace)
+            except OSError:
+                continue
+            transaction = _PublishTransaction(
+                os.dup(namespace),
+                descriptor,
+                transaction_id,
+                PurePosixPath(relative).as_posix(),
+                expected,
+            )
+            try:
+                journal = _read_transaction_journal(descriptor)
+                if (
+                    journal is None
+                    or not _journal_owned(
+                        transaction_id, namespace, descriptor, journal
+                    )
+                    or journal.get("destination") != transaction.destination
+                    or journal.get("expected_sha256") != expected
+                ):
+                    continue
+                _recover_transaction(
+                    transaction, destination_parent, destination_name, journal
+                )
+            finally:
+                transaction.close()
+    finally:
+        os.close(destination_parent)
+        os.close(namespace)
 
 
 def _write_bytes_no_replace(
@@ -528,12 +835,13 @@ def _write_bytes_no_replace(
     content: bytes,
 ) -> None:
     parent, name = _open_parent(destination, relative)
-    temporary_name = f".{name}.{uuid4().hex}.tmp"
-    descriptor = -1
-    journal_created = False
+    transaction: _PublishTransaction | None = None
     try:
         expected = hashlib.sha256(content).hexdigest()
-        _recover_publication(parent, name, expected)
+        os.close(parent)
+        parent = -1
+        _recover_publication(destination, relative, expected)
+        parent, name = _open_parent(destination, relative)
         existing = _existing_digest(parent, name)
         if existing is not None:
             try:
@@ -542,12 +850,8 @@ def _write_bytes_no_replace(
                 return
             finally:
                 existing.close()
-        descriptor = os.open(
-            temporary_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=parent,
-        )
+        transaction = _begin_transaction(destination, relative, expected)
+        descriptor = _create_payload(transaction)
         remaining = memoryview(content)
         while remaining:
             written = os.write(descriptor, remaining)
@@ -555,33 +859,25 @@ def _write_bytes_no_replace(
                 raise OSError("archive manifest could not be completed")
             remaining = remaining[written:]
         os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = -1
-        _write_journal(parent, name, temporary_name, expected)
-        journal_created = True
-        try:
-            _publish_no_replace(parent, temporary_name, name)
-        except Exception:
-            try:
-                os.unlink(temporary_name, dir_fd=parent)
-            except FileNotFoundError:
-                pass
-            os.unlink(_journal_name(name), dir_fd=parent)
-            journal_created = False
-            os.fsync(parent)
-            raise
-        os.unlink(_journal_name(name), dir_fd=parent)
-        journal_created = False
-        os.fsync(parent)
+        _payload_ready(transaction, size=len(content), digest=expected)
+        _publish_no_replace(
+            transaction.descriptor,
+            parent,
+            "payload.tmp",
+            name,
+        )
+        os.close(transaction.payload_descriptor)
+        transaction.payload_descriptor = -1
+        _finish_transaction(transaction)
+    except Exception:
+        if transaction is not None:
+            _abort_transaction(transaction)
+        raise
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if not journal_created:
-            try:
-                os.unlink(temporary_name, dir_fd=parent)
-            except FileNotFoundError:
-                pass
-        os.close(parent)
+        if transaction is not None:
+            transaction.close()
+        if parent >= 0:
+            os.close(parent)
 
 
 def _copy_file_atomic(
@@ -595,12 +891,17 @@ def _copy_file_atomic(
         Path(*destination_path.parts[:-1]), create=True
     )
     source_descriptor = -1
-    temporary_descriptor = -1
-    temporary_name = f".{destination_path.name}.{uuid4().hex}.tmp"
-    journal_created = False
+    transaction: _PublishTransaction | None = None
     try:
+        os.close(destination_parent)
+        destination_parent = -1
         _recover_publication(
-            destination_parent, destination_path.name, planned.entry.sha256
+            destination,
+            destination_path.as_posix(),
+            planned.entry.sha256,
+        )
+        destination_parent = destination.open_directory(
+            Path(*destination_path.parts[:-1]), create=True
         )
         existing = _existing_digest(destination_parent, destination_path.name)
         if existing is not None:
@@ -621,15 +922,15 @@ def _copy_file_atomic(
         opened = os.fstat(source_descriptor)
         if not _snapshot_matches(planned.snapshot, opened):
             raise ValueError("showcase source changed during migration")
-        temporary_descriptor = os.open(
-            temporary_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=destination_parent,
+        transaction = _begin_transaction(
+            destination, destination_path.as_posix(), planned.entry.sha256
         )
+        temporary_descriptor = _create_payload(transaction)
         digest = hashlib.sha256()
+        copied = 0
         while chunk := os.read(source_descriptor, 1024 * 1024):
             digest.update(chunk)
+            copied += len(chunk)
             remaining = memoryview(chunk)
             while remaining:
                 written = os.write(temporary_descriptor, remaining)
@@ -637,8 +938,6 @@ def _copy_file_atomic(
                     raise OSError("archive copy could not be completed")
                 remaining = remaining[written:]
         os.fsync(temporary_descriptor)
-        os.close(temporary_descriptor)
-        temporary_descriptor = -1
         after = os.fstat(source_descriptor)
         current = os.stat(source_name, dir_fd=source_parent, follow_symlinks=False)
         if (
@@ -647,43 +946,28 @@ def _copy_file_atomic(
             or not _snapshot_matches(planned.snapshot, current)
         ):
             raise ValueError("showcase source changed during migration")
-        _write_journal(
+        _payload_ready(transaction, size=copied, digest=digest.hexdigest())
+        _publish_no_replace(
+            transaction.descriptor,
             destination_parent,
+            "payload.tmp",
             destination_path.name,
-            temporary_name,
-            planned.entry.sha256,
         )
-        journal_created = True
-        try:
-            _publish_no_replace(
-                destination_parent,
-                temporary_name,
-                destination_path.name,
-            )
-        except Exception:
-            try:
-                os.unlink(temporary_name, dir_fd=destination_parent)
-            except FileNotFoundError:
-                pass
-            os.unlink(_journal_name(destination_path.name), dir_fd=destination_parent)
-            journal_created = False
-            os.fsync(destination_parent)
-            raise
-        os.unlink(_journal_name(destination_path.name), dir_fd=destination_parent)
-        journal_created = False
-        os.fsync(destination_parent)
+        os.close(transaction.payload_descriptor)
+        transaction.payload_descriptor = -1
+        _finish_transaction(transaction)
+    except Exception:
+        if transaction is not None:
+            _abort_transaction(transaction)
+        raise
     finally:
-        if temporary_descriptor >= 0:
-            os.close(temporary_descriptor)
-        if not journal_created:
-            try:
-                os.unlink(temporary_name, dir_fd=destination_parent)
-            except FileNotFoundError:
-                pass
+        if transaction is not None:
+            transaction.close()
         if source_descriptor >= 0:
             os.close(source_descriptor)
         os.close(source_parent)
-        os.close(destination_parent)
+        if destination_parent >= 0:
+            os.close(destination_parent)
 
 
 def _validate_roots(source: Path, archive: Path) -> None:

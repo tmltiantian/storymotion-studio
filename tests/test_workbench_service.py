@@ -1097,6 +1097,48 @@ def test_job_events_redact_token_shaped_text_and_raw_paths(
     assert "/private/" not in encoded
 
 
+@pytest.mark.parametrize(
+    "unsafe",
+    (
+        r"C:\Users\alice\.env",
+        r"\\server\private\credentials.json",
+        "/Users/alice/.env",
+        "ftp://alice:password@provider.example/private",
+        "access_token=DLgKqSHww3_LsM3Rqrx4Ks22dvRpjie",
+        "access-token：DLgKqSHww3_LsM3Rqrx4Ks22dvRpjie",
+        "令牌 DLgKqSHww3_LsM3Rqrx4Ks22dvRpjie",
+        "safe-prefix\r\nX-Injected: yes",
+    ),
+)
+def test_public_sanitizer_fails_closed_for_paths_credentials_and_controls(
+    service: WorkbenchService,
+    unsafe: str,
+) -> None:
+    sanitized = service.public_error_message(RuntimeError(unsafe))
+
+    assert sanitized != unsafe
+    assert "alice" not in sanitized.lower()
+    assert "dlgkq" not in sanitized.lower()
+    assert "x-injected" not in sanitized.lower()
+    assert "\r" not in sanitized and "\n" not in sanitized
+
+
+def test_public_sanitizer_error_never_falls_back_to_raw_text(
+    service: WorkbenchService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from factory import workbench_service as module
+
+    def fail_sanitizer(*_args, **_kwargs):
+        raise ValueError("sanitizer failed")
+
+    monkeypatch.setattr(module, "sanitize_public_text", fail_sanitizer)
+
+    assert service.public_error_message(RuntimeError("access_token=NeverExposeMe")) == (
+        "[redacted]"
+    )
+
+
 def test_failed_video_resume_reuses_provider_tasks_without_a_fresh_token(
     tmp_path: Path,
 ) -> None:
