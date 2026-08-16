@@ -2,7 +2,7 @@
 
 ## Status
 
-Fix round 3 implemented and verified; scoped re-review pending.
+Fix round 4 implemented and verified; scoped re-review pending.
 
 ## Delivered
 
@@ -41,13 +41,20 @@ Fix round 3 implemented and verified; scoped re-review pending.
 - Made failed-job resume validation atomic with project ownership. Resume now claims the worker lease and uses `JobManager.resume()` to reserve the project, rereads the current job, and rebuilds the canonical request while ownership is held before dispatch. A changed revision transitions the recovery back to failed, releases worker/project ownership, and never reaches the renderer.
 - Added deterministic tests for both live failure classifications, compact-resume read recovery, and a reserved review mutation completing between preliminary and final canonical comparisons.
 
+## Fix Round 4
+
+- Centralized every post-claim, pre-dispatch resume failure through terminal job cleanup. Expected canonical mismatches and unexpected final reread exceptions now fail the queued recovery and release project ownership before the original exception is re-raised.
+- Added an independent job-store cleanup retry for interrupted failure persistence. If both cleanup paths fail, the worker lease is still released and the raised error explicitly warns that the project may remain reserved while retaining the original validation exception as its cause.
+- Added deterministic fault injection for a successful preliminary comparison followed by a second `_video_job_recovery()` `OSError`, proving zero renderer calls, failed job state, worker release, and immediate success of the next reserved mutation. A separate cleanup-failure test covers the explicit reservation-risk path.
+
 ## Verification
 
 - Round-3 focused frontend recovery/workspace matrix: 42 passed.
 - All frontend Vitest: 86 passed.
-- Round-3 adjacent backend workbench/API/jobs/preflight/provider-batch matrix: 189 passed (one existing Starlette/httpx deprecation warning).
-- Deterministic backend resume race matrix: 8 passed; Ruff and `git diff --check` passed.
-- The round-1 full backend pytest result remains 2,871 passed; it was not repeated in round 2 because the focused and adjacent backend matrices cover all changed services.
+- Round-4 focused failed-video/resume matrix: 11 passed.
+- Round-4 adjacent backend workbench/API/jobs/preflight/provider-batch matrix: 191 passed (one existing Starlette/httpx deprecation warning).
+- Ruff and `git diff --check`: passed.
+- The round-1 full backend pytest result remains 2,871 passed; it was not repeated in later rounds because the focused and adjacent backend matrices cover all changed services.
 - TypeScript typecheck: passed.
 - ESLint: passed.
 - Vite production build: passed.
@@ -60,3 +67,5 @@ Fix round 3 implemented and verified; scoped re-review pending.
 - The full backend run reports the existing FastAPI TestClient `httpx` deprecation warning; it is unrelated to Task 8 behavior.
 - No provider, paid API, `.env`, or external network call was made during round 2.
 - No provider, paid API, `.env`, or external network call was made during round 3.
+- Round 4 changed no frontend files, so the verified round-3 frontend, build, and Playwright results were not rerun.
+- No provider, paid API, `.env`, or external network call was made during round 4.

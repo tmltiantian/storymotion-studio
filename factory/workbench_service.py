@@ -1596,6 +1596,31 @@ class WorkbenchService:
             for event in self.jobs.events(job_id, after_sequence=after_sequence)
         ]
 
+    def _fail_claimed_resume(self, job_id: str, error: BaseException) -> None:
+        try:
+            message = (
+                self.public_error_message(error)
+                if isinstance(error, Exception)
+                else "Video recovery was interrupted"
+            )
+        except BaseException:
+            message = "Video recovery validation failed"
+        try:
+            self.jobs.fail(job_id, error=message)
+            return
+        except BaseException:
+            pass
+
+        fallback = JobManager(self.workspace)
+        try:
+            record = fallback.get(job_id)
+            if record.status in {"queued", "running"}:
+                fallback.fail(job_id, error=message)
+            elif record.status not in {"completed", "failed", "cancelled"}:
+                raise RuntimeError("Resume cleanup found an invalid job state")
+        finally:
+            fallback.close()
+
     def resume_job(self, job_id: str) -> dict[str, Any]:
         record = self.jobs.get(job_id)
         if record.status in {"completed", "cancelled"}:
@@ -1629,7 +1654,9 @@ class WorkbenchService:
         project = self._project_dir(record.project_id)
 
         lease = self._claim_worker(job_id)
+        claim_attempted = False
         try:
+            claim_attempted = True
             record = self.jobs.resume(job_id)
             if record.status in {"completed", "cancelled"}:
                 self._release_worker(job_id, lease)
@@ -1646,12 +1673,26 @@ class WorkbenchService:
                         if recovery_mode == "historical"
                         else "Video generation requires a fresh confirmation"
                     )
-                    self.jobs.fail(job_id, error=message)
                     raise ValueError(message)
                 request = current_request
                 record = claimed_record
-        except BaseException:
-            self._release_worker(job_id, lease)
+        except BaseException as original:
+            cleanup_error: BaseException | None = None
+            try:
+                if claim_attempted:
+                    self._fail_claimed_resume(job_id, original)
+            except BaseException as exc:
+                cleanup_error = exc
+            finally:
+                self._release_worker(job_id, lease)
+            if cleanup_error is not None:
+                risk = RuntimeError(
+                    "Video resume validation failed and the project may remain reserved"
+                )
+                risk.add_note(
+                    f"Reservation cleanup failure: {type(cleanup_error).__name__}"
+                )
+                raise risk from original
             raise
 
         def run() -> Mapping[str, Any]:
