@@ -21,6 +21,22 @@ from factory.pet_replica_assets import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _explicit_gateway_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("GATEWAY_BASE_URL", "https://gateway.example.invalid")
+
+
+def test_replica_assets_require_an_explicit_gateway_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("GATEWAY_BASE_URL", raising=False)
+
+    with pytest.raises(PetReplicaAssetError, match="GATEWAY_BASE_URL"):
+        replica_assets._configured_gateway_base_url()
+
+
 def _write_image(
     path: Path,
     *,

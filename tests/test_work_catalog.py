@@ -1474,7 +1474,7 @@ def test_archive_manifest_missing_or_incomplete_rights_defaults_unverified(
 @pytest.mark.parametrize(
     "media_type",
     (
-        "audio/mp4; access_token=VisibleSecret123",
+        "audio/mp4; access_token=FAKE",
         "video/mp4\r\nX-Injected: yes",
         "视频/mp4",
         "audio/",

@@ -83,6 +83,7 @@ export interface StageDetail {
   blocked_reasons: string[];
   error: string;
   artifacts: Artifact[];
+  active_run_job: JobDetail | null;
 }
 
 export interface ProjectDetail {

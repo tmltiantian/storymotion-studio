@@ -29,6 +29,7 @@
 
 html {
   min-width: 320px;
+  scroll-padding-block: 110px 76px;
   background: var(--canvas);
 }
 

@@ -27,6 +27,9 @@ LumenX 不再是运行依赖。旧版 LumenX handoff 仍可由网关批处理只
 
 ## 安装
 
+需要 Python 3.12、Node.js、npm、FFmpeg 和 ffprobe。初始化脚本会验证 Node.js/npm，创建
+Python 虚拟环境，并根据 `package-lock.json` 运行 `npm ci` 安装锁定的前端依赖：
+
 ```bash
 cd /path/to/storymotion-studio
 scripts/bootstrap_factory.sh
@@ -40,8 +43,12 @@ LLM_PROVIDER=gateway
 IMAGE_PROVIDER=gateway
 VIDEO_PROVIDER=gateway
 GATEWAY_API_KEY=your-key
+GATEWAY_BASE_URL=https://gateway.example.invalid
 ENABLE_GATEWAY_VIDEO=1
 ```
+
+`gateway.example.invalid` 是不可路由的文档占位符。使用网关时必须在本机 `.env` 中显式替换
+`GATEWAY_BASE_URL`；代码没有私有网关默认地址。
 
 豆包 TTS 可使用 Speech API Key，或 AppID + Access Key 的流式凭据。真实密钥只放在 `.env`，不要提交到仓库。
 
@@ -68,6 +75,24 @@ ENABLE_GATEWAY_VIDEO=1
 审批模板不会关闭收费视频门禁、客观 EVAL 门禁或最终交付确认。作业中断后优先恢复已有任务状态，局部返修也不会自动重新提交收费请求。
 
 旧展示站的 7 个公开文件已按 SHA-256 迁入 `assets/workbench_archive/`：3 个音频归入历史音色作品，4 个未归类 SVG 保留在历史归档。页面会持续显示“发布权利尚未核验”；其中音频样本在权利得到书面确认或从发布内容排除前，不应进入公开仓库或再分发。因此后续 GitHub 发布默认使用私有仓库。
+
+## 安全发布快照
+
+源仓库的旧提交曾包含一项真实凭据。当前 tracked tree 已替换为明显虚构的测试哨兵，
+但旧历史不得创建或推送到 GitHub。该凭据仍必须由账户持有人在外部撤销或轮换；仓库内的
+代码和扫描无法完成这一步。
+
+发布必须从当前已提交且干净的 tracked tree 创建单提交新历史：
+
+```bash
+.venv/bin/python scripts/release_security.py
+.venv/bin/python scripts/export_clean_release.py /path/to/fresh-storymotion-release
+```
+
+导出器只读取 `git archive HEAD` 中的当前 tracked 文件，不复制 `.git` 或 ignored 产物，
+在新目录初始化单个 release commit，并对当前内容和新历史执行确定性密钥扫描；本机存在
+`gitleaks` 时还会同时扫描内容与历史。发布者必须从该新目录创建默认私有的 GitHub 仓库，
+不得从本工作树或其既有 Git 历史推送。归档音频权利确认前不得改为公开仓库。
 
 MiniMax H3 视频路线：
 
@@ -100,7 +125,7 @@ MiniMax H3 使用官方结构化提示词，而不是把通用视频提示词原
 - 中文对白原样放入 `<d>[Chinese] ...</d>`，画外旁白明确要求可见角色闭嘴，人物对白明确要求开口与音节同步并在句末闭嘴。
 - H3 适配器支持 `first_frame`、`last_frame`、`reference_image` 三种图片角色；普通路径继续按角色参考图处理。
 
-官方源码独立检出在 `/Users/tml/Desktop/MiniMax-H3`，仅用于跟踪规范、示例和上游更新，不作为本项目运行依赖。当前发布音色仍以豆包 TTS 为准；H3 原生声音不会与最终音轨叠加。提示词负责自然开口，逐字精确口型仍需经过项目的口型后处理和 EVAL。
+MiniMax H3 官方源码仅作为仓库外的规范参考，不是本项目运行依赖。当前发布音色仍以豆包 TTS 为准；H3 原生声音不会与最终音轨叠加。提示词负责自然开口，逐字精确口型仍需经过项目的口型后处理和 EVAL。
 
 生产核心还统一执行以下约束：
 
@@ -230,5 +255,9 @@ npx playwright test
 ```
 
 这套验证使用本地夹具覆盖创建、阶段执行、审批、退回、影响计划、视频预检、任务恢复、作品和设置，不调用外部 Provider，不产生费用，也不修改 `.env`。
+
+浏览器流程启动真实临时 FastAPI/WorkbenchService，并通过正式文件、作业、审核、返修、媒体
+Range 和下载合同验收；只有付费视频渲染边界被离线夹具替代。发布前还要从 clean snapshot
+重复执行本节矩阵和历史密钥扫描。
 
 代码职责见 [docs/pipeline-code-map.md](docs/pipeline-code-map.md)，部署与密钥管理见 [docs/deployment.md](docs/deployment.md)，完整 bad case 与迭代过程保留在 [docs/iteration-log.md](docs/iteration-log.md)。

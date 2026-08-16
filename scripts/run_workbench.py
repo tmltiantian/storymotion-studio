@@ -21,9 +21,27 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _WEB_ROOT = _REPO_ROOT / "sites" / "storymotion-studio"
 _VITE = _WEB_ROOT / "node_modules" / ".bin" / "vite"
+_FRONTEND_ENVIRONMENT_KEYS = (
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USER",
+)
+_MAX_LAUNCH_ATTEMPTS = 3
 
 
 class LauncherError(RuntimeError):
+    pass
+
+
+class _RetryableLauncherError(LauncherError):
     pass
 
 
@@ -123,6 +141,18 @@ def _endpoint_ready(url: str) -> bool:
         return False
 
 
+def _frontend_environment(
+    parent: dict[str, str], api_url: str
+) -> dict[str, str]:
+    selected = {
+        key: parent[key]
+        for key in _FRONTEND_ENVIRONMENT_KEYS
+        if key in parent and parent[key]
+    }
+    selected["STORYMOTION_API_URL"] = api_url
+    return selected
+
+
 def _wait_until_ready(
     config: LaunchConfig,
     children: Sequence[_OwnedChild],
@@ -137,13 +167,15 @@ def _wait_until_ready(
         for child in children:
             return_code = child.process.poll()
             if return_code is not None:
-                raise LauncherError(
+                raise _RetryableLauncherError(
                     f"{child.label} service exited before readiness (code {return_code})."
                 )
         if all(_endpoint_ready(url) for url in endpoints):
             return
         time.sleep(0.1)
-    raise LauncherError("Local services did not become ready before the timeout.")
+    raise _RetryableLauncherError(
+        "Local services did not become ready before the timeout."
+    )
 
 
 def _signal_process_group(child: _OwnedChild, selected_signal: int) -> None:
@@ -199,7 +231,7 @@ def _start_children(config: LaunchConfig) -> list[_OwnedChild]:
         "--strictPort",
     ]
     child_environment = os.environ.copy()
-    web_environment = {**child_environment, "STORYMOTION_API_URL": config.api_url}
+    web_environment = _frontend_environment(child_environment, config.api_url)
     children: list[_OwnedChild] = []
     try:
         children.append(
@@ -250,13 +282,33 @@ def run_launcher(config: LaunchConfig, *, ready_timeout: float = 30.0) -> int:
         signal.signal(selected_signal, request_stop)
 
     children: list[_OwnedChild] = []
+    current = config
     try:
-        print("Starting local services", flush=True)
-        children = _start_children(config)
-        _wait_until_ready(config, children, stop_requested, ready_timeout)
+        for attempt in range(1, _MAX_LAUNCH_ATTEMPTS + 1):
+            print("Starting local services", flush=True)
+            try:
+                children = _start_children(current)
+                _wait_until_ready(
+                    current,
+                    children,
+                    stop_requested,
+                    ready_timeout,
+                )
+                break
+            except _RetryableLauncherError:
+                _stop_children(children)
+                children = []
+                if stop_requested.is_set() or attempt == _MAX_LAUNCH_ATTEMPTS:
+                    raise
+                current = build_launch_config(
+                    api_host=current.api_host,
+                    api_port=0,
+                    web_port=0,
+                )
+                print("Retrying with new local ports", flush=True)
         print("Ready", flush=True)
-        print(f"Web: {config.web_url}", flush=True)
-        print(f"API: {config.api_url}", flush=True)
+        print(f"Web: {current.web_url}", flush=True)
+        print(f"API: {current.api_url}", flush=True)
         print("Press Ctrl+C to stop", flush=True)
         while not stop_requested.wait(0.2):
             for child in children:

@@ -3052,3 +3052,23 @@ Security:
 - 真实 QA 三种视口均无控制台错误、非取消类网络失败、外部请求、页面横向溢出、控件裁切或零尺寸媒体；图片像素有效，音频控件可见，键盘焦点明确。
 - 7 个历史 payload 继续显示 `unverified` 权利警告。3 个音频样本在权利确认或排除前不适合公开发布，新 GitHub 仓库默认保持私有。
 - 发布矩阵通过：Ruff、compileall、`git diff --check`、后端 3,008 项、前端 97 项、TypeScript、ESLint、Vite 构建和三种视口 Playwright 12 项全部成功；仅保留既有依赖弃用提示和 JSDOM 媒体方法提示。
+
+## 2026-08-16 - Task 10 独立审查修复
+
+### 发现的问题
+
+1. 测试曾把一项真实凭据当作脱敏样例，当前文件虽可替换，旧 Git 历史仍不可发布。
+2. 干净副本没有前端依赖，启动器存在端口探测与子进程绑定之间的竞争；前端子进程还继承了不需要的 Provider 凭据。
+3. 浏览器验收拦截全部 `/api`，没有覆盖真实项目文件、审核、返修、作业、媒体授权和下载；本地阶段刷新后也无法可靠恢复。
+4. 网关配置含私有默认地址，当前文档仍混有退役运行时建议和个人 checkout 路径。
+5. 精确 390x844 QA 暴露了长成果页自动滚动时，阶段按钮可能落入顶部 sticky 区域或底部固定导航之下的问题。
+
+### 修复与验证
+
+- 当前 tracked tree 全部改用明显虚构哨兵；新增不打印值的确定性内容/历史扫描器，以及只从 `git archive HEAD` 生成单提交新历史的 clean release 导出器。旧源历史禁止推送，凭据仍需账户持有人在外部撤销或轮换。
+- Bootstrap 验证 Node.js/npm 并执行 lockfile 驱动的 `npm ci`。启动器对 API 或页面端口竞争都重选整组端口并有界重试，只清理自有子进程；Vite 环境改为白名单。
+- Playwright 使用真实临时 FastAPI 与 `WorkbenchService`，仅替换收费视频渲染边界。项目、九阶段、严格审核、整阶段退回、局部返修、一次性确认令牌、失败任务恢复、作品、Range、下载和设置全部落到真实持久化合同。
+- 工作区合同公开 active/recoverable `run_stage` job；刷新、StrictMode、路由切换和瞬时读取失败都连接同一作业，不重复提交。SSE 正常关闭后立即回读持久状态。
+- 网关改为必须显式配置 `GATEWAY_BASE_URL`，仓库只使用 `example.invalid`。退役评估移入历史归档，当前操作文档和代码地图不再包含个人 checkout 路径或旧生产建议。
+- 移动端补充顶部/底部滚动保留区，正常指针点击在 390x844 通过。六张临时 QA 截图显示三种视口无横向溢出、控件裁切、外部请求或意外控制台错误，未核验权利警告持续可见。
+- 最终矩阵：后端 3,026 项、前端 102 项、真实 Playwright 15 项、launcher/bootstrap/security/catalog 107 项，以及 Ruff、compileall、TypeScript、ESLint、Vite build 和 diff 检查全部通过。旧站 7 个源 blob、manifest 与 tracked archive 哈希再次 7/7 一致，8 个归档文件和 7 条 `unverified` 权利记录保持不变。

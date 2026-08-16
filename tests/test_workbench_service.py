@@ -37,11 +37,13 @@ def _provider_profile() -> ProviderProfile:
         provider="gateway",
         model="safe-model",
         base_url="https://provider.example/v1?token=secret",
-        api_key="sk-secret-value",
+        api_key="FICTIONAL_TEST_SECRET_SENTINEL_DO_NOT_USE",
         key_name="GATEWAY_API_KEY",
         key_source="/private/.env",
         ready=True,
-        blockers=("sk-secret-value failed at /private/.env",),
+        blockers=(
+            "FICTIONAL_TEST_SECRET_SENTINEL_DO_NOT_USE failed at /private/.env",
+        ),
         supports_reference_images=True,
     )
     return ProviderProfile(
@@ -50,6 +52,25 @@ def _provider_profile() -> ProviderProfile:
         video=capability,
         audio=capability,
         source_paths={"factory": "/private/.env"},
+    )
+
+
+def _offline_video_profile() -> ProviderProfile:
+    capability = CapabilityConfig(
+        provider="minimax",
+        model="MiniMax-H3",
+        base_url="https://provider.example.invalid",
+        api_key="FICTIONAL_TEST_SECRET_SENTINEL_DO_NOT_USE",
+        key_name="FICTIONAL_TEST_KEY_NAME",
+        key_source=None,
+        ready=True,
+    )
+    return ProviderProfile(
+        text=capability,
+        image=capability,
+        video=capability,
+        audio=capability,
+        source_paths={},
     )
 
 
@@ -290,10 +311,65 @@ def test_project_detail_contains_execution_review_and_opaque_artifacts(
     assert "/" not in artifact_id
 
 
+def test_stage_contract_exposes_only_its_authoritative_active_run_job(
+    service: WorkbenchService,
+) -> None:
+    job_id = service.jobs.submit(
+        project_id="episode_01",
+        operation="run_stage",
+        payload={"stage": "storyboard", "enable_live": False},
+    )
+    running = service.jobs.start(job_id)
+
+    storyboard = service.stage_detail("episode_01", "storyboard")
+    concept = service.stage_detail("episode_01", "concept")
+
+    assert storyboard["active_run_job"] == service._job_public(running)
+    assert concept["active_run_job"] is None
+
+    service.jobs.fail(job_id, error="FICTIONAL_LOCAL_STAGE_FAILURE")
+
+    assert service.stage_detail("episode_01", "storyboard")["active_run_job"] is None
+
+
+def test_stage_change_request_can_be_rerun_as_a_new_revision(
+    tmp_path: Path,
+) -> None:
+    service = WorkbenchService(
+        tmp_path,
+        job_manager=JobManager(tmp_path),
+        provider_profile_loader=lambda: None,
+        dispatch=lambda callback: callback(),
+    )
+    service.create_project_job(
+        project_id="rerun_concept",
+        title="Rerun concept",
+        mode="original",
+        idea="A local rerun contract test.",
+        target={},
+        approval_preset="strict",
+    )
+    service.submit_stage_run("rerun_concept", "concept")
+    service.request_stage_changes(
+        "rerun_concept",
+        "concept",
+        revision=1,
+        reason="Revise the complete concept.",
+    )
+
+    submitted = service.submit_stage_run("rerun_concept", "concept")
+
+    assert service.job_detail(submitted["job_id"])["status"] == "completed"
+    detail = service.stage_detail("rerun_concept", "concept")
+    assert detail["execution_state"] == "passed"
+    assert detail["review_state"] == "awaiting_review"
+    assert detail["revision"] == 2
+
+
 @pytest.mark.parametrize(
     "unsafe_media_type",
     (
-        "audio/mp4; access_token=VisibleSecret123",
+        "audio/mp4; access_token=FAKE",
         "video/mp4\r\nX-Injected: yes",
     ),
 )
@@ -1095,12 +1171,66 @@ def test_video_generation_wires_exact_confirmation_and_provider_persistence(
 
     assert observed["generation_token"] == "token-id.secret"
     internal_request = observed["generation_request"].to_dict()
-    assert internal_request["artifact_hashes"] == {str(artifact.resolve()): "c" * 64}
+    assert internal_request["artifact_hashes"] == {artifact_id: "c" * 64}
     assert "/" not in next(iter(public_request["artifact_hashes"]))
     record = manager.get(job["job_id"])
     assert record.status == "completed"
     assert record.provider_tasks["shot-1"]["task_id"] == "task-123"
     assert "token-id.secret" not in json.dumps(record.to_dict())
+
+
+def test_generated_project_video_preflight_preserves_canonical_artifact_keys(
+    tmp_path: Path,
+) -> None:
+    service = WorkbenchService(
+        tmp_path,
+        job_manager=JobManager(tmp_path),
+        provider_profile_loader=_offline_video_profile,
+        dispatch=lambda callback: callback(),
+    )
+    service.create_project_job(
+        project_id="canonical_preflight",
+        title="Canonical preflight",
+        mode="original",
+        idea="A local production contract test.",
+        target={"fps": 25, "resolution": "1080x1920"},
+        approval_preset="strict",
+    )
+    for stage_name in ("concept", "script", "storyboard", "assets", "audio"):
+        service.submit_stage_run("canonical_preflight", stage_name)
+        detail = service.stage_detail("canonical_preflight", stage_name)
+        service.approve_stage(
+            "canonical_preflight",
+            stage_name,
+            revision=detail["revision"],
+            note="Approved by the local contract test.",
+            evidence_artifact_ids=[
+                artifact["artifact_id"] for artifact in detail["artifacts"]
+            ],
+        )
+
+    workspace = service.video_workspace("canonical_preflight")
+    shot_ids = [shot["shot_id"] for shot in workspace["shots"][:3]]
+    preflight = service.video_preflight("canonical_preflight", shot_ids)
+
+    assert preflight["ready"] is True
+    assert preflight["artifact_hashes"]
+    assert all(":" in key and "/" not in key for key in preflight["artifact_hashes"])
+    confirmed = service.confirm_video_preflight("canonical_preflight", shot_ids)
+    assert confirmed["generation_request"]["artifact_hashes"] == preflight[
+        "artifact_hashes"
+    ]
+    project_spec = json.loads(
+        (tmp_path / "runs/canonical_preflight/project.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert project_spec["providers"] == {
+        "video": "MiniMax-H3",
+        "video_model": "MiniMax-H3",
+        "video_provider": "minimax",
+    }
+    assert "FICTIONAL_TEST_SECRET" not in json.dumps(project_spec)
 
 
 def test_job_events_redact_token_shaped_text_and_raw_paths(
@@ -1130,9 +1260,9 @@ def test_job_events_redact_token_shaped_text_and_raw_paths(
         r"\\server\private\credentials.json",
         "/Users/alice/.env",
         "ftp://alice:password@provider.example/private",
-        "access_token=DLgKqSHww3_LsM3Rqrx4Ks22dvRpjie",
-        "access-token：DLgKqSHww3_LsM3Rqrx4Ks22dvRpjie",
-        "令牌 DLgKqSHww3_LsM3Rqrx4Ks22dvRpjie",
+        "access_token=FICTIONAL_TEST_SECRET_SENTINEL_DO_NOT_USE_000000000000",
+        "access-token：FICTIONAL_TEST_SECRET_SENTINEL_DO_NOT_USE_111111111111",
+        "令牌 sk-FAKE000000000000000000000000000000TESTONLY",
         "safe-prefix\r\nX-Injected: yes",
     ),
 )

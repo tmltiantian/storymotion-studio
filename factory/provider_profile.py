@@ -9,7 +9,6 @@ from urllib.parse import urlparse
 from .dotenv import parse_dotenv
 
 
-DEFAULT_GATEWAY_ROOT = "https://ops-ai-gateway.yc345.tv"
 DEFAULT_MINIMAX_API_BASE = "https://api.minimaxi.com"
 
 
@@ -23,12 +22,16 @@ def _truthy(value: str | None) -> bool:
 
 def _api_base(root_or_api_base: str) -> str:
     value = root_or_api_base.strip().rstrip("/")
+    if not value:
+        return ""
     return value if value.endswith("/v1") else f"{value}/v1"
 
 
 def _same_origin(left: str, right: str) -> bool:
     left_url = urlparse(left)
     right_url = urlparse(right)
+    if not left_url.scheme or not left_url.netloc or not right_url.scheme or not right_url.netloc:
+        return False
     return (left_url.scheme, left_url.netloc) == (right_url.scheme, right_url.netloc)
 
 
@@ -181,7 +184,7 @@ def resolve_provider_profile(
         openmontage_values,
     )
 
-    gateway_root, _ = values.get("GATEWAY_BASE_URL", DEFAULT_GATEWAY_ROOT)
+    gateway_root, _ = values.get("GATEWAY_BASE_URL")
     gateway_api_base = _api_base(gateway_root)
     configured_openai_base, _ = values.get("OPENAI_BASE_URL", gateway_api_base)
     gateway_key, gateway_key_name, gateway_key_source = _gateway_key(
@@ -226,7 +229,12 @@ def resolve_provider_profile(
         text_model = ""
         text_blockers = (f"Unsupported LLM_PROVIDER: {llm_provider}.",)
     if llm_provider in {"gateway", "openai"}:
-        text_blockers = () if text_key else (f"{text_key_name} is missing.",)
+        text_blocker_values: list[str] = []
+        if not text_key:
+            text_blocker_values.append(f"{text_key_name} is missing.")
+        if text_provider == "gateway" and not gateway_api_base:
+            text_blocker_values.append("GATEWAY_BASE_URL is missing.")
+        text_blockers = tuple(text_blocker_values)
     text = CapabilityConfig(
         provider=text_provider,
         model=text_model,
@@ -234,7 +242,7 @@ def resolve_provider_profile(
         api_key=text_key,
         key_name=text_key_name,
         key_source=text_key_source,
-        ready=bool(text_key),
+        ready=not text_blockers,
         blockers=text_blockers,
     )
 
@@ -245,8 +253,13 @@ def resolve_provider_profile(
         image_model, _ = values.get("GATEWAY_IMAGE_MODEL", "qwen-image-2.0")
         image_base = gateway_api_base
         supports_refs = False
-        image_ready = bool(image_key)
-        image_blockers = () if image_ready else (f"{image_key_name} is missing.",)
+        image_blocker_values: list[str] = []
+        if not image_key:
+            image_blocker_values.append(f"{image_key_name} is missing.")
+        if not gateway_api_base:
+            image_blocker_values.append("GATEWAY_BASE_URL is missing.")
+        image_ready = not image_blocker_values
+        image_blockers = tuple(image_blocker_values)
     elif image_provider == "local":
         image_key, image_key_name, image_key_source = "", "", None
         image_model, image_base, supports_refs = "static-role-preview", "", True
@@ -284,6 +297,8 @@ def resolve_provider_profile(
         video_blockers: list[str] = []
         if not gateway_key:
             video_blockers.append(f"{gateway_key_name} is missing.")
+        if not gateway_api_base:
+            video_blockers.append("GATEWAY_BASE_URL is missing.")
         if not video_enabled:
             video_blockers.append("Gateway video is disabled; set ENABLE_GATEWAY_VIDEO=1.")
         video = CapabilityConfig(

@@ -142,6 +142,16 @@ def prepare_replica_asset_jobs(
     return jobs
 
 
+def _configured_gateway_base_url() -> str:
+    value = (
+        os.environ.get("OPENAI_BASE_URL", "").strip()
+        or os.environ.get("GATEWAY_BASE_URL", "").strip()
+    )
+    if not value:
+        raise PetReplicaAssetError("GATEWAY_BASE_URL is required for live generation.")
+    return value.rstrip("/")
+
+
 def generate_replica_assets(
     plan: PetReplicaPlan,
     jobs: tuple[ReplicaAssetJob, ...],
@@ -186,10 +196,7 @@ def generate_replica_assets(
     )
     config = GatewayImageConfig(
         api_key=os.environ.get("GATEWAY_API_KEY", ""),
-        base_url=os.environ.get(
-            "OPENAI_BASE_URL",
-            os.environ.get("GATEWAY_BASE_URL", "https://ops-ai-gateway.yc345.tv/v1"),
-        ),
+        base_url=_configured_gateway_base_url(),
         model=ASSET_MODEL,
     )
     staged: list[tuple[Path, ReplicaAssetRecord]] = []

@@ -39,6 +39,7 @@ const stages: ProjectDetail["stages"] = [
   blocked_reasons: [],
   error: "",
   artifacts: [],
+  active_run_job: null,
 })) as ProjectDetail["stages"];
 
 const project: ProjectDetail = {

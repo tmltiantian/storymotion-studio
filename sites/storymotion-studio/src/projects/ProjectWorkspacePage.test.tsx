@@ -63,6 +63,7 @@ function stageFixture(
     blocked_reasons: [],
     error: "",
     artifacts: [evidence],
+    active_run_job: null,
     ...overrides,
   };
 }
@@ -384,6 +385,98 @@ describe("project review workspace", () => {
     expect(client.runStage).toHaveBeenCalledWith("episode_01", "concept", { enable_live: false });
     expect((await screen.findAllByText("concept.json"))[0]).toBeVisible();
     expect(screen.getAllByText("等待确认")[0]).toBeVisible();
+  });
+
+  it("reconnects to an authoritative local-stage job under StrictMode without resubmitting", async () => {
+    const runningJob: JobDetail = {
+      ...videoJob("running"),
+      job_id: "2".repeat(32),
+      operation: "run_stage",
+      provider_tasks: {},
+      result: {},
+    };
+    const active = {
+      ...stageFixture({
+        stage: "concept",
+        execution_state: "running",
+        review_state: "not_ready",
+        revision: 0,
+        artifacts: [],
+      }),
+      active_run_job: runningJob,
+    } as StageDetail;
+    const passed = {
+      ...stageFixture({ stage: "concept", revision: 1 }),
+      active_run_job: null,
+    } as StageDetail;
+    let finished = false;
+    const client = workspaceApi(active, projectFixture(active));
+    vi.mocked(client.getProject).mockImplementation(async () => (
+      projectFixture(finished ? passed : active)
+    ));
+    vi.mocked(client.getStage).mockImplementation(async () => (
+      finished ? passed : active
+    ));
+    vi.mocked(client.getJob).mockImplementation(async () => {
+      finished = true;
+      return { ...runningJob, status: "completed" };
+    });
+
+    renderWorkspace(client, "/projects/episode_01/stages/concept", true);
+
+    await waitFor(() => expect(client.getJob).toHaveBeenCalledWith(runningJob.job_id));
+    await waitFor(() => {
+      expect(client.getStage).toHaveBeenLastCalledWith(
+        "episode_01",
+        "concept",
+        expect.any(AbortSignal),
+      );
+    });
+    expect(client.runStage).not.toHaveBeenCalled();
+  });
+
+  it("does not reload an old local-stage route after navigation", async () => {
+    const runningJob: JobDetail = {
+      ...videoJob("running"),
+      job_id: "2".repeat(32),
+      operation: "run_stage",
+      provider_tasks: {},
+      result: {},
+    };
+    const concept = {
+      ...stageFixture({ stage: "concept", execution_state: "running" }),
+      active_run_job: runningJob,
+    } as StageDetail;
+    const script = {
+      ...stageFixture({ stage: "script", revision: 2 }),
+      active_run_job: null,
+    } as StageDetail;
+    let finishJob: (job: JobDetail) => void = () => undefined;
+    const client = workspaceApi(concept, projectFixture(concept));
+    vi.mocked(client.getStage).mockImplementation(async (_id, stage) => (
+      stage === "script" ? script : concept
+    ));
+    vi.mocked(client.getJob).mockImplementation(() => new Promise((resolve) => {
+      finishJob = resolve;
+    }));
+    const user = userEvent.setup();
+
+    renderWorkspace(client, "/projects/episode_01/stages/concept");
+    await waitFor(() => expect(client.getJob).toHaveBeenCalledWith(runningJob.job_id));
+    await user.click(screen.getByRole("link", {
+      name: "02 剧本：成果已生成；已确认",
+    }));
+    await screen.findByText("修订 2");
+    const callsBeforeOldCompletion = vi.mocked(client.getStage).mock.calls.length;
+
+    await act(async () => finishJob({ ...runningJob, status: "completed" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-location")).toHaveTextContent(
+        "/projects/episode_01/stages/script",
+      );
+    });
+    expect(vi.mocked(client.getStage).mock.calls).toHaveLength(callsBeforeOldCompletion);
   });
 
   it("loads a deep-linked project and stage in parallel and shows both states", async () => {
@@ -931,6 +1024,21 @@ describe("project review workspace", () => {
       expect.any(AbortSignal),
     );
     expect(await screen.findByText("已退回修改")).toBeVisible();
+  });
+
+  it("offers a rerun for a persisted whole-stage change request", async () => {
+    const changed = {
+      ...stageFixture(),
+      review_state: "changes_requested" as const,
+      review_blocks_progress: true,
+    };
+    const api = workspaceApi(changed, projectFixture(changed, {
+      required_action: "address_review_changes",
+    }));
+
+    renderWorkspace(api);
+
+    expect(await screen.findByRole("button", { name: "重新运行分镜阶段" })).toBeEnabled();
   });
 
   it("recovers controls after a failed stage-level mutation", async () => {

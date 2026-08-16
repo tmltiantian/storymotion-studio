@@ -1239,10 +1239,15 @@ def _required_env(name: str) -> str:
 
 
 def _gateway_base_url() -> str:
-    return os.environ.get(
-        "OPENAI_BASE_URL",
-        os.environ.get("GATEWAY_BASE_URL", "https://ops-ai-gateway.yc345.tv/v1"),
-    ).rstrip("/")
+    value = (
+        os.environ.get("OPENAI_BASE_URL", "").strip()
+        or os.environ.get("GATEWAY_BASE_URL", "").strip()
+    )
+    if not value:
+        raise SourceLockedReplicaError(
+            "GATEWAY_BASE_URL is required for live generation."
+        )
+    return value.rstrip("/")
 
 
 def _run(command: Sequence[str], label: str) -> None:
