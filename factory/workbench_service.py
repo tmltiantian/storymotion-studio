@@ -1610,7 +1610,8 @@ class WorkbenchService:
         request = VideoGenerationRequest.from_dict(raw_request)
         if request.project_id != record.project_id:
             raise ValueError("Stored generation request belongs to another project")
-        if record.status == "failed":
+        failed_resume = record.status == "failed"
+        if failed_resume:
             recovery_mode, current_request = self._video_job_recovery(record)
             if recovery_mode == "historical":
                 raise ValueError(
@@ -1630,6 +1631,25 @@ class WorkbenchService:
         lease = self._claim_worker(job_id)
         try:
             record = self.jobs.resume(job_id)
+            if record.status in {"completed", "cancelled"}:
+                self._release_worker(job_id, lease)
+                return self._job_public(record)
+            if failed_resume:
+                claimed_record = self.jobs.get(job_id)
+                recovery_mode, current_request = self._video_job_recovery(
+                    claimed_record
+                )
+                if recovery_mode != "poll_only" or current_request is None:
+                    message = (
+                        "Stored generation request does not match the current "
+                        "project revision"
+                        if recovery_mode == "historical"
+                        else "Video generation requires a fresh confirmation"
+                    )
+                    self.jobs.fail(job_id, error=message)
+                    raise ValueError(message)
+                request = current_request
+                record = claimed_record
         except BaseException:
             self._release_worker(job_id, lease)
             raise

@@ -2,7 +2,7 @@
 
 ## Status
 
-Fix round 2 implemented and verified; scoped re-review pending.
+Fix round 3 implemented and verified; scoped re-review pending.
 
 ## Delivered
 
@@ -34,12 +34,19 @@ Fix round 2 implemented and verified; scoped re-review pending.
 - Preserved unsent review descriptions and append an idempotent, clearly delimited video timecode block containing the authoritative shot ID, candidate artifact ID, and exact media time.
 - Retained the prior path/secret-free descriptor contract and in-memory, one-shot paid confirmation behavior.
 
+## Fix Round 3
+
+- Reloaded the authoritative video workspace whenever a tracked active job becomes terminal. Shot selection and generation controls remain locked in a neutral classification state until the server returns `poll_only`, `new_submission_required`, or historical recovery data; classification errors expose an explicit retry without enabling paid submission.
+- Changed compact resume acknowledgements to restart `JobProgress` recovery immediately. The last failed snapshot remains visible with a recovering status while SSE and the five-second persisted GET fallback retry from the saved event cursor; a transient first read no longer invites a duplicate resume call.
+- Made failed-job resume validation atomic with project ownership. Resume now claims the worker lease and uses `JobManager.resume()` to reserve the project, rereads the current job, and rebuilds the canonical request while ownership is held before dispatch. A changed revision transitions the recovery back to failed, releases worker/project ownership, and never reaches the renderer.
+- Added deterministic tests for both live failure classifications, compact-resume read recovery, and a reserved review mutation completing between preliminary and final canonical comparisons.
+
 ## Verification
 
-- Round-2 focused frontend recovery/workspace matrix: 39 passed.
-- All frontend Vitest: 83 passed.
-- Round-2 adjacent backend workbench/API/jobs/preflight/provider-batch matrix: 188 passed (one existing Starlette/httpx deprecation warning).
-- Final strengthened backend recovery check: 2 passed; Ruff and `git diff --check` passed.
+- Round-3 focused frontend recovery/workspace matrix: 42 passed.
+- All frontend Vitest: 86 passed.
+- Round-3 adjacent backend workbench/API/jobs/preflight/provider-batch matrix: 189 passed (one existing Starlette/httpx deprecation warning).
+- Deterministic backend resume race matrix: 8 passed; Ruff and `git diff --check` passed.
 - The round-1 full backend pytest result remains 2,871 passed; it was not repeated in round 2 because the focused and adjacent backend matrices cover all changed services.
 - TypeScript typecheck: passed.
 - ESLint: passed.
@@ -52,3 +59,4 @@ Fix round 2 implemented and verified; scoped re-review pending.
 - Browser media is deterministic and network-free; Playwright verifies rendered geometry and interactions rather than relying on platform codec decoding.
 - The full backend run reports the existing FastAPI TestClient `httpx` deprecation warning; it is unrelated to Task 8 behavior.
 - No provider, paid API, `.env`, or external network call was made during round 2.
+- No provider, paid API, `.env`, or external network call was made during round 3.

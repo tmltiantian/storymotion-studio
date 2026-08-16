@@ -427,6 +427,55 @@ describe("project review workspace", () => {
   });
 
   it.each([
+    ["poll_only", "恢复生成"],
+    ["new_submission_required", "视频生成预检"],
+  ] as const)(
+    "authoritatively classifies a running job that becomes failed as %s",
+    async (mode, expectedControl) => {
+      const selected = videoStageFixture();
+      const api = workspaceApi(selected, projectFixture(selected));
+      const running = videoJob("running");
+      const failed = videoJob("failed");
+      let resolveClassification!: (value: VideoWorkspace) => void;
+      const classification = new Promise<VideoWorkspace>((resolve) => {
+        resolveClassification = resolve;
+      });
+      vi.mocked(api.getVideoWorkspace)
+        .mockResolvedValueOnce(videoWorkspaceFixture(running, {
+          mode: "poll_only",
+          shot_ids: ["shot_03", "shot_04"],
+        }))
+        .mockImplementationOnce(async () => classification);
+      vi.mocked(api.getJob).mockResolvedValue(failed);
+
+      renderWorkspace(api, "/projects/episode_01/stages/video");
+
+      expect(await screen.findByText("正在确认作业恢复方式")).toBeVisible();
+      expect(screen.queryByText("视频生成预检")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "恢复生成" })).not.toBeInTheDocument();
+      expect(screen.getByRole("group", { name: "生成镜头" })).toBeDisabled();
+
+      await act(async () => {
+        resolveClassification(videoWorkspaceFixture(failed, {
+          mode,
+          shot_ids: ["shot_03", "shot_04"],
+        }));
+      });
+
+      if (expectedControl === "恢复生成") {
+        expect(await screen.findByRole("button", { name: expectedControl })).toBeEnabled();
+        expect(screen.queryByText("视频生成预检")).not.toBeInTheDocument();
+      } else {
+        expect(await screen.findByText(expectedControl)).toBeVisible();
+        expect(screen.queryByRole("button", { name: "恢复生成" })).not.toBeInTheDocument();
+      }
+      expect(api.getVideoWorkspace).toHaveBeenCalledTimes(2);
+      expect(api.generateVideo).not.toHaveBeenCalled();
+      expect(api.testVideo).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
     ["new_submission_required", "此作业需重新确认后提交"],
     ["historical", "历史作业，与当前修订不一致"],
   ] as const)("exposes fresh preflight for a %s failed job", async (mode, historyLabel) => {

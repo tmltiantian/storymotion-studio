@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -677,6 +678,80 @@ def test_failed_video_workspace_allows_same_revision_provider_task_poll(
     assert calls[0]["generation_request"] == request
     assert calls[0]["provider_tasks"]["shot-1"]["task_id"] == "task-shot-1"
     assert manager.get(job_id).status == "completed"
+
+
+def test_resume_revalidates_revision_after_worker_and_project_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, project = _ready_video_workspace(tmp_path)
+    manager = JobManager(workspace)
+    job_id, _request = _canonical_failed_video_job(
+        manager,
+        project,
+        with_provider_tasks=True,
+    )
+    renderer_calls: list[dict[str, object]] = []
+    service = WorkbenchService(
+        workspace,
+        job_manager=manager,
+        video_renderer=lambda **kwargs: renderer_calls.append(kwargs)
+        or {"success": True},
+        dispatch=lambda callback: callback(),
+    )
+    first_comparison_done = threading.Event()
+    continue_resume = threading.Event()
+    comparison_count = 0
+    original_recovery = service._video_job_recovery
+
+    def paused_recovery(record):
+        nonlocal comparison_count
+        result = original_recovery(record)
+        comparison_count += 1
+        if comparison_count == 1:
+            first_comparison_done.set()
+            assert continue_resume.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(service, "_video_job_recovery", paused_recovery)
+    errors: list[BaseException] = []
+
+    def resume() -> None:
+        try:
+            service.resume_job(job_id)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=resume)
+    worker.start()
+    assert first_comparison_done.wait(timeout=5)
+
+    service.request_stage_changes(
+        "episode_ready",
+        "script",
+        revision=1,
+        reason="revision changed during resume",
+    )
+    continue_resume.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], ValueError)
+    assert "current project revision" in str(errors[0])
+    assert comparison_count == 2
+    assert renderer_calls == []
+    failed = manager.get(job_id)
+    assert failed.status == "failed"
+    assert failed.resume_count == 1
+    assert (
+        service._reserved_mutation(
+            "episode_ready",
+            "request_changes",
+            lambda: "reservation released",
+        )
+        == "reservation released"
+    )
 
 
 def test_job_detail_includes_persisted_last_event_sequence(
