@@ -61,11 +61,22 @@ DEFAULT_FRONTEND_ORIGINS = (
 _ARTIFACT_ID = re.compile(r"art_[0-9a-f]{32}")
 _JOB_ID = re.compile(r"[0-9a-f]{32}")
 _EMBEDDED_PATH = re.compile(r"(?<![A-Za-z0-9:])/(?:[^\s,;:'\"]+/)*[^\s,;:'\"]+")
-_URL_TEXT = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
+_WINDOWS_PATH = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:[a-z]:[\\/][^\s,;'\"]+|\\+[^\s\\/]+(?:\\+[^\s,;'\"]+)+)"
+)
+_URI_TEXT = re.compile(r"(?i)(?<![A-Za-z0-9])[a-z][a-z0-9+.-]{1,31}:(?://)?[^\s<>'\"]+")
 _TOKEN_TEXT = re.compile(r"\bsk-[A-Za-z0-9_-]{4,}\b")
 _AUTH_TEXT = re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/-]+=*")
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\b(?:api[_-]?key|authorization|password|secret|token)\s*[:=]\s*[^\s,;]+"
+    r"(?i)(?<![A-Za-z0-9_])(?:api[\s_-]*key|access[\s_-]*token|authorization|password|secret|token)\s*[:=]\s*[^\s,;]+"
+)
+_TOKEN_LIKE_CREDENTIAL = re.compile(
+    r"(?<![A-Za-z0-9._-])"
+    r"(?=[A-Za-z0-9._-]{20,}(?![A-Za-z0-9._-]))"
+    r"(?=[A-Za-z0-9._-]*[A-Z])"
+    r"(?=[A-Za-z0-9._-]*[a-z])"
+    r"(?=[A-Za-z0-9._-]*[0-9])"
+    r"[A-Za-z0-9._-]+"
 )
 _MEDIA_TYPES = {
     ".aac": "audio/aac",
@@ -93,6 +104,55 @@ _ACTIVE_WORKERS: set[tuple[str, str]] = set()
 _ACTIVE_WORKERS_LOCK = threading.Lock()
 
 
+def sanitize_public_text(
+    value: Any,
+    *,
+    exact_values: Sequence[str] = (),
+) -> str:
+    text = unicodedata.normalize("NFKC", str(value))
+    if any(unicodedata.category(character) == "Cc" for character in text):
+        return "[redacted]"
+    for secret in sorted(
+        {str(item) for item in exact_values if str(item)}, key=len, reverse=True
+    ):
+        text = text.replace(secret, "[redacted]")
+    text = _SECRET_ASSIGNMENT.sub("[redacted]", text)
+    text = _AUTH_TEXT.sub("[redacted]", text)
+    text = _TOKEN_TEXT.sub("[redacted]", text)
+    text = _TOKEN_LIKE_CREDENTIAL.sub("[redacted]", text)
+    text = _URI_TEXT.sub("[redacted-url]", text)
+    text = _WINDOWS_PATH.sub("[redacted-path]", text)
+    text = _EMBEDDED_PATH.sub("[redacted-path]", text)
+    return text
+
+
+def sanitize_public_filename(value: Any) -> str:
+    raw = str(value)
+    if any(unicodedata.category(character) == "Cc" for character in raw):
+        return "download"
+    try:
+        sanitized = sanitize_public_text(raw).strip()
+    except Exception:
+        return "download"
+    if not sanitized or "[redacted" in sanitized.lower():
+        return "download"
+    if "/" in sanitized or "\\" in sanitized:
+        return "download"
+    return sanitized[:180]
+
+
+class MediaTooLargeError(RuntimeError):
+    pass
+
+
+class MediaSnapshotBusyError(RuntimeError):
+    pass
+
+
+class MediaSnapshotQuotaError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class _ArtifactRef:
     artifact_id: str
@@ -115,6 +175,7 @@ class OpenedMedia:
         *,
         verified_stat: os.stat_result,
         expected_sha256: str = "",
+        release: Callable[[], None] | None = None,
     ):
         self._descriptor = descriptor
         self.info = dict(info)
@@ -122,6 +183,7 @@ class OpenedMedia:
         self._expected_sha256 = expected_sha256
         self._closed = False
         self._close_lock = threading.Lock()
+        self._release = release or (lambda: None)
 
     @property
     def closed(self) -> bool:
@@ -132,7 +194,10 @@ class OpenedMedia:
             if self._closed:
                 return
             self._closed = True
-            os.close(self._descriptor)
+            try:
+                os.close(self._descriptor)
+            finally:
+                self._release()
 
     def iter_range(
         self,
@@ -241,7 +306,12 @@ class WorkbenchService:
         stage_runner: Callable[..., PipelineRunResult] = resume_pipeline,
         video_renderer: Callable[..., Mapping[str, Any]] | None = None,
         dispatch: Callable[[Callable[[], None]], Any] | None = None,
+        max_media_bytes: int = 512 * 1024 * 1024,
+        max_media_snapshots: int = 4,
+        max_media_snapshot_bytes: int = 1024 * 1024 * 1024,
     ):
+        if min(max_media_bytes, max_media_snapshots, max_media_snapshot_bytes) < 1:
+            raise ValueError("Media snapshot limits must be positive")
         with AnchoredDirectory.open(workspace, label="Workbench workspace") as anchor:
             self.workspace = anchor.canonical_path
         configured_runs = (
@@ -283,6 +353,38 @@ class WorkbenchService:
         self._catalog_index_catalog: WorkCatalog | None = None
         self._catalog_index_binding: tuple[tuple[Any, ...], ...] = ()
         self._catalog_index: dict[str, _ArtifactRef] = {}
+        self.max_media_bytes = int(max_media_bytes)
+        self.max_media_snapshots = int(max_media_snapshots)
+        self.max_media_snapshot_bytes = int(max_media_snapshot_bytes)
+        self._media_snapshot_lock = threading.Lock()
+        self._media_snapshot_active = 0
+        self._media_snapshot_bytes = 0
+
+    @property
+    def media_snapshot_usage(self) -> dict[str, int]:
+        with self._media_snapshot_lock:
+            return {
+                "active": self._media_snapshot_active,
+                "bytes": self._media_snapshot_bytes,
+            }
+
+    def _reserve_media_snapshot(self, size: int) -> None:
+        if size > self.max_media_bytes:
+            raise MediaTooLargeError("Media exceeds the configured snapshot limit")
+        with self._media_snapshot_lock:
+            if self._media_snapshot_active >= self.max_media_snapshots:
+                raise MediaSnapshotBusyError("Media snapshot capacity is busy")
+            if self._media_snapshot_bytes + size > self.max_media_snapshot_bytes:
+                raise MediaSnapshotQuotaError("Media snapshot byte quota is busy")
+            self._media_snapshot_active += 1
+            self._media_snapshot_bytes += size
+
+    def _release_media_snapshot(self, size: int) -> None:
+        with self._media_snapshot_lock:
+            self._media_snapshot_active -= 1
+            self._media_snapshot_bytes -= size
+            if self._media_snapshot_active < 0 or self._media_snapshot_bytes < 0:
+                raise RuntimeError("Media snapshot accounting underflow")
 
     def _worker_key(self, job_id: str) -> tuple[str, str]:
         return str(self.jobs.jobs_dir), str(job_id)
@@ -1201,6 +1303,7 @@ class WorkbenchService:
         ref = self._media_ref(artifact_id)
         source_descriptor = -1
         snapshot_descriptor = -1
+        reserved_size = -1
         with AnchoredDirectory.open(
             ref.root, label="Authorized artifact root"
         ) as anchor:
@@ -1227,6 +1330,8 @@ class WorkbenchService:
                     and before.st_size != ref.expected_size
                 ):
                     raise KeyError(artifact_id)
+                self._reserve_media_snapshot(before.st_size)
+                reserved_size = before.st_size
                 with tempfile.TemporaryFile(prefix=".storymotion-media-") as snapshot:
                     digest = hashlib.sha256()
                     copied = 0
@@ -1273,6 +1378,9 @@ class WorkbenchService:
             except BaseException:
                 if snapshot_descriptor >= 0:
                     os.close(snapshot_descriptor)
+                if reserved_size >= 0:
+                    self._release_media_snapshot(reserved_size)
+                    reserved_size = -1
                 raise
             finally:
                 if source_descriptor >= 0:
@@ -1288,14 +1396,63 @@ class WorkbenchService:
             },
             verified_stat=metadata,
             expected_sha256=ref.expected_sha256,
+            release=lambda: self._release_media_snapshot(reserved_size),
         )
 
     def media_info(self, artifact_id: str) -> dict[str, Any]:
-        opened = self.open_media(artifact_id)
-        try:
-            return dict(opened.info)
-        finally:
-            opened.close()
+        ref = self._media_ref(artifact_id)
+        descriptor = -1
+        with AnchoredDirectory.open(
+            ref.root, label="Authorized artifact root"
+        ) as anchor:
+            parent = self._open_artifact_parent(anchor, ref.relative_path)
+            try:
+                listed = os.stat(
+                    ref.relative_path.name,
+                    dir_fd=parent,
+                    follow_symlinks=False,
+                )
+                descriptor = os.open(
+                    ref.relative_path.name,
+                    os.O_RDONLY | os.O_NOFOLLOW,
+                    dir_fd=parent,
+                )
+                opened = os.fstat(descriptor)
+                current = os.stat(
+                    ref.relative_path.name,
+                    dir_fd=parent,
+                    follow_symlinks=False,
+                )
+
+                def identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+                    return (
+                        value.st_dev,
+                        value.st_ino,
+                        value.st_size,
+                        value.st_mtime_ns,
+                        value.st_ctime_ns,
+                    )
+
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or identity(listed) != identity(opened)
+                    or identity(opened) != identity(current)
+                    or (
+                        ref.expected_size is not None
+                        and opened.st_size != ref.expected_size
+                    )
+                ):
+                    raise KeyError(artifact_id)
+                return {
+                    "artifact_id": ref.artifact_id,
+                    "name": ref.name,
+                    "media_type": ref.media_type,
+                    "size": opened.st_size,
+                }
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                os.close(parent)
 
     def read_media(
         self,
@@ -2152,38 +2309,18 @@ class WorkbenchService:
         *,
         exact_values: Sequence[str] | None = None,
     ) -> str:
-        redaction_values = (
-            self._loaded_redaction_values()
-            if exact_values is None
-            else tuple(exact_values)
-        )
-        text = self._redact_values(str(value), redaction_values)
-        text = _TOKEN_TEXT.sub("[redacted]", text)
-        text = _AUTH_TEXT.sub("[redacted]", text)
-        text = _SECRET_ASSIGNMENT.sub("[redacted]", text)
-
-        def sanitize_url(match: re.Match[str]) -> str:
-            parsed = urlsplit(match.group(0))
-            if (
-                parsed.query
-                or parsed.username is not None
-                or parsed.password is not None
-            ):
-                return "[redacted-url]"
-            return match.group(0)
-
-        text = _URL_TEXT.sub(sanitize_url, text)
-        if Path(text).is_absolute():
-            return "[redacted-path]"
-        return _EMBEDDED_PATH.sub("[redacted-path]", text)
+        try:
+            redaction_values = (
+                self._loaded_redaction_values()
+                if exact_values is None
+                else tuple(exact_values)
+            )
+            return sanitize_public_text(value, exact_values=redaction_values)
+        except Exception:
+            return "[redacted]"
 
     def _public_catalog_text(self, value: Any, *, maximum: int) -> str:
-        text = unicodedata.normalize("NFC", self._public_text(str(value)))
-        text = _URL_TEXT.sub("[redacted-url]", text)
-        text = "".join(
-            character for character in text if unicodedata.category(character) != "Cc"
-        ).strip()
-        return text[:maximum]
+        return self._public_text(str(value)).strip()[:maximum]
 
     def _reject_path_input(self, value: Any) -> Any:
         if isinstance(value, Mapping):

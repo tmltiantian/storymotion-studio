@@ -21,6 +21,7 @@ from .pipeline_contracts import StageName, StageState
 from .pipeline_executors import register_executor
 from .pipeline_eval import build_automatic_eval
 from .placeholder_renderer import render_placeholder_video
+from .pipeline_review import delivery_eval_evidence
 from .preview_writer import (
     write_storyboard_markdown,
     write_subtitles,
@@ -500,6 +501,7 @@ def execute_deliver(context: StageContext) -> StageExecution:
             "master": str(master.resolve()),
             "sha256": digest,
             "publication_status": "REVIEW_REQUIRED",
+            "eval_evidence": delivery_eval_evidence(context.project_dir),
         },
     )
     return StageExecution.passed(

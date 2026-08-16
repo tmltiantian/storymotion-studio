@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .file_io import sha256_file, write_json_atomic
-from .pipeline_contracts import PIPELINE_STAGES, ReviewPolicy, ReviewState, StageName
+from .pipeline_contracts import (
+    PIPELINE_STAGES,
+    ProductionPackage,
+    ReviewPolicy,
+    ReviewState,
+    StageName,
+    StageState,
+)
 
 
 REVIEW_DIRECTORY = "reviews"
@@ -289,6 +296,58 @@ def _current_revision(
         if revision.number == number:
             return revision
     raise ValueError(f"Unknown {StageName(stage).value} revision: {number}")
+
+
+def delivery_eval_evidence(project_dir: str | Path) -> dict[str, Any]:
+    root = Path(project_dir).expanduser().resolve()
+    package = ProductionPackage.from_dict(
+        _read_object(root / "production_package.json")
+    )
+    record = next(item for item in package.stages if item.stage is StageName.EVAL)
+    if record.state is not StageState.PASSED or record.revision is None:
+        raise ValueError("EVAL must pass before delivery")
+    revision = _current_revision(root, StageName.EVAL, record.revision)
+    if (
+        revision.input_signature != record.input_signature
+        or revision.executor != record.executor
+    ):
+        raise ValueError("EVAL revision does not match the production package")
+    validation = validate_stage_review(root, StageName.EVAL)
+    if (
+        not validation.valid
+        or validation.review is None
+        or validation.review.state is not ReviewState.APPROVED
+        or validation.review.revision != revision.number
+    ):
+        raise ValueError("EVAL must have current durable approval before delivery")
+    revision_artifacts = {
+        str(Path(artifact.path).expanduser().resolve()): artifact.sha256
+        for artifact in revision.artifacts
+    }
+    reports: list[dict[str, str]] = []
+    for raw_path in package.eval_reports:
+        path = Path(raw_path).expanduser().resolve()
+        try:
+            relative = path.relative_to(root).as_posix()
+        except ValueError as exc:
+            raise ValueError("EVAL report escaped the project") from exc
+        digest = revision_artifacts.get(str(path))
+        if digest is None or sha256_file(path) != digest:
+            raise ValueError("EVAL report is not immutable revision evidence")
+        reports.append({"path": relative, "sha256": digest})
+    if not reports:
+        raise ValueError("EVAL delivery evidence has no reports")
+    return {
+        "stage": StageName.EVAL.value,
+        "revision": revision.number,
+        "input_signature": revision.input_signature,
+        "executor": revision.executor,
+        "reports": reports,
+        "review": {
+            "revision": validation.review.revision,
+            "sha256": sha256_file(_review_path(root, StageName.EVAL)),
+        },
+    }
 
 
 def _artifact_integrity_issue(artifacts: tuple[ArtifactRevision, ...]) -> str:

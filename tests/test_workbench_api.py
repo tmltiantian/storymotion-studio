@@ -124,6 +124,7 @@ def client() -> TestClient:
 
 def _authorized_media_service(
     tmp_path: Path,
+    **service_options,
 ) -> tuple[WorkbenchService, Path, str]:
     project = tmp_path / "runs/episode_01"
     artifact = project / "stages/concept/preview.mp4"
@@ -150,6 +151,7 @@ def _authorized_media_service(
         tmp_path,
         job_manager=JobManager(tmp_path),
         provider_profile_loader=lambda: None,
+        **service_options,
     )
     artifact_id = service.project_detail("episode_01")["stages"][0]["artifacts"][0][
         "artifact_id"
@@ -373,11 +375,13 @@ def test_work_catalog_redacts_and_bounds_all_public_metadata(tmp_path: Path) -> 
     manifest_path = archive / "archive_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     entry = manifest["entries"][0]
-    entry["title"] = "/Users/private/.env"
-    entry["version_label"] = "https://provider.example/private"
-    entry["metadata"]["role"] = "sk-secretToken123"
+    entry["title"] = r"C:\Users\private\.env"
+    entry["version_label"] = "ftp://alice:password@provider.example/private"
+    entry["metadata"]["role"] = "access_token＝DLgKqSHww3_LsM3Rqrx4Ks22dvRpjie"
     entry["metadata"]["description"] = (
-        "保留中文说明 " + "长" * 900 + " https://provider.example/v1"
+        "保留中文说明 "
+        + "长" * 900
+        + " \\server\\private\\secret DLgKqSHww3_LsM3Rqrx4Ks22dvRpjie"
     )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     service = WorkbenchService(
@@ -391,9 +395,11 @@ def test_work_catalog_redacts_and_bounds_all_public_metadata(tmp_path: Path) -> 
     detail = service.work_detail(listed[0]["work_id"])
     serialized = json.dumps({"listed": listed, "detail": detail}, ensure_ascii=False)
 
-    assert "/Users/" not in serialized
-    assert "sk-secret" not in serialized
-    assert "http://" not in serialized and "https://" not in serialized
+    assert "C:\\Users" not in serialized
+    assert "access_token" not in serialized
+    assert "DLgKq" not in serialized
+    assert "ftp://" not in serialized
+    assert "server" not in serialized
     assert len(listed[0]["title"]) <= 120
     assert all(len(role) <= 80 for role in listed[0]["roles"])
     assert len(detail["versions"][0]["label"]) <= 80
@@ -403,6 +409,30 @@ def test_work_catalog_redacts_and_bounds_all_public_metadata(tmp_path: Path) -> 
         detail["versions"][0]["outputs"][0]["rights"]["redistribution_status"]
         == "unverified"
     )
+
+
+def test_download_content_disposition_sanitizes_both_filenames_and_crlf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _artifact, artifact_id = _authorized_media_service(tmp_path)
+    original_info = service.media_info
+
+    def unsafe_name(selected: str):
+        info = original_info(selected)
+        info["name"] = "access_token=VerySecretValue.mp4\r\nX-Injected: yes"
+        return info
+
+    monkeypatch.setattr(service, "media_info", unsafe_name)
+    response = TestClient(create_workbench_app(service)).head(
+        f"/api/download/{artifact_id}"
+    )
+    header = response.headers["content-disposition"]
+
+    assert response.status_code == 200
+    assert header == "attachment; filename=\"download\"; filename*=UTF-8''download"
+    assert "secret" not in header.lower()
+    assert "injected" not in header.lower()
 
 
 def test_catalog_snapshot_cannot_overwrite_newer_index_under_concurrency(
@@ -663,7 +693,7 @@ def test_media_supports_head_and_exact_single_ranges(tmp_path: Path) -> None:
     assert empty.content == b""
 
 
-def test_media_stream_and_head_use_and_close_one_authorized_descriptor(
+def test_media_stream_snapshots_once_and_head_uses_metadata_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -692,7 +722,61 @@ def test_media_stream_and_head_use_and_close_one_authorized_descriptor(
     assert streamed.content == b"0123456789"
     assert head.status_code == 200
     assert head.headers["content-length"] == "2"
+    assert len(opened) == 1
     assert all(item.closed for item in opened)
+
+
+def test_media_oversize_get_is_413_but_head_uses_no_snapshot(tmp_path: Path) -> None:
+    service, _artifact, artifact_id = _authorized_media_service(
+        tmp_path,
+        max_media_bytes=4,
+    )
+    media_client = TestClient(create_workbench_app(service))
+
+    head = media_client.head(f"/api/media/{artifact_id}")
+    response = media_client.get(f"/api/media/{artifact_id}")
+
+    assert head.status_code == 200
+    assert head.headers["content-length"] == "10"
+    assert response.status_code == 413
+    assert response.json() == {
+        "error": {
+            "code": "media_too_large",
+            "message": "Media exceeds the configured snapshot limit",
+        }
+    }
+    assert service.media_snapshot_usage == {"active": 0, "bytes": 0}
+
+
+@pytest.mark.parametrize(
+    ("options", "expected_code"),
+    (
+        ({"max_media_snapshots": 1, "max_media_snapshot_bytes": 100}, "media_busy"),
+        ({"max_media_snapshots": 2, "max_media_snapshot_bytes": 15}, "media_quota"),
+    ),
+)
+def test_media_snapshot_admission_is_bounded_and_released(
+    tmp_path: Path,
+    options: dict[str, int],
+    expected_code: str,
+) -> None:
+    service, _artifact, artifact_id = _authorized_media_service(
+        tmp_path,
+        max_media_bytes=100,
+        **options,
+    )
+    first = service.open_media(artifact_id)
+    media_client = TestClient(create_workbench_app(service))
+
+    rejected = media_client.get(f"/api/media/{artifact_id}")
+
+    assert rejected.status_code == 429
+    assert rejected.json()["error"]["code"] == expected_code
+    assert service.media_snapshot_usage == {"active": 1, "bytes": 10}
+    first.close()
+    assert service.media_snapshot_usage == {"active": 0, "bytes": 0}
+    assert media_client.get(f"/api/media/{artifact_id}").status_code == 200
+    assert service.media_snapshot_usage == {"active": 0, "bytes": 0}
 
 
 def test_media_disconnect_before_first_chunk_closes_authorized_descriptor(
@@ -743,6 +827,7 @@ def test_media_disconnect_before_first_chunk_closes_authorized_descriptor(
 
     assert len(opened) == 1
     assert opened[0].closed
+    assert service.media_snapshot_usage == {"active": 0, "bytes": 0}
 
 
 def test_sse_replays_only_events_after_last_event_id(tmp_path: Path) -> None:

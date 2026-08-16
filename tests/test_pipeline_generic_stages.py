@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -219,7 +220,19 @@ def test_native_media_stages_keep_outputs_isolated_and_stop_at_review_gates(
     assert delivery.stopped_at is StageName.DELIVER
     assert delivery.stopped_state is StageState.BLOCKED
     assert (root / "stages/deliver/master.mp4").read_bytes() == b"final"
-    assert (root / "stages/deliver/delivery_manifest.json").is_file()
+    delivery_manifest = json.loads(
+        (root / "stages/deliver/delivery_manifest.json").read_text(encoding="utf-8")
+    )
+    assert delivery_manifest["eval_evidence"]["revision"] == 1
+    report_evidence = next(
+        item
+        for item in delivery_manifest["eval_evidence"]["reports"]
+        if item["path"] == "stages/eval/eval_result.json"
+    )
+    assert (
+        report_evidence["sha256"]
+        == hashlib.sha256(eval_report.read_bytes()).hexdigest()
+    )
 
 
 def test_edit_assembles_preserved_and_repaired_clips_in_storyboard_order(

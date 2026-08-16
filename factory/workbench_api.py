@@ -16,7 +16,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from .pipeline_jobs import ProjectBusyError
 from .pipeline_store import ApprovalInProgressError, PipelineInProgressError
 from .video_preflight import GenerationTokenError
-from .workbench_service import WorkbenchService
+from .workbench_service import (
+    MediaSnapshotBusyError,
+    MediaSnapshotQuotaError,
+    MediaTooLargeError,
+    WorkbenchService,
+    sanitize_public_filename,
+)
 
 
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
@@ -26,10 +32,7 @@ _RAW_PATH = re.compile(r"(?<![A-Za-z0-9:])/(?:[^\s,;:'\"]+/)*[^\s,;:'\"]+")
 
 
 def _attachment_header(name: str) -> str:
-    cleaned = str(name).replace("\\", "/").rsplit("/", 1)[-1]
-    cleaned = "".join(character for character in cleaned if ord(character) >= 32)
-    if not cleaned:
-        cleaned = "download"
+    cleaned = sanitize_public_filename(name)
     fallback = cleaned.encode("ascii", "ignore").decode("ascii")
     fallback = re.sub(r"[^A-Za-z0-9._ -]", "_", fallback).strip(" .") or "download"
     fallback = fallback.replace('"', "_")[:120]
@@ -207,6 +210,28 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
     @app.exception_handler(GenerationTokenError)
     async def stale_error(_request: Request, exc: GenerationTokenError) -> JSONResponse:
         return _error("stale_confirmation", _public_error_message(service, exc), 409)
+
+    @app.exception_handler(MediaTooLargeError)
+    async def media_too_large_error(
+        _request: Request, _exc: MediaTooLargeError
+    ) -> JSONResponse:
+        return _error(
+            "media_too_large",
+            "Media exceeds the configured snapshot limit",
+            413,
+        )
+
+    @app.exception_handler(MediaSnapshotBusyError)
+    async def media_busy_error(
+        _request: Request, _exc: MediaSnapshotBusyError
+    ) -> JSONResponse:
+        return _error("media_busy", "Media snapshot capacity is busy", 429)
+
+    @app.exception_handler(MediaSnapshotQuotaError)
+    async def media_quota_error(
+        _request: Request, _exc: MediaSnapshotQuotaError
+    ) -> JSONResponse:
+        return _error("media_quota", "Media snapshot byte quota is busy", 429)
 
     @app.exception_handler(KeyError)
     @app.exception_handler(FileNotFoundError)
@@ -407,8 +432,7 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
         attachment: bool = False,
     ):
         selected = _identifier(artifact_id)
-        opened = service.open_media(selected)
-        info = opened.info
+        info = service.media_info(selected)
         size = int(info["size"])
         headers = {
             "Accept-Ranges": "bytes",
@@ -417,7 +441,36 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
         if attachment:
             headers["Content-Disposition"] = _attachment_header(str(info["name"]))
 
-        async def stream(start: int, end: int):
+        if range_header is None:
+            headers["Content-Length"] = str(size)
+            if head:
+                return Response(status_code=200, headers=headers)
+            if size == 0:
+                return Response(content=b"", status_code=200, headers=headers)
+            start, end, status_code = 0, size - 1, 200
+        else:
+            try:
+                start, end = _parse_range(range_header, size)
+            except ValueError:
+                return Response(
+                    status_code=416,
+                    headers={**headers, "Content-Range": f"bytes */{size}"},
+                )
+            headers.update(
+                {
+                    "Content-Range": f"bytes {start}-{end}/{size}",
+                    "Content-Length": str(end - start + 1),
+                }
+            )
+            if head:
+                return Response(status_code=206, headers=headers)
+            status_code = 206
+        opened = service.open_media(selected)
+        if int(opened.info["size"]) != size:
+            opened.close()
+            raise KeyError(selected)
+
+        async def stream():
             try:
                 for chunk in opened.iter_range(start=start, end=end):
                     yield chunk
@@ -425,40 +478,9 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
             finally:
                 opened.close()
 
-        if range_header is None:
-            headers["Content-Length"] = str(size)
-            if head:
-                opened.close()
-                return Response(status_code=200, headers=headers)
-            if size == 0:
-                opened.close()
-                return Response(content=b"", status_code=200, headers=headers)
-            return _ClosingStreamingResponse(
-                stream(0, size - 1),
-                status_code=200,
-                headers=headers,
-                close=opened.close,
-            )
-        try:
-            start, end = _parse_range(range_header, size)
-        except ValueError:
-            opened.close()
-            return Response(
-                status_code=416,
-                headers={**headers, "Content-Range": f"bytes */{size}"},
-            )
-        headers.update(
-            {
-                "Content-Range": f"bytes {start}-{end}/{size}",
-                "Content-Length": str(end - start + 1),
-            }
-        )
-        if head:
-            opened.close()
-            return Response(status_code=206, headers=headers)
         return _ClosingStreamingResponse(
-            stream(start, end),
-            status_code=206,
+            stream(),
+            status_code=status_code,
             headers=headers,
             close=opened.close,
         )

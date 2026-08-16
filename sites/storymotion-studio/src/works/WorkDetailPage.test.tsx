@@ -111,6 +111,22 @@ describe("WorkDetailPage", () => {
     expect(screen.getByText("未记录迭代说明")).toBeInTheDocument();
   });
 
+  it("warns when a historical v1 response omits rights metadata", async () => {
+    const historical = {
+      ...work,
+      source: "historical",
+      mode: "historical",
+      versions: [{
+        ...work.versions[0],
+        outputs: [{ ...work.versions[0].outputs[0], rights: undefined }],
+      }],
+    } as WorkDetail;
+    renderDetail(vi.fn().mockResolvedValue(historical));
+
+    await screen.findByRole("heading", { name: "咪要去面试" });
+    expect(screen.getByRole("alert")).toHaveTextContent("发布权利尚未核验");
+  });
+
   it("shows safe loading and failure states", async () => {
     renderDetail(vi.fn().mockRejectedValue(new Error("/private/archive/master.mp4")));
 
