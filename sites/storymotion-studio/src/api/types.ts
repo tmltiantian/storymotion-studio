@@ -46,6 +46,27 @@ export interface Artifact {
   name: string;
   media_type: string;
   media_url: string;
+  kind?: ArtifactKind;
+  viewer?: ArtifactViewerMetadata;
+}
+
+export type ArtifactKind = "text" | "image" | "audio" | "video" | "eval" | "file";
+
+export interface DialogueTiming {
+  dialogue_id: string;
+  speaker: string;
+  start_seconds: number;
+  end_seconds: number;
+  text?: string;
+}
+
+export interface ArtifactViewerMetadata {
+  size_bytes?: number;
+  width?: number;
+  height?: number;
+  fps?: number;
+  shot_id?: string;
+  dialogues?: DialogueTiming[];
 }
 
 export interface StageDetail {
@@ -203,6 +224,7 @@ export interface JobDetail {
   result: JsonObject;
   error: string;
   resume_count: number;
+  last_event_sequence?: number;
 }
 
 export type ResumeJobResponse = JobAccepted | JobDetail;

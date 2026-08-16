@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import math
 import mimetypes
 import os
 import re
@@ -346,7 +347,7 @@ class WorkbenchService:
                 ],
                 "error": self._public_text(record.error),
                 "artifacts": [
-                    self._artifact_public(ref)
+                    self._artifact_public(ref, stage=record.stage.value)
                     for raw_path in record.artifacts
                     if (ref := self._register_artifact(project_id, raw_path))
                     is not None
@@ -419,14 +420,200 @@ class WorkbenchService:
             if (ref := self._register_artifact(project_id, raw_path)) is not None
         ]
 
-    @staticmethod
-    def _artifact_public(ref: _ArtifactRef) -> dict[str, Any]:
+    def _artifact_public(
+        self,
+        ref: _ArtifactRef,
+        *,
+        stage: str = "",
+    ) -> dict[str, Any]:
+        kind = self._artifact_kind(ref, stage=stage)
+        viewer: dict[str, Any] = {"size_bytes": self._artifact_size(ref)}
+        if kind == "audio":
+            dialogues = self._audio_dialogues(ref)
+            if dialogues:
+                viewer["dialogues"] = dialogues
+        if kind == "video":
+            viewer.update(self._video_viewer_metadata(ref))
         return {
             "artifact_id": ref.artifact_id,
             "name": ref.name,
             "media_type": ref.media_type,
             "media_url": f"/api/media/{ref.artifact_id}",
+            "kind": kind,
+            "viewer": viewer,
         }
+
+    @staticmethod
+    def _artifact_kind(ref: _ArtifactRef, *, stage: str) -> str:
+        media_type = ref.media_type.split(";", 1)[0].lower()
+        if media_type.startswith("image/"):
+            return "image"
+        if media_type.startswith("audio/"):
+            return "audio"
+        if media_type.startswith("video/"):
+            return "video"
+        if stage == "eval" and media_type == "application/json":
+            return "eval"
+        if media_type.startswith("text/") or media_type in {
+            "application/json",
+            "application/x-subrip",
+        }:
+            return "text"
+        return "file"
+
+    def _artifact_size(self, ref: _ArtifactRef) -> int:
+        descriptor = -1
+        try:
+            with AnchoredDirectory.open(
+                ref.root, label="Authorized artifact root"
+            ) as anchor:
+                parent = self._open_artifact_parent(anchor, ref.relative_path)
+                try:
+                    descriptor = os.open(
+                        ref.relative_path.name,
+                        os.O_RDONLY | os.O_NOFOLLOW,
+                        dir_fd=parent,
+                    )
+                    return int(os.fstat(descriptor).st_size)
+                finally:
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                    os.close(parent)
+        except (FileNotFoundError, OSError, ValueError):
+            return 0
+
+    def _registered_json(
+        self,
+        project_id: str,
+        *,
+        stage: str,
+        name: str,
+    ) -> tuple[_ArtifactRef, dict[str, Any]] | None:
+        try:
+            _spec, package = self._load_project_records(
+                self._project_dir(project_id)
+            )
+            record = next(item for item in package.stages if item.stage.value == stage)
+        except (FileNotFoundError, KeyError, OSError, StopIteration, ValueError):
+            return None
+        for raw_path in record.artifacts:
+            if Path(raw_path).name != name:
+                continue
+            manifest_ref = self._register_artifact(project_id, raw_path)
+            if manifest_ref is None or self._artifact_size(manifest_ref) > 1024 * 1024:
+                return None
+            try:
+                with AnchoredDirectory.open(
+                    manifest_ref.root, label="Registered artifact manifest"
+                ) as anchor:
+                    payload = json.loads(anchor.read_bytes(manifest_ref.relative_path))
+            except (
+                FileNotFoundError,
+                OSError,
+                UnicodeDecodeError,
+                ValueError,
+                json.JSONDecodeError,
+            ):
+                return None
+            if isinstance(payload, dict):
+                return manifest_ref, payload
+            return None
+        return None
+
+    def _audio_dialogues(self, ref: _ArtifactRef) -> list[dict[str, Any]]:
+        registered = self._registered_json(
+            ref.project_id,
+            stage="audio",
+            name="audio_manifest.json",
+        )
+        if registered is None:
+            return []
+        _manifest_ref, payload = registered
+        if payload.get("schema_version") != "motion-comic-factory.audio.v1":
+            return []
+        source = self._register_artifact(
+            ref.project_id,
+            str(payload.get("voiceover_audio") or ""),
+        )
+        if source is None or source.artifact_id != ref.artifact_id:
+            return []
+        raw_timings = payload.get("timings")
+        if not isinstance(raw_timings, list):
+            return []
+        dialogues: list[dict[str, Any]] = []
+        for index, item in enumerate(raw_timings):
+            if not isinstance(item, Mapping):
+                return []
+            shot_id = str(item.get("shot_id") or "").strip()
+            speaker = str(
+                item.get("speaker_name") or item.get("speaker") or ""
+            ).strip()
+            try:
+                start = float(item["start_seconds"])
+                end = float(item["end_seconds"])
+            except (KeyError, TypeError, ValueError):
+                return []
+            if (
+                not shot_id
+                or not speaker
+                or not math.isfinite(start)
+                or not math.isfinite(end)
+                or start < 0
+                or end <= start
+            ):
+                return []
+            dialogue = {
+                "dialogue_id": f"{shot_id}:{index}",
+                "speaker": self._public_text(speaker),
+                "start_seconds": start,
+                "end_seconds": end,
+            }
+            text = str(item.get("text") or "").strip()
+            if text:
+                dialogue["text"] = self._public_text(text)
+            dialogues.append(dialogue)
+        return dialogues
+
+    def _video_viewer_metadata(self, ref: _ArtifactRef) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        try:
+            spec, _package = self._load_project_records(
+                self._project_dir(ref.project_id)
+            )
+            fps = int(spec.target.get("fps") or 30)
+            if 1 <= fps <= 240:
+                result["fps"] = fps
+            resolution = str(
+                spec.target.get("resolution")
+                or spec.target.get("target_resolution")
+                or ""
+            ).lower()
+            match = re.fullmatch(r"(\d{2,5})x(\d{2,5})", resolution)
+            if match:
+                width, height = int(match.group(1)), int(match.group(2))
+                if width > 0 and height > 0:
+                    result.update({"width": width, "height": height})
+        except (FileNotFoundError, OSError, TypeError, ValueError):
+            pass
+
+        registered = self._registered_json(
+            ref.project_id,
+            stage="video",
+            name="video_manifest.json",
+        )
+        if registered is None:
+            return result
+        _manifest_ref, payload = registered
+        if payload.get("schema_version") != "motion-comic-factory.video.v1":
+            return result
+        clip_by_shot = payload.get("clip_by_shot")
+        if isinstance(clip_by_shot, Mapping):
+            for shot_id, raw_path in clip_by_shot.items():
+                candidate = self._register_artifact(ref.project_id, str(raw_path))
+                if candidate is not None and candidate.artifact_id == ref.artifact_id:
+                    result["shot_id"] = self._public_text(str(shot_id))
+                    break
+        return result
 
     def _candidate_roots(self, project_id: str) -> tuple[Path, ...]:
         return (self._project_dir(project_id), *self.artifact_roots)
@@ -1233,6 +1420,7 @@ class WorkbenchService:
 
     def _job_public(self, record: JobRecord) -> dict[str, Any]:
         exact_values = self._loaded_redaction_values()
+        events = self.jobs.events(record.job_id)
         return {
             "job_id": record.job_id,
             "project_id": record.project_id,
@@ -1250,6 +1438,7 @@ class WorkbenchService:
             ),
             "error": self._public_text(record.error, exact_values=exact_values),
             "resume_count": record.resume_count,
+            "last_event_sequence": events[-1].sequence if events else 0,
         }
 
     def _event_public(self, event: JobEvent) -> dict[str, Any]:

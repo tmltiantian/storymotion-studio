@@ -1,6 +1,5 @@
 import {
   AlertCircle,
-  FileText,
   FolderOpen,
   LoaderCircle,
   Menu,
@@ -20,6 +19,7 @@ import { Link, Navigate, useParams } from "react-router";
 import type { ApiClient } from "../api/client";
 import type {
   ApproveStageRequest,
+  Artifact,
   ImpactRequest,
   ProjectDetail,
   RequestChangesRequest,
@@ -27,6 +27,7 @@ import type {
   StageName,
 } from "../api/types";
 import { STAGES } from "../app/AppShell";
+import { StageViewer } from "../stages/StageViewer";
 import { ImpactDialog } from "./ImpactDialog";
 import { ReviewPanel } from "./ReviewPanel";
 import { StageRail, stageLabel } from "./StageRail";
@@ -92,7 +93,13 @@ function mutationMessage(error: unknown): WorkspaceMessage {
   return { text: "审核操作未能完成，请检查制作服务后重试。", tone: "error" };
 }
 
-function ArtifactWorkspace({ stage }: { stage: StageDetail }) {
+function ArtifactWorkspace({
+  stage,
+  onIssueAtTime,
+}: {
+  stage: StageDetail;
+  onIssueAtTime: (time: number, artifact: Artifact) => void;
+}) {
   return (
     <section className="artifact-workspace" aria-labelledby="artifact-workspace-title">
       <div className="artifact-heading">
@@ -116,35 +123,11 @@ function ArtifactWorkspace({ stage }: { stage: StageDetail }) {
           <strong>当前阶段没有可查看的成果</strong>
         </div>
       ) : (
-        <div className="artifact-list" aria-label="阶段成果">
-          {stage.artifacts.map((artifact) => {
-            const isImage = artifact.media_type.startsWith("image/");
-            const isVideo = artifact.media_type.startsWith("video/");
-            const isAudio = artifact.media_type.startsWith("audio/");
-            return (
-              <figure className="artifact-item" key={artifact.artifact_id}>
-                {isImage ? (
-                  <img src={artifact.media_url} alt={artifact.name} />
-                ) : isVideo ? (
-                  <video src={artifact.media_url} controls preload="metadata">
-                    <track kind="captions" />
-                  </video>
-                ) : isAudio ? (
-                  <audio src={artifact.media_url} controls preload="metadata" />
-                ) : (
-                  <a className="artifact-file" href={artifact.media_url}>
-                    <FileText aria-hidden="true" size={24} />
-                    <span>打开成果文件</span>
-                  </a>
-                )}
-                <figcaption>
-                  <strong>{artifact.name}</strong>
-                  <code>{artifact.media_type}</code>
-                </figcaption>
-              </figure>
-            );
-          })}
-        </div>
+        <StageViewer
+          stage={stage.stage}
+          artifacts={stage.artifacts}
+          onIssueAtTime={onIssueAtTime}
+        />
       )}
     </section>
   );
@@ -408,7 +391,13 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
             <span>{message.text}</span>
           </div>
         ) : null}
-        <ArtifactWorkspace stage={stage} />
+        <ArtifactWorkspace
+          stage={stage}
+          onIssueAtTime={(time, artifact) => setMessage({
+            text: `已在 ${time.toFixed(3)} 秒标记 ${artifact.name}`,
+            tone: "neutral",
+          })}
+        />
       </div>
 
       <ReviewPanel
