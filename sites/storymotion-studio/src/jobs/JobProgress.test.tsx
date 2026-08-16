@@ -186,10 +186,29 @@ describe("JobProgress recovery", () => {
     expect(screen.getByText("已完成 2 / 9 镜")).toBeVisible();
   });
 
+  it("refreshes persisted state when a stream closes after a terminal event race", async () => {
+    const running = job("running", { last_event_sequence: 7 });
+    const failed = job("failed", { last_event_sequence: 7 });
+    const client = api(running);
+    vi.mocked(client.getJob)
+      .mockResolvedValueOnce(running)
+      .mockResolvedValue(failed);
+    const closedStream = vi.fn(async function* () {
+      yield* [];
+    });
+
+    render(<JobProgress api={client} jobId={running.job_id} connect={closedStream} />);
+
+    expect(await screen.findByText("生成失败")).toBeVisible();
+    expect(client.getJob).toHaveBeenCalledTimes(2);
+  });
+
   it("offers retry when the initial persisted job read fails", async () => {
     const user = userEvent.setup();
     const client = api();
     vi.mocked(client.getJob)
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockRejectedValueOnce(new Error("offline"))
       .mockRejectedValueOnce(new Error("offline"))
       .mockResolvedValue(job());
 
@@ -198,7 +217,22 @@ describe("JobProgress recovery", () => {
     await user.click(await screen.findByRole("button", { name: "重新读取作业" }));
 
     expect(await screen.findByText("已完成 2 / 8 镜")).toBeVisible();
+    expect(client.getJob).toHaveBeenCalledTimes(4);
+  });
+
+  it("automatically retries a transient initial job read before showing an error", async () => {
+    vi.useFakeTimers();
+    const client = api();
+    vi.mocked(client.getJob)
+      .mockRejectedValueOnce(new Error("temporary read failure"))
+      .mockResolvedValue(job());
+
+    render(<JobProgress api={client} jobId={job().job_id} connect={idleStream} />);
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+
     expect(client.getJob).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("已完成 2 / 8 镜")).toBeVisible();
+    expect(screen.queryByText("无法读取作业状态")).not.toBeInTheDocument();
   });
 
   it("does not leave duplicate streams or timers under StrictMode and aborts on unmount", async () => {

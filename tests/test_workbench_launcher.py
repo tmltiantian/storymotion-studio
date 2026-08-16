@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from urllib.request import urlopen
 
 import pytest
 
-from scripts.run_workbench import build_launch_config
+from scripts.run_workbench import _frontend_environment, build_launch_config
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +72,28 @@ def test_launcher_rejects_non_loopback_hosts(host: str):
 def test_launcher_rejects_invalid_ports(port: int):
     with pytest.raises(ValueError, match="port"):
         build_launch_config(api_port=port, web_port=0)
+
+
+def test_frontend_environment_excludes_provider_credentials():
+    parent = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/tmp/home",
+        "TMPDIR": "/tmp",
+        "LANG": "en_US.UTF-8",
+        "GATEWAY_API_KEY": "FICTIONAL_PROVIDER_SECRET",
+        "MINIMAX_API_KEY": "FICTIONAL_PROVIDER_SECRET",
+        "VITE_ACCIDENTAL_SECRET": "FICTIONAL_PROVIDER_SECRET",
+    }
+
+    selected = _frontend_environment(parent, "http://127.0.0.1:8123")
+
+    assert selected == {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/tmp/home",
+        "TMPDIR": "/tmp",
+        "LANG": "en_US.UTF-8",
+        "STORYMOTION_API_URL": "http://127.0.0.1:8123",
+    }
 
 
 def _wait_for_ready_lines(process: subprocess.Popen[str]) -> tuple[str, str, str]:
@@ -136,3 +159,122 @@ def test_launcher_starts_proxy_ready_services_and_cleans_owned_children():
     for url in (web_url, api_url):
         port = int(url.rsplit(":", 1)[1])
         assert _port_closed(port)
+
+
+@pytest.mark.parametrize("occupied_service", ["api", "web"])
+def test_launcher_retries_the_whole_pair_after_a_port_handoff_race(
+    occupied_service: str,
+):
+    child = "\n".join(
+        (
+            "import socket",
+            "from scripts.run_workbench import build_launch_config, run_launcher",
+            "config = build_launch_config(api_port=0, web_port=0)",
+            f"occupied = config.{occupied_service}_port",
+            "listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)",
+            "listener.bind(('127.0.0.1', occupied))",
+            "listener.listen()",
+            f"print('Occupied: {occupied_service}:' + str(occupied), flush=True)",
+            "raise SystemExit(run_launcher(config, ready_timeout=5.0))",
+        )
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", child],
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output = ""
+    try:
+        web_url, api_url, output = _wait_for_ready_lines(process)
+        occupied_line = next(
+            line for line in output.splitlines() if line.startswith("Occupied: ")
+        )
+        occupied = int(occupied_line.rsplit(":", 1)[1])
+        reported = {
+            int(web_url.rsplit(":", 1)[1]),
+            int(api_url.rsplit(":", 1)[1]),
+        }
+        assert occupied not in reported
+        assert json.load(urlopen(f"{api_url}/health", timeout=2)) == {"status": "ok"}
+        assert urlopen(web_url, timeout=2).status == 200
+    finally:
+        if process.poll() is None:
+            process.send_signal(signal.SIGTERM)
+        output += process.communicate(timeout=15)[0]
+
+    assert process.returncode == 0
+    assert output.count("Starting local services") == 2
+    assert "Retrying with new local ports" in output
+
+
+def test_clean_copy_launcher_smoke_uses_only_supplied_frontend_binary(
+    tmp_path: Path,
+):
+    clean = tmp_path / "clean-copy"
+    for name in ("assets", "config", "factory", "scripts", "sites"):
+        shutil.copytree(
+            REPO_ROOT / name,
+            clean / name,
+            ignore=shutil.ignore_patterns(
+                "node_modules",
+                "dist",
+                "test-results",
+                "__pycache__",
+            ),
+        )
+    shutil.copy2(REPO_ROOT / "factory_cli.py", clean / "factory_cli.py")
+    assert not (clean / ".venv").exists()
+    assert not (clean / "sites/storymotion-studio/node_modules").exists()
+
+    vite = clean / "sites/storymotion-studio/node_modules/.bin/vite"
+    vite.parent.mkdir(parents=True)
+    vite.write_text(
+        f"#!{sys.executable}\n"
+        "import argparse\n"
+        "from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--host', required=True)\n"
+        "parser.add_argument('--port', required=True, type=int)\n"
+        "parser.add_argument('--strictPort', action='store_true')\n"
+        "args = parser.parse_args()\n"
+        "class Handler(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        body = b'<!doctype html><title>clean copy</title>'\n"
+        "        self.send_response(200)\n"
+        "        self.send_header('Content-Length', str(len(body)))\n"
+        "        self.end_headers()\n"
+        "        self.wfile.write(body)\n"
+        "    def log_message(self, *args):\n"
+        "        pass\n"
+        "ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()\n",
+        encoding="utf-8",
+    )
+    vite.chmod(0o755)
+
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "scripts/run_workbench.py",
+            "--api-port",
+            "0",
+            "--web-port",
+            "0",
+        ],
+        cwd=clean,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        web_url, api_url, output = _wait_for_ready_lines(process)
+        assert json.load(urlopen(f"{api_url}/health", timeout=2)) == {"status": "ok"}
+        assert urlopen(web_url, timeout=2).status == 200
+    finally:
+        if process.poll() is None:
+            process.send_signal(signal.SIGTERM)
+        output += process.communicate(timeout=15)[0]
+
+    assert process.returncode == 0
+    assert "Stopped" in output

@@ -2,7 +2,8 @@
 
 ## 1. 环境
 
-推荐 Python 3.12，并安装 FFmpeg/ffprobe。初始化：
+推荐 Python 3.12，并安装 Node.js、npm、FFmpeg/ffprobe。初始化脚本会验证 Node.js/npm，
+创建 Python 虚拟环境，并依据前端 lockfile 执行 `npm ci`：
 
 ```bash
 scripts/bootstrap_factory.sh
@@ -19,12 +20,15 @@ cp .env.example .env
 
 ```dotenv
 GATEWAY_API_KEY=
-GATEWAY_BASE_URL=https://ops-ai-gateway.yc345.tv
+GATEWAY_BASE_URL=https://gateway.example.invalid
 LLM_PROVIDER=gateway
 IMAGE_PROVIDER=gateway
 VIDEO_PROVIDER=gateway
 ENABLE_GATEWAY_VIDEO=1
 ```
+
+`gateway.example.invalid` 只是不可以路由的示例域名。网关没有内置生产默认地址；实际使用时
+必须在被 Git 忽略的本机 `.env` 中显式配置真实 `GATEWAY_BASE_URL`。
 
 豆包 TTS 二选一：
 
@@ -96,3 +100,19 @@ DOUBAO_TTS_SPEAKER=
 - GitHub：仅保存代码、配置示例、测试和文档，不保存密钥与生成媒体。
 
 发布版本时保留 `project.json`、`pipeline_state.json`、EVAL 报告、成片母版和版本记录，便于重现每次选择和返修原因。
+
+## 6. GitHub 发布门禁
+
+源仓库旧历史曾包含真实凭据，禁止直接推送。账户持有人必须在仓库外撤销或轮换该凭据；
+替换测试文本和清理当前文件不能撤销已经签发的访问能力。
+
+完成所有验证并提交后，从干净 tracked tree 导出单提交新历史：
+
+```bash
+.venv/bin/python scripts/release_security.py
+.venv/bin/python scripts/export_clean_release.py /path/to/fresh-storymotion-release
+```
+
+导出器排除源 `.git`、ignored 依赖、缓存、生成媒体和本机 `.env`，初始化一个新的 release
+commit，并扫描当前内容及新 Git 历史。GitHub 仓库只能从这个 clean snapshot 创建，默认
+保持私有；历史音频权利确认或从发布内容排除后，才能另行评估公开发布。

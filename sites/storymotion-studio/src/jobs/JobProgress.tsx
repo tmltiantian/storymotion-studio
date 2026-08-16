@@ -52,6 +52,13 @@ function progress(job: JobDetail): { completed: number; total: number } {
 }
 
 function statusLabel(job: JobDetail): string {
+  if (job.operation === "run_stage") {
+    if (job.status === "completed") return "阶段运行完成";
+    if (job.status === "failed") return "阶段运行失败";
+    if (job.status === "cancelled") return "阶段运行已取消";
+    if (job.status === "running") return "阶段运行中";
+    return "等待阶段运行";
+  }
   if (job.status === "completed") return "生成完成";
   if (job.status === "failed") return "生成失败";
   if (job.status === "cancelled") return "生成已取消";
@@ -121,11 +128,22 @@ export function JobProgress({
         }
         return next;
       } catch {
-        if (active && !controller.signal.aborted && lastJobRef.current === null) {
-          setState({ status: "error" });
-        }
         return null;
       }
+    };
+
+    const initialRefresh = async (): Promise<JobDetail | null> => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const next = await refresh();
+        if (next || !active || controller.signal.aborted) return next;
+        if (attempt < 2) {
+          await abortableDelay(250 * (2 ** attempt), controller.signal);
+        }
+      }
+      if (active && !controller.signal.aborted && lastJobRef.current === null) {
+        setState({ status: "error" });
+      }
+      return null;
     };
 
     const armSilenceFallback = () => {
@@ -141,7 +159,7 @@ export function JobProgress({
 
     const run = async () => {
       if (lastJobRef.current === null) setState({ status: "loading" });
-      const persisted = await refresh();
+      const persisted = await initialRefresh();
       if (controller.signal.aborted) return;
       if (!persisted && !resumeRecoveryRef.current) return;
       if (persisted && isTerminal(persisted)) return;
@@ -177,6 +195,9 @@ export function JobProgress({
             if (next && isTerminal(next)) return;
             armSilenceFallback();
           }
+          if (!active || controller.signal.aborted) return;
+          const closedState = await refresh();
+          if (closedState && isTerminal(closedState)) return;
         } catch (error) {
           if (controller.signal.aborted || !active || (error instanceof DOMException && error.name === "AbortError")) return;
         } finally {

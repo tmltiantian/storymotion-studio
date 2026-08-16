@@ -20,6 +20,16 @@ from factory.source_locked_cat_replica import (
 )
 
 
+def test_source_locked_replica_requires_an_explicit_gateway_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("GATEWAY_BASE_URL", raising=False)
+
+    with pytest.raises(SourceLockedReplicaError, match="GATEWAY_BASE_URL"):
+        replica._gateway_base_url()
+
+
 def _config(tmp_path: Path) -> Path:
     source = tmp_path / "source.mp4"
     reference = tmp_path / "cat.png"

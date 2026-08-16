@@ -21,13 +21,32 @@ export default defineConfig({
     },
     {
       name: "mobile",
-      use: { ...devices["iPhone 13"], browserName: "chromium" },
+      use: {
+        ...devices["iPhone 13"],
+        browserName: "chromium",
+        viewport: { width: 390, height: 844 },
+      },
     },
   ],
-  webServer: {
-    command: "npm run dev -- --host 127.0.0.1 --port 4175",
-    url: "http://127.0.0.1:4175",
-    reuseExistingServer: false,
-    timeout: 30_000,
-  },
+  webServer: [
+    {
+      command: ".venv/bin/python -m tests.workbench_e2e_server",
+      cwd: "../..",
+      url: "http://127.0.0.1:18788/health",
+      env: {
+        STORYMOTION_E2E_ROOT: "/tmp/storymotion-studio-playwright-e2e",
+      },
+      reuseExistingServer: false,
+      timeout: 30_000,
+    },
+    {
+      command: "npm run dev -- --host 127.0.0.1 --port 4175",
+      url: "http://127.0.0.1:4175",
+      env: {
+        STORYMOTION_API_URL: "http://127.0.0.1:18788",
+      },
+      reuseExistingServer: false,
+      timeout: 30_000,
+    },
+  ],
 });

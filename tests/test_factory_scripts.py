@@ -24,6 +24,12 @@ def test_bootstrap_installs_pinned_dependencies_and_runs_tests():
     assert "--clear" in script
     assert "pip install -r" in script
     assert "-m pytest tests -q" in script
+    assert 'command -v node' in script
+    assert 'command -v npm' in script
+    assert 'node --version' in script
+    assert 'npm --version' in script
+    assert 'cd "$ROOT_DIR/sites/storymotion-studio"' in script
+    assert "npm ci" in script
     assert "Pillow==" in requirements
     assert "requests==" in requirements
     assert "pytest==" in requirements

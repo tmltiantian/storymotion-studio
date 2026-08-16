@@ -35,9 +35,10 @@ def _gateway_env() -> dict[str, str]:
             "LLM_PROVIDER": "gateway",
             "IMAGE_PROVIDER": "gateway",
             "VIDEO_PROVIDER": "gateway",
+            "GATEWAY_BASE_URL": "https://gateway.example.invalid",
             "ENABLE_GATEWAY_VIDEO": "1",
             "TTS_PROVIDER": "local",
-            "GATEWAY_API_KEY": "do-not-leak",
+            "GATEWAY_API_KEY": "FICTIONAL_TEST_SECRET_SENTINEL_DO_NOT_USE",
         }
     )
     env.pop("DASHSCOPE_API_KEY", None)
@@ -49,7 +50,7 @@ def _minimax_env() -> dict[str, str]:
     env.update(
         {
             "VIDEO_PROVIDER": "minimax",
-            "MINIMAX_API_KEY": "minimax-do-not-leak",
+            "MINIMAX_API_KEY": "FICTIONAL_TEST_SECRET_SENTINEL_DO_NOT_USE",
             "MINIMAX_API_BASE": "https://api.minimaxi.com",
             "MINIMAX_VIDEO_MODEL": "MiniMax-H3",
             "ENABLE_MINIMAX_VIDEO": "1",
@@ -75,7 +76,7 @@ def test_cli_provider_report_writes_sanitized_profile(tmp_path):
     report = json.loads(report_text)
     assert report["capabilities"]["text"]["provider"] == "gateway"
     assert report["capabilities"]["image"]["provider"] == "gateway"
-    assert "do-not-leak" not in report_text
+    assert "FICTIONAL_TEST_SECRET_SENTINEL_DO_NOT_USE" not in report_text
 
 
 def test_cli_gateway_text_smoke_is_no_cost_without_enable_flag(tmp_path):
@@ -157,7 +158,6 @@ def test_cli_gateway_video_probe_does_not_bypass_disabled_provider_gate(tmp_path
     config = _config(tmp_path)
     env = _gateway_env()
     env["ENABLE_GATEWAY_VIDEO"] = "0"
-    env["GATEWAY_API_BASE"] = "http://127.0.0.1:9/v1"
 
     result = subprocess.run(
         [
@@ -225,7 +225,7 @@ def test_cli_gateway_video_generate_is_no_cost_without_enable_flag(tmp_path):
     assert report["reference_audio_provided"] is True
     assert report["blocked_reasons"] == ["Live gateway video generation is disabled."]
     assert output.exists() is False
-    assert "do-not-leak" not in json.dumps(report)
+    assert "FICTIONAL_TEST_SECRET_SENTINEL_DO_NOT_USE" not in json.dumps(report)
 
 
 def test_cli_gateway_video_generate_returns_error_for_invalid_dry_run(tmp_path):

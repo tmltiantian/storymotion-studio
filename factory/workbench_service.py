@@ -311,7 +311,7 @@ class WorkbenchService:
         video_renderer: Callable[..., Mapping[str, Any]] | None = None,
         dispatch: Callable[[Callable[[], None]], Any] | None = None,
         max_media_bytes: int = 512 * 1024 * 1024,
-        max_media_snapshots: int = 4,
+        max_media_snapshots: int = 16,
         max_media_snapshot_bytes: int = 1024 * 1024 * 1024,
     ):
         if min(max_media_bytes, max_media_snapshots, max_media_snapshot_bytes) < 1:
@@ -614,6 +614,15 @@ class WorkbenchService:
     def project_detail(self, project_id: str) -> dict[str, Any]:
         project = self._project_dir(project_id)
         spec, package = self._load_project_records(project)
+        active_run_jobs: dict[str, dict[str, Any]] = {}
+        for job in self.jobs.project_jobs(project_id, operations=("run_stage",)):
+            stage_name = str(job.payload.get("stage") or "")
+            if (
+                job.status in {"queued", "running"}
+                and stage_name in {stage.value for stage in PIPELINE_STAGES}
+                and stage_name not in active_run_jobs
+            ):
+                active_run_jobs[stage_name] = self._job_public(job)
         stages = [
             {
                 "stage": record.stage.value,
@@ -633,6 +642,7 @@ class WorkbenchService:
                     if (ref := self._register_artifact(project_id, raw_path))
                     is not None
                 ],
+                "active_run_job": active_run_jobs.get(record.stage.value),
             }
             for record in package.stages
         ]
@@ -1811,33 +1821,19 @@ class WorkbenchService:
         project_id: str,
         request: VideoGenerationRequest,
     ) -> dict[str, Any]:
-        payload = request.to_dict()
-        artifact_hashes: dict[str, str] = {}
-        for path, digest in request.artifact_hashes.items():
-            ref = self._register_artifact(project_id, path)
-            if ref is None:
-                raise ValueError("Confirmed generation artifact is not registered")
-            artifact_hashes[ref.artifact_id] = digest
-        payload["artifact_hashes"] = artifact_hashes
-        return payload
+        if request.project_id != project_id:
+            raise ValueError("Generation request belongs to another project")
+        return request.to_dict()
 
     def _generation_request_internal(
         self,
         project_id: str,
         value: Mapping[str, Any],
     ) -> VideoGenerationRequest:
-        payload = dict(value)
-        raw_hashes = payload.get("artifact_hashes")
-        if not isinstance(raw_hashes, Mapping):
-            raise ValueError("Generation request artifact hashes are invalid")
-        artifact_hashes: dict[str, str] = {}
-        for artifact_id, digest in raw_hashes.items():
-            ref = self._media_ref(str(artifact_id))
-            if ref.project_id != project_id:
-                raise KeyError(str(artifact_id))
-            artifact_hashes[str(ref.root / ref.relative_path)] = str(digest)
-        payload["artifact_hashes"] = artifact_hashes
-        return VideoGenerationRequest.from_dict(payload)
+        request = VideoGenerationRequest.from_dict(value)
+        if request.project_id != project_id:
+            raise ValueError("Generation request belongs to another project")
+        return request
 
     def create_project_job(
         self,
@@ -1861,12 +1857,29 @@ class WorkbenchService:
                     "Non-original projects require a registered source artifact"
                 )
             self._media_ref(source_id)
+        project_target = dict(self._reject_path_input(target))
+        providers: dict[str, str] = {}
+        profile = self._load_provider_profile()
+        if profile is not None:
+            video_provider = profile.video.provider.strip().lower()
+            video_model = profile.video.model.strip()
+            if video_provider in {"gateway", "minimax"} and video_model:
+                providers = {
+                    "video": video_model,
+                    "video_provider": video_provider,
+                    "video_model": video_model,
+                }
+                project_target.setdefault(
+                    "video_resolution",
+                    default_video_resolution(video_provider),
+                )
         payload = {
             "title": str(title).strip(),
             "mode": project_mode.value,
             "idea": str(idea).strip(),
             "source_artifact_id": source_id,
-            "target": self._reject_path_input(target),
+            "target": project_target,
+            "providers": providers,
             "approval_preset": str(approval_preset),
         }
         job_id = self.jobs.submit(
@@ -1894,6 +1907,7 @@ class WorkbenchService:
                 input=project_input,
                 output_dir=project / "output",
                 target=dict(payload["target"]),
+                providers=dict(payload["providers"]),
                 policies={"approval_preset": payload["approval_preset"]},
             )
             create_project(project, spec)

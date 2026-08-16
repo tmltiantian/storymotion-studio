@@ -51,7 +51,7 @@ def test_gateway_image_posts_expected_payload_and_downloads_url(tmp_path):
     client = GatewayImageClient(
         GatewayImageConfig(
             api_key="secret",
-            base_url="https://ops-ai-gateway.yc345.tv/v1",
+            base_url="https://gateway.example.invalid/v1",
             model="qwen-image-2.0",
         ),
         urlopen_fn=fake_urlopen,
@@ -62,7 +62,7 @@ def test_gateway_image_posts_expected_payload_and_downloads_url(tmp_path):
 
     api_request = requests[0][0]
     payload = json.loads(api_request.data.decode("utf-8"))
-    assert api_request.full_url == "https://ops-ai-gateway.yc345.tv/v1/images/generations"
+    assert api_request.full_url == "https://gateway.example.invalid/v1/images/generations"
     assert api_request.get_header("Authorization") == "Bearer secret"
     assert payload == {
         "model": "qwen-image-2.0",

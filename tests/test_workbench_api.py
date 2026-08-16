@@ -377,11 +377,11 @@ def test_work_catalog_redacts_and_bounds_all_public_metadata(tmp_path: Path) -> 
     entry = manifest["entries"][0]
     entry["title"] = r"C:\Users\private\.env"
     entry["version_label"] = "ftp://alice:password@provider.example/private"
-    entry["metadata"]["role"] = "access_token＝DLgKqSHww3_LsM3Rqrx4Ks22dvRpjie"
+    entry["metadata"]["role"] = "FICTIONAL_TEST_SECRET_SENTINEL_DO_NOT_USE_333333333333"
     entry["metadata"]["description"] = (
         "保留中文说明 "
         + "长" * 900
-        + " \\server\\private\\secret DLgKqSHww3_LsM3Rqrx4Ks22dvRpjie"
+        + "FICTIONAL_TEST_SECRET_SENTINEL_DO_NOT_USE_000000000000"
     )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     service = WorkbenchService(
@@ -438,7 +438,7 @@ def test_download_content_disposition_sanitizes_both_filenames_and_crlf(
 @pytest.mark.parametrize(
     "unsafe_media_type",
     (
-        "audio/mp4; access_token=VisibleSecret123",
+        "audio/mp4; access_token=FAKE",
         "video/mp4\r\nX-Injected: yes",
     ),
 )
@@ -807,6 +807,17 @@ def test_media_snapshot_admission_is_bounded_and_released(
     first.close()
     assert service.media_snapshot_usage == {"active": 0, "bytes": 0}
     assert media_client.get(f"/api/media/{artifact_id}").status_code == 200
+    assert service.media_snapshot_usage == {"active": 0, "bytes": 0}
+
+
+def test_default_media_capacity_covers_a_complete_production_stage(tmp_path: Path) -> None:
+    service, _artifact, artifact_id = _authorized_media_service(tmp_path)
+
+    opened = [service.open_media(artifact_id) for _ in range(9)]
+
+    assert service.media_snapshot_usage == {"active": 9, "bytes": 90}
+    for snapshot in opened:
+        snapshot.close()
     assert service.media_snapshot_usage == {"active": 0, "bytes": 0}
 
 

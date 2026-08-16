@@ -65,11 +65,11 @@ The factory will resolve one provider profile from process variables and
 
 ```dotenv
 LLM_PROVIDER=openai
-OPENAI_BASE_URL=https://ops-ai-gateway.yc345.tv/v1
+OPENAI_BASE_URL=https://gateway.example.invalid/v1
 OPENAI_MODEL=qwen3.6-plus
 
 GATEWAY_API_KEY=
-GATEWAY_BASE_URL=https://ops-ai-gateway.yc345.tv
+GATEWAY_BASE_URL=https://gateway.example.invalid
 IMAGE_PROVIDER=gateway
 GATEWAY_IMAGE_MODEL=qwen-image-2.0
 

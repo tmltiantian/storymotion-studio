@@ -366,6 +366,8 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
   const routeIdentityRef = useRef("");
   const mountedRef = useRef(true);
   const stageRunGenerationRef = useRef(0);
+  const stageRunRoutesRef = useRef(new Map<string, string>());
+  const handledStageRunRef = useRef("");
 
   const invalidStageRoute = routeStage !== undefined && !isStageName(routeStage);
   const selectedRouteStage = isStageName(routeStage) ? routeStage : undefined;
@@ -434,6 +436,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
       setReviewIssue(null);
       setDrawerOpen(false);
       stageRunGenerationRef.current += 1;
+      handledStageRunRef.current = "";
       setStageRun({ status: "idle" });
       if (!invalidStageRoute) void load(false);
     });
@@ -494,42 +497,29 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
     }
   }, [load]);
 
+  const handleStageRunJob = useCallback((job: JobDetail) => {
+    if (!["completed", "failed", "cancelled"].includes(job.status)) return;
+    if (handledStageRunRef.current === job.job_id) return;
+    if (stageRunRoutesRef.current.get(job.job_id) !== routeIdentityRef.current) return;
+    handledStageRunRef.current = job.job_id;
+    stageRunGenerationRef.current += 1;
+    if (job.status === "completed") {
+      setMessage({ text: "阶段运行完成，已载入当前修订。", tone: "neutral" });
+      setStageRun({ status: "idle" });
+    } else {
+      setMessage({ text: "阶段运行未完成，请检查作业记录后重试。", tone: "error" });
+      setStageRun({ status: "error" });
+    }
+    void load(false);
+  }, [load]);
+
   useEffect(() => {
-    if (stageRun.status !== "running") return;
-    const generation = stageRunGenerationRef.current;
-    let timer = 0;
-    let active = true;
-
-    const poll = async () => {
-      try {
-        const job = await api.getJob(stageRun.jobId);
-        if (!active || generation !== stageRunGenerationRef.current) return;
-        if (["completed", "failed", "cancelled"].includes(job.status)) {
-          await load(false);
-          if (!active || generation !== stageRunGenerationRef.current) return;
-          if (job.status === "completed") {
-            setMessage({ text: "阶段运行完成，已载入当前修订。", tone: "neutral" });
-            setStageRun({ status: "idle" });
-          } else {
-            setMessage({ text: "阶段运行未完成，请检查作业记录后重试。", tone: "error" });
-            setStageRun({ status: "error" });
-          }
-          return;
-        }
-        timer = window.setTimeout(() => void poll(), 500);
-      } catch {
-        if (!active || generation !== stageRunGenerationRef.current) return;
-        setMessage({ text: "无法读取阶段作业，请重新载入后重试。", tone: "error" });
-        setStageRun({ status: "error" });
-      }
-    };
-
-    void poll();
-    return () => {
-      active = false;
-      window.clearTimeout(timer);
-    };
-  }, [api, load, stageRun]);
+    if (state.status !== "ready") return;
+    const jobId = state.stage.active_run_job?.job_id ?? (
+      stageRun.status === "running" ? stageRun.jobId : ""
+    );
+    if (jobId) stageRunRoutesRef.current.set(jobId, routeIdentity);
+  }, [routeIdentity, stageRun, state]);
 
   if (invalidStageRoute) {
     return <Navigate to={id ? `/projects/${encodeURIComponent(id)}` : "/projects"} replace />;
@@ -569,6 +559,9 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
   const selectedStage = stage.stage;
   const canRunStage = ["pending", "ready", "failed", "stale"].includes(
     stage.execution_state,
+  ) || stage.review_state === "changes_requested";
+  const trackedStageJobId = stage.active_run_job?.job_id ?? (
+    stageRun.status === "running" ? stageRun.jobId : ""
   );
 
   async function runSelectedStage() {
@@ -579,6 +572,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
     try {
       const accepted = await api.runStage(project.project_id, stage.stage, { enable_live: false });
       if (!mountedRef.current || generation !== stageRunGenerationRef.current) return;
+      stageRunRoutesRef.current.set(accepted.job_id, routeIdentityRef.current);
       setStageRun({ status: "running", jobId: accepted.job_id });
     } catch (error) {
       if (!mountedRef.current || generation !== stageRunGenerationRef.current) return;
@@ -636,26 +630,40 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
             });
           }}
         />
-        {canRunStage ? (
+        {trackedStageJobId ? (
           <section className="stage-run-control" aria-label="阶段执行">
             <div>
-              <strong>{stageRun.status === "running" ? "阶段正在本机运行" : "准备生成本阶段成果"}</strong>
+              <strong>阶段正在本机运行</strong>
+              <span>页面会连接持久化作业，不会重复提交。</span>
+            </div>
+            <JobProgress
+              key={`${stage.stage}:${trackedStageJobId}`}
+              api={api}
+              jobId={trackedStageJobId}
+              allowResume={false}
+              onJobChange={handleStageRunJob}
+            />
+          </section>
+        ) : canRunStage ? (
+          <section className="stage-run-control" aria-label="阶段执行">
+            <div>
+              <strong>准备生成本阶段成果</strong>
               <span>本机执行不会开启收费视频生成。</span>
             </div>
             <button
               className="command-button"
               type="button"
-              disabled={stageRun.status === "submitting" || stageRun.status === "running"}
+              disabled={stageRun.status === "submitting"}
               onClick={() => void runSelectedStage()}
             >
-              {stageRun.status === "submitting" || stageRun.status === "running" ? (
+              {stageRun.status === "submitting" ? (
                 <LoaderCircle className="loading-icon" aria-hidden="true" size={16} />
               ) : (
                 <Play aria-hidden="true" size={16} />
               )}
-              {stageRun.status === "submitting" || stageRun.status === "running"
+              {stageRun.status === "submitting"
                 ? `正在运行${stageLabel(stage.stage)}`
-                : `${stage.execution_state === "failed" || stage.execution_state === "stale" ? "重新" : ""}运行${stageLabel(stage.stage)}阶段`}
+                : `${stage.execution_state === "failed" || stage.execution_state === "stale" || stage.review_state === "changes_requested" ? "重新" : ""}运行${stageLabel(stage.stage)}阶段`}
             </button>
           </section>
         ) : null}

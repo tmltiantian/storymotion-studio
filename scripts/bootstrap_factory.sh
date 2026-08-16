@@ -36,6 +36,17 @@ for tool in ffmpeg ffprobe; do
   fi
 done
 
+if ! command -v node >/dev/null 2>&1; then
+  echo "Node.js is required for the StoryMotion workbench." >&2
+  exit 1
+fi
+if ! command -v npm >/dev/null 2>&1; then
+  echo "npm is required for the StoryMotion workbench." >&2
+  exit 1
+fi
+node --version >/dev/null
+npm --version >/dev/null
+
 cd "$ROOT_DIR"
 if [[ ! -x "$ROOT_DIR/.venv/bin/python" ]]; then
   "$PYTHON_BOOTSTRAP" -m venv "$ROOT_DIR/.venv"
@@ -45,6 +56,9 @@ fi
 
 "$ROOT_DIR/.venv/bin/python" -m pip install --upgrade pip
 "$ROOT_DIR/.venv/bin/python" -m pip install -r "$ROOT_DIR/requirements.txt"
+cd "$ROOT_DIR/sites/storymotion-studio"
+npm ci
+cd "$ROOT_DIR"
 "$ROOT_DIR/.venv/bin/python" -m pytest tests -q
 
 echo "Factory environment ready: $ROOT_DIR/.venv/bin/python"

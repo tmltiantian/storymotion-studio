@@ -289,6 +289,12 @@ def run_pipeline(
                 review_issue = (
                     "" if review_validation.valid else review_validation.reason
                 )
+                if record.review_state is ReviewState.CHANGES_REQUESTED:
+                    review_issue = (
+                        record.blocked_reasons[0]
+                        if record.blocked_reasons
+                        else "Stage changes were requested"
+                    )
                 if (
                     not missing
                     and not integrity_issue

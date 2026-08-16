@@ -29,8 +29,15 @@
 | 视频费用门禁与任务恢复 | `sites/storymotion-studio/src/jobs/` |
 | 作品中心与设置 | `sites/storymotion-studio/src/works/`, `sites/storymotion-studio/src/settings/` |
 | 离线浏览器验收 | `sites/storymotion-studio/tests/workbench-flow.spec.ts`, `sites/storymotion-studio/tests/workbench-media.spec.ts` |
+| 真实离线 API/付费渲染边界夹具 | `tests/workbench_e2e_server.py` |
+| tracked tree/历史密钥扫描 | `scripts/release_security.py` |
+| 单提交 clean release 导出 | `scripts/export_clean_release.py` |
 
-浏览器只使用 `/api` 合同和不透明 artifact ID。Python 持有项目文件、密钥、任务状态和媒体描述符；Vite 的 API 代理目标由启动器传给子进程，不写入 `.env`。历史归档的 7 个 payload 与清单进入源代码管理，`output/` 和已删除的旧展示站不参与作品目录重建。
+浏览器只使用 `/api` 合同和不透明 artifact ID。Python 持有项目文件、密钥、任务状态和媒体描述符；Vite 的 API 代理目标由启动器传给子进程，不写入 `.env`。前端子进程只接收必要的 OS/runtime 变量和 `STORYMOTION_API_URL`，Provider 凭据只进入 API 子进程。历史归档的 7 个 payload 与清单进入源代码管理，`output/` 和已删除的旧展示站不参与作品目录重建。
+
+阶段工作区合同返回项目和阶段对应的 active/recoverable `run_stage` job。React 在刷新、
+StrictMode 重挂载或路由切换后连接同一 durable job，通过 SSE 和有界读取回退等到终态，再
+刷新精确项目/阶段路由；恢复过程不重复提交阶段。
 
 归档权利状态固定显示为 `unverified`。3 个历史音频在权利确认或排除前只能随私有仓库保存；不得把警告改写成已授权。
 
@@ -59,7 +66,12 @@
 
 LumenX 专属启动、Mock 后端和控制面已删除。`gateway_video_batch.py` 只为旧项目保留旧 handoff 的只读兼容，新产物统一使用 `video_handoff.json`。
 
-MiniMax H3 官方仓库保存在 `/Users/tml/Desktop/MiniMax-H3`，与主项目分离。StoryMotion 只实现官方提示词协议与 API 素材角色，不复制模型权重、推理框架或 MiniMax Hub 画布代码。
+MiniMax H3 的公开规范是仓库外参考资料，不是运行依赖。StoryMotion 只实现 Provider 适配器
+所需的提示词协议与 API 素材角色，不复制模型权重、推理框架或外部控制面代码。
+
+网关适配器要求显式 `GATEWAY_BASE_URL`，仓库示例只使用 `example.invalid`。源仓库旧历史不
+属于发布材料；发布必须由 `export_clean_release.py` 从当前提交导出 tracked 文件并创建单提交
+新历史，再通过内容和历史密钥扫描。历史归档的未核验权利警告不得删除。
 
 ## 宠物专业能力
 

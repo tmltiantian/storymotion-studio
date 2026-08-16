@@ -44,12 +44,13 @@ def test_provider_profile_selects_gateway_by_capability(tmp_path):
             "IMAGE_PROVIDER": "gateway",
             "VIDEO_PROVIDER": "gateway",
             "GATEWAY_API_KEY": "gateway-secret",
+            "GATEWAY_BASE_URL": "https://gateway.example.invalid",
             "ENABLE_GATEWAY_VIDEO": "1",
         },
     )
 
     assert profile.text.provider == "gateway"
-    assert profile.text.base_url == "https://ops-ai-gateway.yc345.tv/v1"
+    assert profile.text.base_url == "https://gateway.example.invalid/v1"
     assert profile.text.model == "qwen3.6-plus"
     assert profile.text.ready is True
     assert profile.image.provider == "gateway"
@@ -63,6 +64,26 @@ def test_provider_profile_selects_gateway_by_capability(tmp_path):
     assert profile.video.supports_reference_images is True
 
 
+def test_gateway_credentials_never_imply_a_private_default_endpoint(tmp_path):
+    config = _config(tmp_path)
+
+    profile = resolve_provider_profile(
+        config,
+        process_env={
+            "LLM_PROVIDER": "gateway",
+            "IMAGE_PROVIDER": "gateway",
+            "VIDEO_PROVIDER": "gateway",
+            "GATEWAY_API_KEY": "FICTIONAL_GATEWAY_KEY",
+            "ENABLE_GATEWAY_VIDEO": "1",
+        },
+    )
+
+    for capability in (profile.text, profile.image, profile.video):
+        assert capability.base_url == ""
+        assert capability.ready is False
+        assert "GATEWAY_BASE_URL is missing." in capability.blockers
+
+
 def test_gateway_video_requires_both_key_and_explicit_enable(tmp_path):
     config = _config(tmp_path)
 
@@ -70,6 +91,7 @@ def test_gateway_video_requires_both_key_and_explicit_enable(tmp_path):
         config,
         process_env={
             "VIDEO_PROVIDER": "gateway",
+            "GATEWAY_BASE_URL": "https://gateway.example.invalid",
             "ENABLE_GATEWAY_VIDEO": "1",
         },
     )
@@ -78,6 +100,7 @@ def test_gateway_video_requires_both_key_and_explicit_enable(tmp_path):
         process_env={
             "VIDEO_PROVIDER": "gateway",
             "GATEWAY_API_KEY": "gateway-secret",
+            "GATEWAY_BASE_URL": "https://gateway.example.invalid",
             "ENABLE_GATEWAY_VIDEO": "0",
         },
     )
@@ -198,7 +221,8 @@ def test_gateway_openai_key_alias_requires_gateway_base_url(tmp_path):
         process_env={
             "LLM_PROVIDER": "gateway",
             "OPENAI_API_KEY": "gateway-secret",
-            "OPENAI_BASE_URL": "https://ops-ai-gateway.yc345.tv/v1",
+            "GATEWAY_BASE_URL": "https://gateway.example.invalid",
+            "OPENAI_BASE_URL": "https://gateway.example.invalid/v1",
         },
     )
 
@@ -214,6 +238,7 @@ def test_provider_profile_process_values_override_factory_dotenv(tmp_path):
     (workspace / ".env").write_text(
         "LLM_PROVIDER=gateway\n"
         "GATEWAY_API_KEY=factory-secret\n"
+        "GATEWAY_BASE_URL=https://gateway.example.invalid\n"
         "GATEWAY_IMAGE_MODEL=qwen-image-2.0\n",
         encoding="utf-8",
     )
@@ -275,7 +300,7 @@ def test_provider_profile_never_reuses_openmontage_openai_key_for_gateway(tmp_pa
     (workspace / ".env").write_text(
         "LLM_PROVIDER=gateway\n"
         "IMAGE_PROVIDER=gateway\n"
-        "OPENAI_BASE_URL=https://ops-ai-gateway.yc345.tv/v1\n",
+        "OPENAI_BASE_URL=https://gateway.example.invalid/v1\n",
         encoding="utf-8",
     )
     (openmontage / ".env").write_text(
@@ -304,6 +329,7 @@ def test_provider_report_never_serializes_credentials(tmp_path):
             "LLM_PROVIDER": "gateway",
             "IMAGE_PROVIDER": "gateway",
             "GATEWAY_API_KEY": "do-not-leak",
+            "GATEWAY_BASE_URL": "https://gateway.example.invalid",
         },
     )
 

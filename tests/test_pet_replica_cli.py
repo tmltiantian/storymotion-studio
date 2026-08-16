@@ -48,6 +48,19 @@ def _require_cli():
     return CLI
 
 
+def test_replica_cli_requires_an_explicit_gateway_base_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli = _require_cli()
+    monkeypatch.setattr(cli, "FACTORY_ENV_PATH", tmp_path / "missing.env")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("GATEWAY_BASE_URL", raising=False)
+
+    with pytest.raises(cli.PetReplicaCLIError, match="GATEWAY_BASE_URL"):
+        cli._configured_gateway_base_url()
+
+
 @pytest.mark.parametrize(
     ("endpoint", "expected"),
     (

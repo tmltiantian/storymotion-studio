@@ -1931,11 +1931,13 @@ def _selection_provenance_is_current(
 
 
 def _configured_gateway_base_url() -> str:
-    return _configured_gateway_value(
+    value = _configured_gateway_value(
         "OPENAI_BASE_URL",
         "GATEWAY_BASE_URL",
-        default="https://ops-ai-gateway.yc345.tv/v1",
     )
+    if not value:
+        raise PetReplicaCLIError("GATEWAY_BASE_URL is required for live generation.")
+    return value.rstrip("/")
 
 
 def _configured_gateway_api_key() -> str:
