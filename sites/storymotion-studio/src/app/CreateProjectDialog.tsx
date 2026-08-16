@@ -51,6 +51,7 @@ function focusableElements(container: HTMLElement): HTMLElement[] {
 export function CreateProjectDialog({
   createProject,
   onClose,
+  onCreated,
   returnFocusRef,
 }: {
   createProject: (
@@ -58,6 +59,7 @@ export function CreateProjectDialog({
     signal?: AbortSignal,
   ) => Promise<JobAccepted>;
   onClose: () => void;
+  onCreated: () => void;
   returnFocusRef: RefObject<HTMLButtonElement | null>;
 }) {
   const [mode, setMode] = useState<ProjectMode>("original");
@@ -205,7 +207,14 @@ export function CreateProjectDialog({
             <strong>项目已进入创建队列</strong>
             <span>作业 ID</span>
             <code>{state.job.job_id}</code>
-            <button className="command-button" type="button" onClick={onClose}>
+            <button
+              className="command-button"
+              type="button"
+              onClick={() => {
+                onCreated();
+                onClose();
+              }}
+            >
               完成
             </button>
           </div>
