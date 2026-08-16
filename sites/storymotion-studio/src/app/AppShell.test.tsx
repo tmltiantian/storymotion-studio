@@ -443,13 +443,17 @@ describe("production workbench shell", () => {
     );
   });
 
-  it("shows works as unavailable without enabled catalog controls", async () => {
+  it("loads an empty works catalog through the real page contract", async () => {
     window.history.replaceState({}, "", "/works");
-    render(<App api={projectsApi()} />);
+    const api = {
+      ...projectsApi(),
+      listWorks: vi.fn().mockResolvedValue([]),
+    };
+    render(<App api={api} />);
 
-    expect(await screen.findByText("作品目录尚未接入")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "筛选作品" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "查看历史版本" })).not.toBeInTheDocument();
+    expect(await screen.findByText("还没有可查看的作品")).toBeVisible();
+    expect(api.listWorks).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("searchbox", { name: "筛选作品" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "查看作业活动" })).not.toBeInTheDocument();
   });
 });

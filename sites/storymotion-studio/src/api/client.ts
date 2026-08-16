@@ -16,8 +16,8 @@ import type {
   VideoGenerationSubmission,
   VideoPreflight,
   VideoWorkspace,
-  WorkCapability,
-  WorkCatalogAdapter,
+  WorkDetail,
+  WorkSummary,
 } from "./types";
 
 type FetchImplementation = typeof fetch;
@@ -25,7 +25,6 @@ type FetchImplementation = typeof fetch;
 export interface ApiClientOptions {
   baseUrl?: string;
   fetch?: FetchImplementation;
-  workCatalog?: WorkCatalogAdapter;
 }
 
 export class ApiClientError extends Error {
@@ -111,7 +110,8 @@ export interface ApiClient {
   jobEventsUrl(jobId: string): string;
   mediaUrl(artifactId: string): string;
   getMedia(artifactId: string, range?: string): Promise<Blob>;
-  works: WorkCapability;
+  listWorks(signal?: AbortSignal): Promise<WorkSummary[]>;
+  getWork(workId: string, signal?: AbortSignal): Promise<WorkDetail>;
   getProviderSettings(): Promise<ProviderSettings>;
 }
 
@@ -167,13 +167,6 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       signal,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-
-  const works: WorkCapability = options.workCatalog
-    ? { availability: "available", catalog: options.workCatalog }
-    : {
-        availability: "unavailable",
-        reason: "local_catalog_not_configured",
-      };
 
   return {
     listProjects: (signal) =>
@@ -267,7 +260,9 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       }
       return response.blob();
     },
-    works,
+    listWorks: (signal) => request<WorkSummary[]>("/api/works", { signal }),
+    getWork: (workId, signal) =>
+      request<WorkDetail>(`/api/works/${identifier(workId)}`, { signal }),
     getProviderSettings: () =>
       request<ProviderSettings>("/api/settings/providers"),
   };

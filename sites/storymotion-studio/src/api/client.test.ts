@@ -19,15 +19,22 @@ function job(status: JobStatus): JobDetail {
 }
 
 describe("Task 5 API contracts", () => {
-  it("models the future works catalog without issuing nonexistent HTTP routes", () => {
-    const fetchFake = vi.fn<typeof fetch>();
+  it("loads the real works catalog through the API", async () => {
+    const works = [{ work_id: "work_01", title: "咪要去面试" }];
+    const fetchFake = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(works), {
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
     const client = createApiClient({ fetch: fetchFake });
 
-    expect(client.works).toEqual({
-      availability: "unavailable",
-      reason: "local_catalog_not_configured",
-    });
-    expect(fetchFake).not.toHaveBeenCalled();
+    await expect(client.listWorks()).resolves.toEqual(works);
+    expect(fetchFake).toHaveBeenCalledWith(
+      "/api/works",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Accept: "application/json" }),
+      }),
+    );
   });
 
   it("preserves every full job record branch returned by resume", async () => {

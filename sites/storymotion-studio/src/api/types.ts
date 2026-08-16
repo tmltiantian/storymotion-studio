@@ -48,6 +48,7 @@ export interface Artifact {
   media_url: string;
   kind?: ArtifactKind;
   viewer?: ArtifactViewerMetadata;
+  sha256?: string;
 }
 
 export type ArtifactKind = "text" | "image" | "audio" | "video" | "eval" | "file";
@@ -258,6 +259,7 @@ export interface ProviderCapability {
   provider: string;
   model: string;
   ready: boolean;
+  credential_present: boolean;
   blockers: string[];
   enabled: boolean;
   supports_reference_images?: boolean;
@@ -268,35 +270,47 @@ export interface ProviderSettings {
   capabilities: Partial<
     Record<"text" | "image" | "video" | "audio", ProviderCapability>
   >;
+  defaults: {
+    voice_mapping: Array<{
+      role_id: string;
+      role_name: string;
+      personality: string;
+      voice_name: string;
+      speed: string;
+    }>;
+    output: {
+      aspect_ratio: string;
+      resolution: string;
+      fps: number;
+      target_duration_seconds: number;
+    };
+    generation: {
+      concurrency: number;
+      fee_cap_yuan: number | null;
+    };
+  };
 }
 
 export interface WorkSummary {
   work_id: string;
   project_id: string;
   title: string;
-  mode: ProjectMode;
+  mode: ProjectMode | "historical";
+  source: "delivered" | "historical";
   delivered_at: string;
   cover?: Artifact;
   current_version?: string;
 }
 
 export interface WorkDetail extends WorkSummary {
+  versions: WorkVersion[];
+}
+
+export interface WorkVersion {
+  version_id: string;
+  label: string;
+  created_at: string;
   outputs: Artifact[];
-  versions: JsonObject[];
   eval_reports: Artifact[];
+  iteration_summary?: string;
 }
-
-export interface WorkCatalogAdapter {
-  listWorks(): Promise<WorkSummary[]>;
-  getWork(workId: string): Promise<WorkDetail>;
-}
-
-export type WorkCapability =
-  | {
-      availability: "unavailable";
-      reason: "local_catalog_not_configured";
-    }
-  | {
-      availability: "available";
-      catalog: WorkCatalogAdapter;
-    };

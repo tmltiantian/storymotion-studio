@@ -15,6 +15,7 @@ from factory.pipeline_jobs import JobManager
 from factory.pipeline_store import create_project
 from factory.workbench_api import create_workbench_app, run_workbench_api
 from factory.workbench_service import WorkbenchService
+from scripts.migrate_showcase_works import migrate_showcase_media
 
 
 class FakeWorkbenchService:
@@ -63,8 +64,48 @@ class FakeWorkbenchService:
                     "blockers": [],
                     "enabled": True,
                     "supports_reference_images": True,
+                    "credential_present": True,
                 }
+            },
+            "defaults": {
+                "voice_mapping": [],
+                "output": {
+                    "aspect_ratio": "9:16",
+                    "resolution": "1080x1920",
+                    "fps": 30,
+                    "target_duration_seconds": 75,
+                },
+                "generation": {"concurrency": 1, "fee_cap_yuan": None},
+            },
+        }
+
+    def list_works(self):
+        return [
+            {
+                "work_id": "work_0123456789abcdef0123456789abcdef",
+                "project_id": "episode_01",
+                "title": "咪要去面试",
+                "mode": "replica",
+                "source": "delivered",
+                "delivered_at": "2026-08-15T12:00:00Z",
+                "current_version": "V3.1",
             }
+        ]
+
+    def work_detail(self, work_id: str):
+        if work_id != "work_0123456789abcdef0123456789abcdef":
+            raise KeyError(work_id)
+        return {
+            **self.list_works()[0],
+            "versions": [
+                {
+                    "version_id": "version_0123456789abcdef",
+                    "label": "V3.1",
+                    "created_at": "2026-08-15T12:00:00Z",
+                    "outputs": [],
+                    "eval_reports": [],
+                }
+            ],
         }
 
     def media_info(self, artifact_id: str):
@@ -118,7 +159,9 @@ def test_project_detail_contains_execution_and_review_states(client: TestClient)
     assert response.json()["stages"][0]["review_state"] == "awaiting_review"
 
 
-def test_video_workspace_route_returns_path_free_shots_and_persisted_job(client: TestClient):
+def test_video_workspace_route_returns_path_free_shots_and_persisted_job(
+    client: TestClient,
+):
     response = client.get("/api/projects/episode_01/video/workspace")
 
     assert response.status_code == 200
@@ -140,6 +183,100 @@ def test_provider_status_never_returns_secrets(client: TestClient):
     payload = client.get("/api/settings/providers").json()
 
     assert "sk-" not in json.dumps(payload)
+
+
+def test_works_routes_return_path_free_catalog_and_safe_404(client: TestClient):
+    listed = client.get("/api/works")
+    detail = client.get("/api/works/work_0123456789abcdef0123456789abcdef")
+    missing = client.get("/api/works/work_ffffffffffffffffffffffffffffffff")
+
+    assert listed.status_code == 200
+    assert listed.json()[0]["title"] == "咪要去面试"
+    assert detail.status_code == 200
+    assert detail.json()["versions"][0]["label"] == "V3.1"
+    assert missing.status_code == 404
+    assert missing.json() == {
+        "error": {"code": "not_found", "message": "Resource was not found"}
+    }
+    serialized = listed.text + detail.text
+    assert "/Users/" not in serialized
+    assert "archive_relative" not in serialized
+    assert "source_relative" not in serialized
+
+
+def test_settings_expose_public_defaults_and_credential_booleans_only(
+    client: TestClient,
+) -> None:
+    payload = client.get("/api/settings/providers").json()
+
+    assert payload["capabilities"]["video"]["credential_present"] is True
+    assert payload["defaults"]["output"]["resolution"] == "1080x1920"
+    assert payload["defaults"]["generation"]["fee_cap_yuan"] is None
+    serialized = json.dumps(payload)
+    assert "api_key" not in serialized
+    assert "base_url" not in serialized
+    assert "key_source" not in serialized
+
+
+def test_archived_work_media_is_available_only_through_opaque_descriptor(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "public/audio"
+    source.mkdir(parents=True)
+    content = b"approved-voice"
+    (source / "black-cat-approved.m4a").write_bytes(content)
+    archive = tmp_path / "output/workbench_archive"
+    migrate_showcase_media(source.parent, archive)
+    service = WorkbenchService(
+        tmp_path,
+        archive_manifest=archive / "archive_manifest.json",
+        job_manager=JobManager(tmp_path),
+        provider_profile_loader=lambda: None,
+    )
+    api = TestClient(create_workbench_app(service))
+
+    works = api.get("/api/works").json()
+    detail = api.get(f"/api/works/{works[0]['work_id']}").json()
+    artifact = detail["versions"][0]["outputs"][0]
+    media = api.get(artifact["media_url"])
+
+    assert artifact["artifact_id"].startswith("art_")
+    assert "archive_relative" not in json.dumps(detail)
+    assert str(archive) not in json.dumps(detail)
+    assert media.status_code == 200
+    assert media.content == content
+    assert api.get("/api/media/audio/black-cat-approved.m4a").status_code in {400, 404}
+
+
+def test_settings_keep_public_defaults_when_no_provider_profile_exists(
+    tmp_path: Path,
+) -> None:
+    config = json.loads(
+        (Path(__file__).resolve().parents[1] / "config/factory.config.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    service = WorkbenchService(
+        tmp_path,
+        config=config,
+        job_manager=JobManager(tmp_path),
+        provider_profile_loader=lambda: None,
+    )
+
+    payload = (
+        TestClient(create_workbench_app(service)).get("/api/settings/providers").json()
+    )
+
+    assert payload["capabilities"] == {}
+    assert [item["role_name"] for item in payload["defaults"]["voice_mapping"]] == [
+        "黑白猫",
+        "橘猫",
+    ]
+    assert payload["defaults"]["output"]["resolution"] == "1080x1920"
+    assert payload["defaults"]["generation"] == {
+        "concurrency": 1,
+        "fee_cap_yuan": None,
+    }
 
 
 def test_cors_allows_configured_localhost_and_rejects_other_origins(

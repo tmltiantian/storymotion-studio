@@ -14,6 +14,26 @@
     "targetDurationSeconds": 75,
     "mainCharacterCount": 2
   },
+  "workbenchDefaults": {
+    "concurrency": 1,
+    "feeCapYuan": null,
+    "voiceMapping": [
+      {
+        "role_id": "black_cat",
+        "role_name": "黑白猫",
+        "personality": "高冷御姐",
+        "voice_name": "魅力女友",
+        "speed": "+4"
+      },
+      {
+        "role_id": "orange_cat",
+        "role_name": "橘猫",
+        "personality": "可爱活泼",
+        "voice_name": "调皮公主",
+        "speed": "+2"
+      }
+    ]
+  },
   "qualityUpgrade": {
     "draftVideoModel": "doubao-seedance-2-0-fast",
     "productionVideoModels": [

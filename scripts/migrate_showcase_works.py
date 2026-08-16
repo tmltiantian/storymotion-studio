@@ -1,0 +1,463 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import stat
+import sys
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any
+from uuid import uuid4
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from factory.work_catalog import ArchiveEntry, ArchiveManifest  # noqa: E402
+from factory.secure_posix import AnchoredDirectory  # noqa: E402
+
+
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
+_APPROVED_AUDIO: dict[str, dict[str, str]] = {
+    "audio/black-cat-approved.m4a": {
+        "version_label": "黑白猫定版音色",
+        "role": "黑白猫",
+        "personality": "高冷御姐",
+        "voice_name": "魅力女友",
+        "speed": "+4",
+        "description": "自然偏低、冷静克制、短停顿。",
+    },
+    "audio/orange-cat-approved.m4a": {
+        "version_label": "橘猫定版音色",
+        "role": "橘猫",
+        "personality": "可爱活泼",
+        "voice_name": "调皮公主",
+        "speed": "+2",
+        "description": "声线轻亮、反应灵动、有自然笑意。",
+    },
+    "audio/two-cat-approved-dialogue.m4a": {
+        "version_label": "双猫对话试听",
+        "role": "双猫",
+        "description": "黑白猫与橘猫的定版对话试听。",
+    },
+}
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    device: int
+    inode: int
+    mode: int
+    size: int
+    modified_ns: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class _PlannedFile:
+    entry: ArchiveEntry
+    snapshot: _Snapshot
+
+
+def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_dev,
+        left.st_ino,
+        stat.S_IFMT(left.st_mode),
+    ) == (
+        right.st_dev,
+        right.st_ino,
+        stat.S_IFMT(right.st_mode),
+    )
+
+
+def _snapshot(metadata: os.stat_result, digest: str) -> _Snapshot:
+    return _Snapshot(
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        mode=stat.S_IFMT(metadata.st_mode),
+        size=metadata.st_size,
+        modified_ns=metadata.st_mtime_ns,
+        sha256=digest,
+    )
+
+
+def _snapshot_matches(value: _Snapshot, metadata: os.stat_result) -> bool:
+    return (
+        value.device == metadata.st_dev
+        and value.inode == metadata.st_ino
+        and value.mode == stat.S_IFMT(metadata.st_mode)
+        and value.size == metadata.st_size
+        and value.modified_ns == metadata.st_mtime_ns
+        and stat.S_ISREG(metadata.st_mode)
+    )
+
+
+def _open_parent(anchor: AnchoredDirectory, relative: str) -> tuple[int, str]:
+    path = PurePosixPath(relative)
+    if len(path.parts) == 1:
+        return os.dup(anchor.descriptor), path.name
+    return anchor.open_directory(Path(*path.parts[:-1])), path.name
+
+
+def _hash_descriptor(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    while chunk := os.read(descriptor, 1024 * 1024):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_snapshot(anchor: AnchoredDirectory, relative: str) -> _Snapshot:
+    parent, name = _open_parent(anchor, relative)
+    descriptor = -1
+    try:
+        listed = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if stat.S_ISLNK(listed.st_mode):
+            raise ValueError("showcase source contains a symlink")
+        descriptor = os.open(name, _FILE_FLAGS, dir_fd=parent)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or not _same_identity(listed, opened):
+            raise ValueError("showcase source identity changed")
+        digest = _hash_descriptor(descriptor)
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if not _same_identity(opened, after) or not _same_identity(opened, current):
+            raise ValueError("showcase source changed during migration planning")
+        result = _snapshot(after, digest)
+        if not _snapshot_matches(result, opened):
+            raise ValueError("showcase source changed during migration planning")
+        return result
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent)
+
+
+def _walk_regular_files(anchor: AnchoredDirectory) -> tuple[str, ...]:
+    found: list[str] = []
+
+    def visit(descriptor: int, prefix: tuple[str, ...]) -> None:
+        for name in sorted(os.listdir(descriptor)):
+            if name in {"", ".", ".."} or "/" in name:
+                raise ValueError("showcase source contains an unsafe name")
+            metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            relative = (*prefix, name)
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ValueError("showcase source contains a symlink")
+            if stat.S_ISDIR(metadata.st_mode):
+                child = os.open(name, _DIRECTORY_FLAGS, dir_fd=descriptor)
+                try:
+                    opened = os.fstat(child)
+                    if not _same_identity(metadata, opened):
+                        raise ValueError(
+                            "showcase directory changed during migration planning"
+                        )
+                    visit(child, relative)
+                finally:
+                    os.close(child)
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("showcase source contains an unsupported file type")
+            found.append(PurePosixPath(*relative).as_posix())
+
+    root = os.dup(anchor.descriptor)
+    try:
+        visit(root, ())
+    finally:
+        os.close(root)
+    return tuple(found)
+
+
+def _media_type(relative: str) -> str:
+    suffix = PurePosixPath(relative).suffix.lower()
+    return {
+        ".m4a": "audio/mp4",
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".mp4": "video/mp4",
+        ".mov": "video/quicktime",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".svg": "image/svg+xml",
+        ".json": "application/json",
+    }.get(suffix, "application/octet-stream")
+
+
+def _media_kind(media_type: str) -> str:
+    if media_type.startswith("audio/"):
+        return "audio"
+    if media_type.startswith("video/"):
+        return "video"
+    if media_type.startswith("image/"):
+        return "image"
+    if media_type == "application/json":
+        return "text"
+    return "file"
+
+
+def _classify_source(relative: str, snapshot: _Snapshot) -> ArchiveEntry:
+    approved = _APPROVED_AUDIO.get(relative)
+    if approved is not None:
+        classification = "linked"
+        collection_id = "approved-cat-voices"
+        title = "双猫定版音色"
+        destination = PurePosixPath(
+            "linked", collection_id, PurePosixPath(relative).name
+        )
+        version_label = approved["version_label"]
+        metadata = {
+            key: value for key, value in approved.items() if key != "version_label"
+        }
+    else:
+        classification = "unclassified"
+        collection_id = "historical-unclassified"
+        title = "历史归档"
+        destination = PurePosixPath("unclassified", relative)
+        version_label = PurePosixPath(relative).name
+        metadata = {"description": "旧展示站未归类素材，原样保留。"}
+    media_type = _media_type(relative)
+    return ArchiveEntry(
+        entry_id=f"archive_{hashlib.sha256((relative + chr(0) + snapshot.sha256).encode('utf-8')).hexdigest()[:32]}",
+        source_relative=relative,
+        archive_relative=destination.as_posix(),
+        classification=classification,
+        collection_id=collection_id,
+        title=title,
+        version_label=version_label,
+        media_type=media_type,
+        media_kind=_media_kind(media_type),
+        size_bytes=snapshot.size,
+        sha256=snapshot.sha256,
+        metadata=metadata,
+    )
+
+
+def _build_plan(source: AnchoredDirectory) -> tuple[_PlannedFile, ...]:
+    plan: list[_PlannedFile] = []
+    for relative in _walk_regular_files(source):
+        snapshot = _read_snapshot(source, relative)
+        plan.append(_PlannedFile(_classify_source(relative, snapshot), snapshot))
+    destinations = [item.entry.archive_relative for item in plan]
+    if len(set(destinations)) != len(destinations):
+        raise ValueError("migration plan contains a duplicate destination collision")
+    return tuple(plan)
+
+
+def _mkdir_secure(path: Path) -> None:
+    absolute = path.expanduser().absolute()
+    if not absolute.is_absolute():
+        raise ValueError("archive destination must be absolute")
+    descriptor = os.open(os.sep, _DIRECTORY_FLAGS)
+    try:
+        for component in absolute.parts[1:]:
+            try:
+                metadata = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise ValueError("archive destination contains a symlink")
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise ValueError("archive destination ancestor is not a directory")
+            except FileNotFoundError:
+                os.mkdir(component, mode=0o700, dir_fd=descriptor)
+            next_descriptor = os.open(component, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+    finally:
+        os.close(descriptor)
+
+
+def _existing_digest(parent: int, name: str) -> str | None:
+    try:
+        descriptor = os.open(name, _FILE_FLAGS, dir_fd=parent)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError("archive destination collision is unsafe") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("archive destination collision is not a regular file")
+        return _hash_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _copy_file_atomic(
+    source: AnchoredDirectory,
+    destination: AnchoredDirectory,
+    planned: _PlannedFile,
+) -> None:
+    source_parent, source_name = _open_parent(source, planned.entry.source_relative)
+    destination_path = PurePosixPath(planned.entry.archive_relative)
+    destination_parent = destination.open_directory(
+        Path(*destination_path.parts[:-1]), create=True
+    )
+    source_descriptor = -1
+    temporary_descriptor = -1
+    temporary_name = f".{destination_path.name}.{uuid4().hex}.tmp"
+    try:
+        existing = _existing_digest(destination_parent, destination_path.name)
+        if existing is not None:
+            if existing != planned.entry.sha256:
+                raise ValueError("archive destination collision has different content")
+            current = os.stat(source_name, dir_fd=source_parent, follow_symlinks=False)
+            if not _snapshot_matches(planned.snapshot, current):
+                raise ValueError("showcase source changed during migration")
+            return
+        source_descriptor = os.open(source_name, _FILE_FLAGS, dir_fd=source_parent)
+        opened = os.fstat(source_descriptor)
+        if not _snapshot_matches(planned.snapshot, opened):
+            raise ValueError("showcase source changed during migration")
+        temporary_descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=destination_parent,
+        )
+        digest = hashlib.sha256()
+        while chunk := os.read(source_descriptor, 1024 * 1024):
+            digest.update(chunk)
+            remaining = memoryview(chunk)
+            while remaining:
+                written = os.write(temporary_descriptor, remaining)
+                if written <= 0:
+                    raise OSError("archive copy could not be completed")
+                remaining = remaining[written:]
+        os.fsync(temporary_descriptor)
+        os.close(temporary_descriptor)
+        temporary_descriptor = -1
+        after = os.fstat(source_descriptor)
+        current = os.stat(source_name, dir_fd=source_parent, follow_symlinks=False)
+        if (
+            digest.hexdigest() != planned.entry.sha256
+            or not _snapshot_matches(planned.snapshot, after)
+            or not _snapshot_matches(planned.snapshot, current)
+        ):
+            raise ValueError("showcase source changed during migration")
+        if _existing_digest(destination_parent, destination_path.name) is not None:
+            raise ValueError("archive destination collision appeared during migration")
+        os.replace(
+            temporary_name,
+            destination_path.name,
+            src_dir_fd=destination_parent,
+            dst_dir_fd=destination_parent,
+        )
+        os.fsync(destination_parent)
+    finally:
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=destination_parent)
+        except FileNotFoundError:
+            pass
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
+        os.close(source_parent)
+        os.close(destination_parent)
+
+
+def _validate_roots(source: Path, archive: Path) -> None:
+    if source.is_symlink():
+        raise ValueError("showcase source cannot be a symlink")
+    if not source.is_dir():
+        raise FileNotFoundError("showcase source directory is missing")
+    if archive.is_symlink():
+        raise ValueError("archive destination cannot be a symlink")
+    source_absolute = source.absolute()
+    archive_absolute = archive.absolute()
+    if archive_absolute == source_absolute or archive_absolute.is_relative_to(
+        source_absolute
+    ):
+        raise ValueError("archive destination cannot be inside the showcase source")
+    if source_absolute.is_relative_to(archive_absolute):
+        raise ValueError("showcase source cannot be inside the archive destination")
+
+
+def migrate_showcase_media(
+    source_public: str | Path,
+    archive_root: str | Path,
+    *,
+    dry_run: bool = False,
+) -> ArchiveManifest:
+    source_path = Path(source_public).expanduser()
+    archive_path = Path(archive_root).expanduser()
+    _validate_roots(source_path, archive_path)
+    with AnchoredDirectory.open(source_path, label="Showcase source") as source:
+        plan = _build_plan(source)
+        manifest = ArchiveManifest(
+            entries=tuple(item.entry for item in plan),
+            archive_root=archive_path.absolute(),
+        )
+        if dry_run:
+            return manifest
+        _mkdir_secure(archive_path)
+        with AnchoredDirectory.open(archive_path, label="Showcase archive") as archive:
+            for item in plan:
+                _copy_file_atomic(source, archive, item)
+            for item in plan:
+                current = _read_snapshot(source, item.entry.source_relative)
+                if current != item.snapshot:
+                    raise ValueError("showcase source changed during migration")
+                archived = archive.read_bytes(item.entry.archive_relative)
+                if hashlib.sha256(archived).hexdigest() != item.entry.sha256:
+                    raise ValueError("archived file failed SHA-256 verification")
+            encoded = (
+                json.dumps(
+                    manifest.to_dict(),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8")
+            archive.write_bytes_atomic("archive_manifest.json", encoded)
+        return manifest
+
+
+def _summary(manifest: ArchiveManifest, *, dry_run: bool) -> dict[str, Any]:
+    return {
+        "schema_version": manifest.schema_version,
+        "dry_run": dry_run,
+        "source_file_count": len(manifest.entries),
+        "linked_count": len(manifest.linked),
+        "unclassified_count": len(manifest.unclassified),
+        "files": [
+            {
+                "source": entry.source_relative,
+                "classification": entry.classification,
+                "sha256": entry.sha256,
+            }
+            for entry in manifest.entries
+        ],
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Migrate old showcase media safely")
+    parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument("--destination", required=True, type=Path)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        manifest = migrate_showcase_media(
+            args.source,
+            args.destination,
+            dry_run=args.dry_run,
+        )
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 1
+    print(
+        json.dumps(
+            _summary(manifest, dry_run=args.dry_run), ensure_ascii=False, indent=2
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
