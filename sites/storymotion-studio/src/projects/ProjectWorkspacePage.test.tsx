@@ -253,6 +253,17 @@ describe("project review workspace", () => {
     expect(screen.getByText("修订 4")).toBeVisible();
   });
 
+  it("renders stage artifacts through the inspectable viewer before review", async () => {
+    renderWorkspace();
+
+    const image = await screen.findByRole("img", { name: "storyboard-preview.png" });
+    const open = screen.getByRole("link", { name: "查看原图" });
+    const review = screen.getByRole("heading", { name: "审核检查" });
+
+    expect(open).toHaveAttribute("href", "/api/media/art_storyboard_preview");
+    expect(image.compareDocumentPosition(review) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("exposes all nine stages as stable links with textual current semantics", async () => {
     renderWorkspace();
 

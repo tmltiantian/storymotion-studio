@@ -147,6 +147,91 @@ def test_project_detail_contains_execution_review_and_opaque_artifacts(
     assert "/runs/" not in json.dumps(payload)
 
 
+def test_artifact_viewer_projection_uses_registered_audio_manifest_without_paths(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "runs" / "episode_audio"
+    audio_dir = project / "stages" / "audio"
+    audio_dir.mkdir(parents=True)
+    audio = audio_dir / "voiceover.m4a"
+    audio.write_bytes(b"safe-audio")
+    manifest = audio_dir / "audio_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "motion-comic-factory.audio.v1",
+                "voiceover_audio": str(audio.resolve()),
+                "timings": [
+                    {
+                        "shot_id": "shot_02",
+                        "speaker_name": "黑白猫",
+                        "start_seconds": 4.2,
+                        "end_seconds": 6.1,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    spec = ProjectSpec(
+        project_id="episode_audio",
+        title="Audio Episode",
+        mode=ProjectMode.ORIGINAL,
+        input={"kind": "idea", "text": "Audio viewer"},
+        output_dir=project / "output",
+    )
+    package = create_project(project, spec)
+    audio_stage = next(item for item in package.stages if item.stage.value == "audio")
+    updated_audio = replace(
+        audio_stage,
+        state=StageState.PASSED,
+        artifacts=(str(manifest), str(audio)),
+    )
+    stages = tuple(updated_audio if item.stage.value == "audio" else item for item in package.stages)
+    (project / "production_package.json").write_text(
+        json.dumps(package.with_stages(stages).to_dict(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    service = WorkbenchService(
+        tmp_path,
+        job_manager=JobManager(tmp_path),
+        provider_profile_loader=lambda: None,
+    )
+
+    detail = service.stage_detail("episode_audio", "audio")
+    descriptor = next(item for item in detail["artifacts"] if item["name"] == "voiceover.m4a")
+    encoded = json.dumps(detail, ensure_ascii=False)
+
+    assert descriptor["kind"] == "audio"
+    assert descriptor["viewer"]["size_bytes"] == len(b"safe-audio")
+    assert descriptor["viewer"]["dialogues"] == [
+        {
+            "dialogue_id": "shot_02:0",
+            "speaker": "黑白猫",
+            "start_seconds": 4.2,
+            "end_seconds": 6.1,
+        }
+    ]
+    assert str(tmp_path) not in encoded
+    assert "voiceover_audio" not in encoded
+
+
+def test_job_detail_includes_persisted_last_event_sequence(
+    service: WorkbenchService,
+) -> None:
+    job_id = service.jobs.submit(
+        project_id="episode_01",
+        operation="run_stage",
+        payload={},
+    )
+    service.jobs.start(job_id)
+
+    detail = service.job_detail(job_id)
+
+    assert detail["last_event_sequence"] == 2
+
+
 def test_impact_preview_exposes_path_free_authoritative_summary(
     service: WorkbenchService,
     project_workspace: tuple[Path, Path],
