@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Literal, Mapping
 
+from .media_types import safe_media_type, validate_media_type
 from .pipeline_contracts import (
     PIPELINE_STAGES,
     ProductionPackage,
@@ -25,10 +26,13 @@ from .pipeline_contracts import (
 )
 from .pipeline_modes import get_mode_adapter
 from .pipeline_review import (
+    DELIVERY_EVAL_EVIDENCE_SCHEMA,
+    REVIEW_SCHEMA,
     REVISIONS_SCHEMA,
     ApprovalPreset,
     ReviewConfig,
     StageRevision,
+    canonical_json_digest,
     resolve_review_config,
     validate_stage_review,
 )
@@ -95,7 +99,9 @@ def _media_kind(name: str, media_type: str = "") -> str:
 
 
 def _mime(name: str) -> str:
-    return mimetypes.guess_type(name)[0] or "application/octet-stream"
+    return safe_media_type(
+        mimetypes.guess_type(name)[0] or "application/octet-stream"
+    )
 
 
 def _trusted_time(value: Any) -> str:
@@ -222,6 +228,7 @@ class ArchiveEntry:
             "version_label",
             _archive_text(self.version_label, label="version", maximum=512),
         )
+        object.__setattr__(self, "media_type", validate_media_type(self.media_type))
         if self.size_bytes < 0 or not _HASH.fullmatch(self.sha256):
             raise ValueError("archive file evidence is invalid")
         if self.media_kind not in {"text", "image", "audio", "video", "eval", "file"}:
@@ -367,6 +374,9 @@ class CatalogArtifact:
     sha256: str
     path: Path = field(compare=False, repr=False)
     rights: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "media_type", validate_media_type(self.media_type))
 
 
 @dataclass(frozen=True)
@@ -523,19 +533,57 @@ def _delivery_eval_reports(
     manifest: Mapping[str, Any],
 ) -> tuple[CatalogArtifact, ...]:
     binding = manifest.get("eval_evidence")
-    if not isinstance(binding, Mapping) or binding.get("stage") != StageName.EVAL.value:
+    if not isinstance(binding, Mapping):
+        return ()
+    policy = str(binding.get("policy") or "")
+    expected_keys = {
+        "schema_version",
+        "stage",
+        "policy",
+        "state",
+        "revision",
+        "stage_revision",
+        "stage_revision_sha256",
+        "reports",
+        "snapshot_sha256",
+    }
+    if policy in {ReviewPolicy.MANUAL.value, ReviewPolicy.GROUPED.value}:
+        expected_keys.add("review")
+    if (
+        set(binding) != expected_keys
+        or binding.get("schema_version") != DELIVERY_EVAL_EVIDENCE_SCHEMA
+        or binding.get("stage") != StageName.EVAL.value
+    ):
+        return ()
+    unsigned = {key: value for key, value in binding.items() if key != "snapshot_sha256"}
+    if str(binding.get("snapshot_sha256") or "") != canonical_json_digest(unsigned):
         return ()
     try:
         revision_number = int(binding["revision"])
     except (KeyError, TypeError, ValueError):
         return ()
-    review = binding.get("review")
+    state = str(binding.get("state") or "")
+    if (
+        policy == ReviewPolicy.AUTOMATIC.value
+        and state != ReviewState.AUTO_APPROVED.value
+    ) or (
+        policy in {ReviewPolicy.MANUAL.value, ReviewPolicy.GROUPED.value}
+        and state != ReviewState.APPROVED.value
+    ):
+        return ()
+    if policy not in {
+        ReviewPolicy.AUTOMATIC.value,
+        ReviewPolicy.MANUAL.value,
+        ReviewPolicy.GROUPED.value,
+    }:
+        return ()
+    revision_snapshot = binding.get("stage_revision")
     raw_reports = binding.get("reports")
     if (
         revision_number < 1
-        or not isinstance(review, Mapping)
-        or int(review.get("revision") or 0) != revision_number
-        or not _HASH.fullmatch(str(review.get("sha256") or ""))
+        or not isinstance(revision_snapshot, Mapping)
+        or str(binding.get("stage_revision_sha256") or "")
+        != canonical_json_digest(revision_snapshot)
         or not isinstance(raw_reports, list)
         or not raw_reports
     ):
@@ -553,22 +601,92 @@ def _delivery_eval_reports(
         (revision for revision in revisions if revision.number == revision_number),
         None,
     )
-    if (
-        selected is None
-        or selected.stage is not StageName.EVAL
-        or selected.input_signature != str(binding.get("input_signature") or "")
-        or selected.executor != str(binding.get("executor") or "")
-    ):
+    if selected is None or selected.stage is not StageName.EVAL:
         return ()
-    revision_artifacts: dict[str, str] = {}
+    revision_artifacts: dict[str, dict[str, str]] = {}
     for artifact in selected.artifacts:
         relative = project.relative_path(artifact.path).as_posix()
         if relative in revision_artifacts:
             return ()
-        revision_artifacts[relative] = artifact.sha256
+        revision_artifacts[relative] = {
+            "path": relative,
+            "sha256": artifact.sha256,
+            "media_type": artifact.media_type,
+        }
+    expected_revision_snapshot = {
+        "schema_version": REVISIONS_SCHEMA,
+        "stage": selected.stage.value,
+        "number": selected.number,
+        "input_signature": selected.input_signature,
+        "executor": selected.executor,
+        "artifacts": list(revision_artifacts.values()),
+        "created_at": selected.created_at,
+    }
+    if dict(revision_snapshot) != expected_revision_snapshot:
+        return ()
+    if policy in {ReviewPolicy.MANUAL.value, ReviewPolicy.GROUPED.value}:
+        review = binding.get("review")
+        if not isinstance(review, Mapping) or set(review) != {"snapshot", "sha256"}:
+            return ()
+        review_snapshot = review.get("snapshot")
+        if (
+            not isinstance(review_snapshot, Mapping)
+            or str(review.get("sha256") or "")
+            != canonical_json_digest(review_snapshot)
+            or set(review_snapshot)
+            != {
+                "schema_version",
+                "stage",
+                "revision",
+                "state",
+                "note",
+                "evidence",
+                "created_at",
+                "transaction_id",
+            }
+            or review_snapshot.get("schema_version") != REVIEW_SCHEMA
+            or review_snapshot.get("stage") != StageName.EVAL.value
+            or review_snapshot.get("revision") != revision_number
+            or review_snapshot.get("state") != ReviewState.APPROVED.value
+            or not isinstance(review_snapshot.get("note"), str)
+            or not str(review_snapshot.get("note") or "").strip()
+            or not isinstance(review_snapshot.get("created_at"), str)
+            or not isinstance(review_snapshot.get("transaction_id"), str)
+        ):
+            return ()
+        review_evidence = review_snapshot.get("evidence")
+        if not isinstance(review_evidence, list) or not review_evidence:
+            return ()
+        seen_review_evidence: set[str] = set()
+        for item in review_evidence:
+            if not isinstance(item, Mapping) or set(item) != {
+                "path",
+                "sha256",
+                "media_type",
+            }:
+                return ()
+            evidence_path = str(item.get("path") or "")
+            evidence_digest = str(item.get("sha256") or "")
+            try:
+                validate_media_type(item.get("media_type"))
+            except ValueError:
+                return ()
+            if (
+                not evidence_path
+                or len(evidence_path) > 4096
+                or any(unicodedata.category(character) == "Cc" for character in evidence_path)
+                or evidence_path in seen_review_evidence
+                or _HASH.fullmatch(evidence_digest) is None
+            ):
+                return ()
+            seen_review_evidence.add(evidence_path)
     requested: dict[str, str] = {}
     for item in raw_reports:
-        if not isinstance(item, Mapping):
+        if not isinstance(item, Mapping) or set(item) != {
+            "path",
+            "sha256",
+            "media_type",
+        }:
             return ()
         relative = project.relative_path(str(item.get("path") or "")).as_posix()
         digest = str(item.get("sha256") or "")
@@ -576,7 +694,7 @@ def _delivery_eval_reports(
             relative in requested
             or not PurePosixPath(relative).is_relative_to(PurePosixPath("stages/eval"))
             or not _HASH.fullmatch(digest)
-            or revision_artifacts.get(relative) != digest
+            or revision_artifacts.get(relative) != dict(item)
         ):
             return ()
         requested[relative] = digest

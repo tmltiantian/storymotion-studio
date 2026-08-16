@@ -7,9 +7,17 @@ import pytest
 
 from factory import pipeline_replica_stages
 from factory.pipeline_artifacts import load_stage_manifest
-from factory.pipeline_contracts import ProjectMode, ProjectSpec, StageName, StageState
+from factory.pipeline_contracts import (
+    ProjectMode,
+    ProjectSpec,
+    ReviewState,
+    StageName,
+    StageState,
+)
+from factory.pipeline_context import StageContext, StageExecution
+from factory.pipeline_review import ApprovalPreset, resolve_review_config
 from factory.pipeline_runner import run_pipeline
-from factory.pipeline_store import approve_stage, create_project
+from factory.pipeline_store import approve_stage, create_project, load_production_package
 
 
 def _project(tmp_path: Path) -> tuple[Path, Path]:
@@ -132,3 +140,77 @@ def test_replica_continues_from_asset_review_to_release_review(
     assert delivery.stopped_at is StageName.DELIVER
     assert delivery.stopped_state is StageState.BLOCKED
     assert (root / "stages/deliver/release/final/final.mp4").read_bytes() == b"release"
+
+
+def test_quick_preset_auto_eval_reaches_replica_delivery_without_review_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _workspace = _project(tmp_path)
+    review_config = resolve_review_config(ApprovalPreset.QUICK, {})
+    monkeypatch.setattr(pipeline_replica_stages, "_run_operation", _fake_operation)
+
+    def execute(context: StageContext) -> StageExecution:
+        if context.stage is StageName.EVAL:
+            report = context.stage_dir / "eval_result.json"
+            report.write_text('{"automatic_passed":true}', encoding="utf-8")
+            return StageExecution.passed(
+                executor=context.step.executor_id,
+                artifacts=(report,),
+            )
+        if context.stage is StageName.DELIVER:
+            return pipeline_replica_stages.execute_deliver(context)
+        artifact = context.stage_dir / f"{context.stage.value}.json"
+        artifact.write_text("{}", encoding="utf-8")
+        return StageExecution.passed(
+            executor=context.step.executor_id,
+            artifacts=(artifact,),
+        )
+
+    storyboard_wait = run_pipeline(
+        root,
+        through=StageName.STORYBOARD,
+        executor=execute,
+        review_config=review_config,
+        enable_live=True,
+    )
+    assert storyboard_wait.stopped_at is StageName.STORYBOARD
+    approve_stage(
+        root,
+        StageName.STORYBOARD,
+        note="Quick replica storyboard approved",
+        evidence=(root / "stages/storyboard/storyboard.json",),
+    )
+    video_wait = run_pipeline(
+        root,
+        through=StageName.VIDEO,
+        executor=execute,
+        review_config=review_config,
+        enable_live=True,
+    )
+    assert video_wait.stopped_at is StageName.VIDEO
+    approve_stage(
+        root,
+        StageName.VIDEO,
+        note="Quick replica video approved",
+        evidence=(root / "stages/video/video.json",),
+    )
+
+    delivery = run_pipeline(
+        root,
+        through=StageName.DELIVER,
+        executor=execute,
+        review_config=review_config,
+        enable_live=True,
+    )
+    package = load_production_package(root)
+    eval_record = next(item for item in package.stages if item.stage is StageName.EVAL)
+    manifest = json.loads(
+        (root / "stages/deliver/delivery_manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert delivery.stopped_at is StageName.DELIVER
+    assert eval_record.review_state is ReviewState.AUTO_APPROVED
+    assert not (root / "reviews/eval.review.json").exists()
+    assert manifest["eval_evidence"]["policy"] == "automatic"
+    assert manifest["eval_evidence"]["state"] == "auto_approved"

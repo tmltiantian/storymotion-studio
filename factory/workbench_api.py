@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from .media_types import safe_media_type
 from .pipeline_jobs import ProjectBusyError
 from .pipeline_store import ApprovalInProgressError, PipelineInProgressError
 from .video_preflight import GenerationTokenError
@@ -37,6 +38,23 @@ def _attachment_header(name: str) -> str:
     fallback = re.sub(r"[^A-Za-z0-9._ -]", "_", fallback).strip(" .") or "download"
     fallback = fallback.replace('"', "_")[:120]
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(cleaned, safe='')}"
+
+
+async def _open_media_snapshot(service: WorkbenchService, artifact_id: str):
+    task = asyncio.create_task(asyncio.to_thread(service.open_media, artifact_id))
+
+    def close_late_snapshot(completed: asyncio.Task) -> None:
+        try:
+            opened = completed.result()
+        except BaseException:
+            return
+        opened.close()
+
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        task.add_done_callback(close_late_snapshot)
+        raise
 
 
 class _StrictBody(BaseModel):
@@ -424,7 +442,7 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
             },
         )
 
-    def media_response(
+    async def media_response(
         artifact_id: str,
         range_header: str | None,
         *,
@@ -436,7 +454,7 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
         size = int(info["size"])
         headers = {
             "Accept-Ranges": "bytes",
-            "Content-Type": str(info["media_type"]),
+            "Content-Type": safe_media_type(info.get("media_type")),
         }
         if attachment:
             headers["Content-Disposition"] = _attachment_header(str(info["name"]))
@@ -465,7 +483,7 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
             if head:
                 return Response(status_code=206, headers=headers)
             status_code = 206
-        opened = service.open_media(selected)
+        opened = await _open_media_snapshot(service, selected)
         if int(opened.info["size"]) != size:
             opened.close()
             raise KeyError(selected)
@@ -490,21 +508,21 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
         artifact_id: str,
         range_header: Annotated[str | None, Header(alias="Range")] = None,
     ) -> Response:
-        return media_response(artifact_id, range_header, head=True)
+        return await media_response(artifact_id, range_header, head=True)
 
     @app.get("/api/media/{artifact_id}")
     async def get_media(
         artifact_id: str,
         range_header: Annotated[str | None, Header(alias="Range")] = None,
     ) -> Response:
-        return media_response(artifact_id, range_header, head=False)
+        return await media_response(artifact_id, range_header, head=False)
 
     @app.head("/api/download/{artifact_id}")
     async def head_download(
         artifact_id: str,
         range_header: Annotated[str | None, Header(alias="Range")] = None,
     ) -> Response:
-        return media_response(
+        return await media_response(
             artifact_id,
             range_header,
             head=True,
@@ -516,7 +534,7 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
         artifact_id: str,
         range_header: Annotated[str | None, Header(alias="Range")] = None,
     ) -> Response:
-        return media_response(
+        return await media_response(
             artifact_id,
             range_header,
             head=False,

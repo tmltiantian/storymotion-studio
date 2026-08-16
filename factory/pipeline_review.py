@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 from dataclasses import dataclass, field
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .file_io import sha256_file, write_json_atomic
+from .media_types import validate_media_type
 from .pipeline_contracts import (
     PIPELINE_STAGES,
     ProductionPackage,
@@ -22,6 +24,7 @@ from .pipeline_contracts import (
 REVIEW_DIRECTORY = "reviews"
 REVISIONS_SCHEMA = "motion-comic-factory.stage-revisions.v1"
 REVIEW_SCHEMA = "motion-comic-factory.stage-review.v1"
+DELIVERY_EVAL_EVIDENCE_SCHEMA = "motion-comic-factory.delivery-eval-evidence.v2"
 
 
 class ApprovalPreset(str, Enum):
@@ -35,6 +38,9 @@ class ArtifactRevision:
     path: str
     sha256: str
     media_type: str = "application/octet-stream"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "media_type", validate_media_type(self.media_type))
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -298,6 +304,38 @@ def _current_revision(
     raise ValueError(f"Unknown {StageName(stage).value} revision: {number}")
 
 
+def canonical_json_digest(value: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _delivery_artifact_snapshot(
+    root: Path,
+    artifact: ArtifactRevision,
+    *,
+    require_project_path: bool,
+) -> dict[str, str]:
+    path = Path(artifact.path).expanduser().resolve()
+    if sha256_file(path) != artifact.sha256:
+        raise ValueError("EVAL immutable artifact changed before delivery")
+    try:
+        stored_path = path.relative_to(root).as_posix()
+    except ValueError:
+        if require_project_path:
+            raise ValueError("EVAL revision artifact escaped the project") from None
+        stored_path = str(path)
+    return {
+        "path": stored_path,
+        "sha256": artifact.sha256,
+        "media_type": artifact.media_type,
+    }
+
+
 def delivery_eval_evidence(project_dir: str | Path) -> dict[str, Any]:
     root = Path(project_dir).expanduser().resolve()
     package = ProductionPackage.from_dict(
@@ -312,18 +350,22 @@ def delivery_eval_evidence(project_dir: str | Path) -> dict[str, Any]:
         or revision.executor != record.executor
     ):
         raise ValueError("EVAL revision does not match the production package")
-    validation = validate_stage_review(root, StageName.EVAL)
-    if (
-        not validation.valid
-        or validation.review is None
-        or validation.review.state is not ReviewState.APPROVED
-        or validation.review.revision != revision.number
-    ):
-        raise ValueError("EVAL must have current durable approval before delivery")
-    revision_artifacts = {
-        str(Path(artifact.path).expanduser().resolve()): artifact.sha256
-        for artifact in revision.artifacts
+    revision_artifacts: dict[str, dict[str, str]] = {}
+    for artifact in revision.artifacts:
+        snapshot = _delivery_artifact_snapshot(
+            root,
+            artifact,
+            require_project_path=True,
+        )
+        if snapshot["path"] in revision_artifacts:
+            raise ValueError("EVAL revision contains duplicate artifacts")
+        revision_artifacts[snapshot["path"]] = snapshot
+    package_artifacts = {
+        Path(path).expanduser().resolve().relative_to(root).as_posix()
+        for path in record.artifacts
     }
+    if package_artifacts != set(revision_artifacts):
+        raise ValueError("EVAL revision does not match package artifacts")
     reports: list[dict[str, str]] = []
     for raw_path in package.eval_reports:
         path = Path(raw_path).expanduser().resolve()
@@ -331,23 +373,72 @@ def delivery_eval_evidence(project_dir: str | Path) -> dict[str, Any]:
             relative = path.relative_to(root).as_posix()
         except ValueError as exc:
             raise ValueError("EVAL report escaped the project") from exc
-        digest = revision_artifacts.get(str(path))
-        if digest is None or sha256_file(path) != digest:
+        artifact = revision_artifacts.get(relative)
+        if artifact is None:
             raise ValueError("EVAL report is not immutable revision evidence")
-        reports.append({"path": relative, "sha256": digest})
+        reports.append(dict(artifact))
     if not reports:
         raise ValueError("EVAL delivery evidence has no reports")
-    return {
-        "stage": StageName.EVAL.value,
-        "revision": revision.number,
+    revision_snapshot: dict[str, Any] = {
+        "schema_version": REVISIONS_SCHEMA,
+        "stage": revision.stage.value,
+        "number": revision.number,
         "input_signature": revision.input_signature,
         "executor": revision.executor,
-        "reports": reports,
-        "review": {
-            "revision": validation.review.revision,
-            "sha256": sha256_file(_review_path(root, StageName.EVAL)),
-        },
+        "artifacts": list(revision_artifacts.values()),
+        "created_at": revision.created_at,
     }
+    evidence: dict[str, Any] = {
+        "schema_version": DELIVERY_EVAL_EVIDENCE_SCHEMA,
+        "stage": StageName.EVAL.value,
+        "policy": record.review_policy.value,
+        "state": record.review_state.value,
+        "revision": revision.number,
+        "stage_revision": revision_snapshot,
+        "stage_revision_sha256": canonical_json_digest(revision_snapshot),
+        "reports": reports,
+    }
+    if record.review_blocks_progress:
+        raise ValueError("EVAL approval still blocks delivery")
+    if record.review_policy is ReviewPolicy.AUTOMATIC:
+        if record.review_state is not ReviewState.AUTO_APPROVED:
+            raise ValueError("Automatic EVAL is not auto-approved")
+    elif record.review_policy in {ReviewPolicy.MANUAL, ReviewPolicy.GROUPED}:
+        validation = validate_stage_review(root, StageName.EVAL)
+        if (
+            record.review_state is not ReviewState.APPROVED
+            or not validation.valid
+            or validation.review is None
+            or validation.review.state is not ReviewState.APPROVED
+            or validation.review.revision != revision.number
+        ):
+            raise ValueError("EVAL must have current durable approval before delivery")
+        review = validation.review
+        review_snapshot: dict[str, Any] = {
+            "schema_version": REVIEW_SCHEMA,
+            "stage": review.stage.value,
+            "revision": review.revision,
+            "state": review.state.value,
+            "note": review.note,
+            "evidence": [
+                _delivery_artifact_snapshot(
+                    root,
+                    artifact,
+                    require_project_path=False,
+                )
+                for artifact in review.evidence
+            ],
+            "created_at": review.created_at,
+            "transaction_id": review.transaction_id,
+        }
+        evidence["review"] = {
+            "snapshot": review_snapshot,
+            "sha256": canonical_json_digest(review_snapshot),
+        }
+    else:
+        raise ValueError("EVAL review policy cannot authorize delivery")
+    evidence["snapshot_sha256"] = canonical_json_digest(evidence)
+    return evidence
 
 
 def _artifact_integrity_issue(artifacts: tuple[ArtifactRevision, ...]) -> str:

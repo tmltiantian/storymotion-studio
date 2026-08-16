@@ -288,6 +288,32 @@ def test_project_detail_contains_execution_review_and_opaque_artifacts(
     artifact_id = payload["stages"][0]["artifacts"][0]["artifact_id"]
     assert artifact_id.startswith("art_")
     assert "/" not in artifact_id
+
+
+@pytest.mark.parametrize(
+    "unsafe_media_type",
+    (
+        "audio/mp4; access_token=VisibleSecret123",
+        "video/mp4\r\nX-Injected: yes",
+    ),
+)
+def test_public_artifact_media_type_falls_back_for_untrusted_revision_json(
+    service: WorkbenchService,
+    project_workspace: tuple[Path, Path],
+    unsafe_media_type: str,
+) -> None:
+    _workspace, artifact = project_workspace
+    ref = service._register_artifact(
+        "episode_01",
+        artifact,
+        registered_media_type=unsafe_media_type,
+    )
+
+    assert ref is not None
+    payload = service._artifact_public(ref)
+    assert payload["media_type"] == "application/octet-stream"
+    assert "secret" not in json.dumps(payload).lower()
+    assert "injected" not in json.dumps(payload).lower()
     assert "/runs/" not in json.dumps(payload)
 
 

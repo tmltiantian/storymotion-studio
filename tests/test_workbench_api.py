@@ -435,6 +435,37 @@ def test_download_content_disposition_sanitizes_both_filenames_and_crlf(
     assert "injected" not in header.lower()
 
 
+@pytest.mark.parametrize(
+    "unsafe_media_type",
+    (
+        "audio/mp4; access_token=VisibleSecret123",
+        "video/mp4\r\nX-Injected: yes",
+    ),
+)
+def test_media_header_falls_back_for_untrusted_media_type(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_media_type: str,
+) -> None:
+    service, _artifact, artifact_id = _authorized_media_service(tmp_path)
+    original_info = service.media_info
+
+    def unsafe_info(selected: str):
+        info = original_info(selected)
+        info["media_type"] = unsafe_media_type
+        return info
+
+    monkeypatch.setattr(service, "media_info", unsafe_info)
+    response = TestClient(create_workbench_app(service)).head(
+        f"/api/media/{artifact_id}"
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert "secret" not in str(response.headers).lower()
+    assert "injected" not in str(response.headers).lower()
+
+
 def test_catalog_snapshot_cannot_overwrite_newer_index_under_concurrency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -827,6 +858,100 @@ def test_media_disconnect_before_first_chunk_closes_authorized_descriptor(
 
     assert len(opened) == 1
     assert opened[0].closed
+    assert service.media_snapshot_usage == {"active": 0, "bytes": 0}
+
+
+@pytest.mark.parametrize(
+    ("route_path", "range_header"),
+    (
+        ("/api/media/{artifact_id}", None),
+        ("/api/download/{artifact_id}", "bytes=2-5"),
+    ),
+)
+def test_media_snapshot_preparation_does_not_block_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    route_path: str,
+    range_header: str | None,
+) -> None:
+    service, _artifact, artifact_id = _authorized_media_service(tmp_path)
+    original_open = service.open_media
+
+    def slow_open(selected_artifact_id: str):
+        time.sleep(0.25)
+        return original_open(selected_artifact_id)
+
+    monkeypatch.setattr(service, "open_media", slow_open)
+    app = create_workbench_app(service)
+    route = next(
+        item
+        for item in app.routes
+        if getattr(item, "path", "") == route_path
+        and "GET" in getattr(item, "methods", set())
+    )
+
+    async def exercise() -> float:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        request = asyncio.create_task(
+            route.endpoint(artifact_id=artifact_id, range_header=range_header)
+        )
+        await asyncio.sleep(0.02)
+        ticker_delay = loop.time() - started
+        response = await request
+        async for _chunk in response.body_iterator:
+            pass
+        return ticker_delay
+
+    delay = asyncio.run(exercise())
+
+    assert delay < 0.1
+    assert service.media_snapshot_usage == {"active": 0, "bytes": 0}
+
+
+def test_cancelled_media_preparation_closes_late_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _artifact, artifact_id = _authorized_media_service(tmp_path)
+    original_open = service.open_media
+    started = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+
+    def blocked_open(selected_artifact_id: str):
+        started.set()
+        release.wait(timeout=2)
+        opened = original_open(selected_artifact_id)
+        completed.set()
+        return opened
+
+    monkeypatch.setattr(service, "open_media", blocked_open)
+    app = create_workbench_app(service)
+    route = next(
+        item
+        for item in app.routes
+        if getattr(item, "path", "") == "/api/media/{artifact_id}"
+        and "GET" in getattr(item, "methods", set())
+    )
+
+    async def cancel_request() -> None:
+        request = asyncio.create_task(
+            route.endpoint(artifact_id=artifact_id, range_header=None)
+        )
+        await asyncio.to_thread(started.wait, 1)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        release.set()
+        await asyncio.to_thread(completed.wait, 1)
+        for _ in range(100):
+            if service.media_snapshot_usage == {"active": 0, "bytes": 0}:
+                break
+            await asyncio.sleep(0.01)
+
+    asyncio.run(cancel_request())
+
     assert service.media_snapshot_usage == {"active": 0, "bytes": 0}
 
 
