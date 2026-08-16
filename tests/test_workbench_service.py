@@ -754,6 +754,106 @@ def test_resume_revalidates_revision_after_worker_and_project_claim(
     )
 
 
+def test_resume_final_recovery_error_fails_job_and_releases_owners(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, project = _ready_video_workspace(tmp_path)
+    manager = JobManager(workspace)
+    job_id, _request = _canonical_failed_video_job(
+        manager,
+        project,
+        with_provider_tasks=True,
+    )
+    renderer_calls: list[dict[str, object]] = []
+    service = WorkbenchService(
+        workspace,
+        job_manager=manager,
+        video_renderer=lambda **kwargs: renderer_calls.append(kwargs)
+        or {"success": True},
+        dispatch=lambda callback: callback(),
+    )
+    original_recovery = service._video_job_recovery
+    comparison_count = 0
+
+    def fail_second_recovery(record):
+        nonlocal comparison_count
+        comparison_count += 1
+        if comparison_count == 2:
+            raise OSError("final canonical reread failed")
+        return original_recovery(record)
+
+    monkeypatch.setattr(service, "_video_job_recovery", fail_second_recovery)
+
+    with pytest.raises(OSError, match="final canonical reread failed"):
+        service.resume_job(job_id)
+
+    assert comparison_count == 2
+    assert renderer_calls == []
+    failed = manager.get(job_id)
+    assert failed.status == "failed"
+    assert failed.resume_count == 1
+    lease = JobManager(workspace).acquire_worker_lease(job_id)
+    lease.release()
+    assert (
+        service._reserved_mutation(
+            "episode_ready",
+            "request_changes",
+            lambda: "reservation released",
+        )
+        == "reservation released"
+    )
+
+
+def test_resume_cleanup_failure_reports_reservation_risk_and_releases_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, project = _ready_video_workspace(tmp_path)
+    manager = JobManager(workspace)
+    job_id, _request = _canonical_failed_video_job(
+        manager,
+        project,
+        with_provider_tasks=True,
+    )
+    service = WorkbenchService(
+        workspace,
+        job_manager=manager,
+        video_renderer=lambda **_kwargs: pytest.fail("renderer must not run"),
+        dispatch=lambda callback: callback(),
+    )
+    original_recovery = service._video_job_recovery
+    comparison_count = 0
+
+    def fail_second_recovery(record):
+        nonlocal comparison_count
+        comparison_count += 1
+        if comparison_count == 2:
+            raise OSError("final canonical reread failed")
+        return original_recovery(record)
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise OSError("job cleanup persistence failed")
+
+    monkeypatch.setattr(service, "_video_job_recovery", fail_second_recovery)
+    monkeypatch.setattr(JobManager, "fail", fail_cleanup)
+
+    with pytest.raises(RuntimeError, match="may remain reserved") as captured:
+        service.resume_job(job_id)
+
+    assert isinstance(captured.value.__cause__, OSError)
+    assert "final canonical reread failed" in str(captured.value.__cause__)
+    assert manager.get(job_id).status == "queued"
+    lease = JobManager(workspace).acquire_worker_lease(job_id)
+    lease.release()
+    with pytest.raises(ProjectBusyError):
+        service._reserved_mutation(
+            "episode_ready",
+            "request_changes",
+            lambda: "must remain blocked",
+        )
+
+
 def test_job_detail_includes_persisted_last_event_sequence(
     service: WorkbenchService,
 ) -> None:
