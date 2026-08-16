@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      "/api": "http://127.0.0.1:8787",
+      "/api": process.env.STORYMOTION_API_URL ?? "http://127.0.0.1:8787",
     },
   },
   test: {

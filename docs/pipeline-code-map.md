@@ -15,6 +15,25 @@
 
 九阶段固定为：`concept`, `script`, `storyboard`, `assets`, `audio`, `video`, `edit`, `eval`, `deliver`。
 
+## 制作工作台
+
+| 职责 | 文件 |
+| --- | --- |
+| 本机启动、动态端口、就绪等待与进程清理 | `scripts/run_workbench.py` |
+| 脱敏 API、媒体 Range/下载与 SSE | `factory/workbench_api.py` |
+| 项目、审核、返修、作业、设置和媒体授权服务 | `factory/workbench_service.py` |
+| 作品目录、交付证据和历史归档 | `factory/work_catalog.py`, `assets/workbench_archive/` |
+| 历史素材迁移与哈希清单 | `scripts/migrate_showcase_works.py` |
+| React 路由与工作台外壳 | `sites/storymotion-studio/src/app/` |
+| 项目列表、九阶段工作区、审核与局部返修 | `sites/storymotion-studio/src/projects/`, `sites/storymotion-studio/src/stages/` |
+| 视频费用门禁与任务恢复 | `sites/storymotion-studio/src/jobs/` |
+| 作品中心与设置 | `sites/storymotion-studio/src/works/`, `sites/storymotion-studio/src/settings/` |
+| 离线浏览器验收 | `sites/storymotion-studio/tests/workbench-flow.spec.ts`, `sites/storymotion-studio/tests/workbench-media.spec.ts` |
+
+浏览器只使用 `/api` 合同和不透明 artifact ID。Python 持有项目文件、密钥、任务状态和媒体描述符；Vite 的 API 代理目标由启动器传给子进程，不写入 `.env`。历史归档的 7 个 payload 与清单进入源代码管理，`output/` 和已删除的旧展示站不参与作品目录重建。
+
+归档权利状态固定显示为 `unverified`。3 个历史音频在权利确认或排除前只能随私有仓库保存；不得把警告改写成已授权。
+
 ## 内容与素材
 
 | 职责 | 文件 |

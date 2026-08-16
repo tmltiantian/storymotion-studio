@@ -218,7 +218,7 @@ export function CreateProjectDialog({
                 name="project_id"
                 required
                 maxLength={128}
-                pattern="[A-Za-z0-9][A-Za-z0-9._:-]*"
+                pattern="[A-Za-z0-9][A-Za-z0-9._:\-]*"
               />
             </label>
             <label>
