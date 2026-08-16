@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import threading
+import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -14,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Literal, Mapping
 
 from .pipeline_contracts import (
+    PIPELINE_STAGES,
     ProductionPackage,
     ProjectSpec,
     ReviewPolicy,
@@ -21,13 +23,32 @@ from .pipeline_contracts import (
     StageName,
     StageState,
 )
-from .pipeline_review import REVISIONS_SCHEMA, StageRevision, validate_stage_review
+from .pipeline_modes import get_mode_adapter
+from .pipeline_review import (
+    REVISIONS_SCHEMA,
+    ApprovalPreset,
+    ReviewConfig,
+    StageRevision,
+    resolve_review_config,
+    validate_stage_review,
+)
 from .secure_posix import AnchoredDirectory
 
 
 ARCHIVE_MANIFEST_SCHEMA = "storymotion.archive-manifest.v1"
 _HASH = re.compile(r"[0-9a-f]{64}")
 _SAFE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def _archive_text(value: Any, *, label: str, maximum: int) -> str:
+    text = unicodedata.normalize("NFC", str(value)).strip()
+    if (
+        not text
+        or len(text) > maximum
+        or any(unicodedata.category(character) == "Cc" for character in text)
+    ):
+        raise ValueError(f"archive {label} is invalid")
+    return text
 
 
 def _opaque(prefix: str, *parts: str, length: int = 32) -> str:
@@ -164,6 +185,7 @@ class ArchiveEntry:
     sha256: str
     created_at: str = ""
     metadata: Mapping[str, str] = field(default_factory=dict)
+    rights: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not _SAFE_TOKEN.fullmatch(self.entry_id):
@@ -182,13 +204,38 @@ class ArchiveEntry:
             raise ValueError("archive classification is invalid")
         if not _SAFE_TOKEN.fullmatch(self.collection_id):
             raise ValueError("archive collection id is invalid")
-        if not self.title.strip() or not self.version_label.strip():
-            raise ValueError("archive title and version are required")
+        object.__setattr__(
+            self, "title", _archive_text(self.title, label="title", maximum=2048)
+        )
+        object.__setattr__(
+            self,
+            "version_label",
+            _archive_text(self.version_label, label="version", maximum=512),
+        )
         if self.size_bytes < 0 or not _HASH.fullmatch(self.sha256):
             raise ValueError("archive file evidence is invalid")
         if self.media_kind not in {"text", "image", "audio", "video", "eval", "file"}:
             raise ValueError("archive media kind is invalid")
-        object.__setattr__(self, "metadata", dict(self.metadata))
+        object.__setattr__(
+            self,
+            "metadata",
+            {
+                _archive_text(key, label="metadata key", maximum=128): _archive_text(
+                    value, label="metadata value", maximum=4096
+                )
+                for key, value in self.metadata.items()
+            },
+        )
+        object.__setattr__(
+            self,
+            "rights",
+            {
+                _archive_text(key, label="rights key", maximum=128): _archive_text(
+                    value, label="rights value", maximum=2048
+                )
+                for key, value in self.rights.items()
+            },
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -205,13 +252,17 @@ class ArchiveEntry:
             "sha256": self.sha256,
             "created_at": self.created_at,
             "metadata": dict(sorted(self.metadata.items())),
+            "rights": dict(sorted(self.rights.items())),
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ArchiveEntry:
         metadata = value.get("metadata") or {}
+        rights = value.get("rights") or {}
         if not isinstance(metadata, Mapping):
             raise ValueError("archive metadata is invalid")
+        if not isinstance(rights, Mapping):
+            raise ValueError("archive rights metadata is invalid")
         return cls(
             entry_id=str(value["entry_id"]),
             source_relative=str(value["source_relative"]),
@@ -226,6 +277,7 @@ class ArchiveEntry:
             sha256=str(value["sha256"]),
             created_at=_trusted_time(value.get("created_at")),
             metadata={str(key): str(item) for key, item in metadata.items()},
+            rights={str(key): str(item) for key, item in rights.items()},
         )
 
 
@@ -305,6 +357,7 @@ class CatalogArtifact:
     size_bytes: int
     sha256: str
     path: Path = field(compare=False, repr=False)
+    rights: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -411,69 +464,87 @@ def _artifact_from_project(
     )
 
 
-def _delivery_revision(
-    project: AnchoredDirectory, deliver: Any
+def _stage_revision(
+    project: AnchoredDirectory, record: Any, stage: StageName
 ) -> dict[str, FileEvidence]:
-    payload = _read_json(project, "reviews/deliver.revisions.json")
+    payload = _read_json(project, f"reviews/{stage.value}.revisions.json")
     raw_revisions = payload.get("revisions")
     if (
         payload.get("schema_version") != REVISIONS_SCHEMA
-        or payload.get("stage") != StageName.DELIVER.value
+        or payload.get("stage") != stage.value
         or not isinstance(raw_revisions, list)
     ):
-        raise ValueError("delivery revision history is invalid")
+        raise ValueError(f"{stage.value} revision history is invalid")
     revisions = tuple(StageRevision.from_dict(item) for item in raw_revisions)
     if (
         not revisions
-        or deliver.revision is None
-        or revisions[-1].number != deliver.revision
+        or record.revision is None
+        or revisions[-1].number != record.revision
     ):
-        raise ValueError("delivery does not reference the latest revision")
+        raise ValueError(f"{stage.value} does not reference the latest revision")
     latest = revisions[-1]
     if (
-        latest.stage is not StageName.DELIVER
-        or latest.executor != deliver.executor
-        or latest.input_signature != deliver.input_signature
+        latest.stage is not stage
+        or latest.executor != record.executor
+        or latest.input_signature != record.input_signature
     ):
-        raise ValueError("delivery revision does not match the package stage")
+        raise ValueError(f"{stage.value} revision does not match the package stage")
     revision_paths: dict[str, str] = {}
     for artifact in latest.artifacts:
         relative = project.relative_path(artifact.path).as_posix()
         if relative in revision_paths:
-            raise ValueError("delivery revision contains duplicate artifacts")
+            raise ValueError(f"{stage.value} revision contains duplicate artifacts")
         revision_paths[relative] = artifact.sha256
     package_paths = {
-        project.relative_path(raw_path).as_posix() for raw_path in deliver.artifacts
+        project.relative_path(raw_path).as_posix() for raw_path in record.artifacts
     }
     if set(revision_paths) != package_paths:
-        raise ValueError(
-            "delivery package artifacts do not match the immutable revision"
-        )
+        raise ValueError(f"{stage.value} package artifacts do not match its revision")
     evidence: dict[str, FileEvidence] = {}
     for relative, expected_digest in revision_paths.items():
         _, current = _stream_file_evidence(project, relative)
         if current.sha256 != expected_digest:
-            raise ValueError("delivery artifact changed after revision")
+            raise ValueError(f"{stage.value} artifact changed after revision")
         evidence[relative] = current
     return evidence
 
 
-def _delivery_review_is_current(project: AnchoredDirectory, deliver: Any) -> None:
-    if deliver.review_blocks_progress:
-        raise ValueError("delivery review still blocks progress")
-    if deliver.review_policy is ReviewPolicy.AUTOMATIC:
-        if deliver.review_state is not ReviewState.AUTO_APPROVED:
-            raise ValueError("automatic delivery has no current approval evidence")
-        return
-    if deliver.review_policy not in {ReviewPolicy.MANUAL, ReviewPolicy.GROUPED}:
-        raise ValueError("delivery review policy cannot publish a work")
-    if deliver.review_state is not ReviewState.APPROVED:
-        raise ValueError("delivery is not durably approved")
-    validation = validate_stage_review(project.canonical_path, StageName.DELIVER)
+def _review_config(spec: ProjectSpec) -> ReviewConfig:
+    adapter = get_mode_adapter(spec.mode)
+    raw_preset = spec.policies.get("approval_preset")
+    if raw_preset:
+        overrides = spec.policies.get("review_overrides") or {}
+        if not isinstance(overrides, dict):
+            raise ValueError("review overrides are invalid")
+        return resolve_review_config(ApprovalPreset(str(raw_preset)), overrides)
+    return ReviewConfig(
+        ApprovalPreset.QUICK,
+        {
+            stage: adapter.stage_steps[stage].compatibility_review_policy
+            for stage in PIPELINE_STAGES
+        },
+    )
+
+
+def _review_is_current(
+    project: AnchoredDirectory,
+    record: Any,
+    stage: StageName,
+    expected_policy: ReviewPolicy,
+) -> None:
+    if record.review_blocks_progress:
+        raise ValueError(f"{stage.value} review still blocks progress")
+    if expected_policy not in {ReviewPolicy.MANUAL, ReviewPolicy.GROUPED}:
+        raise ValueError(f"{stage.value} requires human review")
+    if record.review_policy is not expected_policy:
+        raise ValueError(f"{stage.value} package review policy is stale")
+    if record.review_state is not ReviewState.APPROVED:
+        raise ValueError(f"{stage.value} is not durably approved")
+    validation = validate_stage_review(project.canonical_path, stage)
     if not validation.valid or validation.review is None:
-        raise ValueError("delivery review evidence is invalid")
-    if validation.review.revision != deliver.revision:
-        raise ValueError("delivery review applies to a stale revision")
+        raise ValueError(f"{stage.value} review evidence is invalid")
+    if validation.review.revision != record.revision:
+        raise ValueError(f"{stage.value} review applies to a stale revision")
 
 
 def _manifest_masters(
@@ -511,7 +582,10 @@ def _manifest_masters(
             or len(set(raw_masters)) != len(raw_masters)
         ):
             raise ValueError("replica delivery masters are invalid")
-        masters = tuple(raw_masters)
+        normalized = tuple(project.relative_path(item) for item in raw_masters)
+        if len({item.as_posix() for item in normalized}) != len(normalized):
+            raise ValueError("replica delivery masters contain normalized aliases")
+        masters = tuple(item.as_posix() for item in normalized)
     else:
         raise ValueError("delivery manifest schema is unsupported")
     package_outputs = {
@@ -521,6 +595,7 @@ def _manifest_masters(
         project.relative_path(raw_path).as_posix() for raw_path in deliver.artifacts
     }
     outputs: list[CatalogArtifact] = []
+    artifact_ids: set[str] = set()
     for raw_master in masters:
         relative = project.relative_path(raw_master)
         key = relative.as_posix()
@@ -537,9 +612,13 @@ def _manifest_masters(
         media_type = _mime(relative.name)
         if not media_type.startswith("video/"):
             raise ValueError("delivery master is not video media")
+        artifact_id = _opaque("art", "delivery", evidence.sha256, key)
+        if artifact_id in artifact_ids:
+            raise ValueError("delivery masters contain duplicate artifact ids")
+        artifact_ids.add(artifact_id)
         outputs.append(
             CatalogArtifact(
-                artifact_id=_opaque("art", "delivery", evidence.sha256, key),
+                artifact_id=artifact_id,
                 name=relative.name,
                 media_type=media_type,
                 kind="video",
@@ -582,8 +661,14 @@ def _delivered_work(project: AnchoredDirectory) -> WorkRecord:
     )
     if deliver.state is not StageState.PASSED or deliver.revision is None:
         raise ValueError("delivery is not passed")
-    revision_evidence = _delivery_revision(project, deliver)
-    _delivery_review_is_current(project, deliver)
+    review_config = _review_config(spec)
+    revision_evidence = _stage_revision(project, deliver, StageName.DELIVER)
+    _review_is_current(
+        project,
+        deliver,
+        StageName.DELIVER,
+        review_config.policy_for(StageName.DELIVER),
+    )
     manifest_raw = next(
         (
             value
@@ -599,12 +684,39 @@ def _delivered_work(project: AnchoredDirectory) -> WorkRecord:
         raise ValueError("delivery manifest is not authoritative")
     manifest = _read_json(project, manifest_relative.as_posix())
     masters = _manifest_masters(project, package, deliver, manifest, revision_evidence)
-    eval_reports = tuple(
-        _artifact_from_project(
-            project, raw_path, allowed_prefix="stages/eval", kind="eval"
-        )
-        for raw_path in package.eval_reports
+    eval_reports: tuple[CatalogArtifact, ...] = ()
+    evaluation = next(
+        record for record in package.stages if record.stage is StageName.EVAL
     )
+    try:
+        if evaluation.state is not StageState.PASSED or evaluation.revision is None:
+            raise ValueError("eval is not passed")
+        eval_evidence = _stage_revision(project, evaluation, StageName.EVAL)
+        _review_is_current(
+            project,
+            evaluation,
+            StageName.EVAL,
+            review_config.policy_for(StageName.EVAL),
+        )
+        requested_reports = {
+            project.relative_path(raw_path).as_posix()
+            for raw_path in package.eval_reports
+        }
+        registered_reports = set(eval_evidence)
+        if not requested_reports.issubset(registered_reports):
+            raise ValueError("eval reports are not registered in the current revision")
+        eval_reports = tuple(
+            _artifact_from_project(
+                project,
+                relative,
+                allowed_prefix="stages/eval",
+                expected_sha256=eval_evidence[relative].sha256,
+                kind="eval",
+            )
+            for relative in sorted(requested_reports)
+        )
+    except (FileNotFoundError, KeyError, OSError, TypeError, ValueError):
+        eval_reports = ()
     revision = deliver.revision
     label = str(manifest.get("version") or f"V{revision}").strip()[:40]
     delivered_at = _trusted_time(manifest.get("delivered_at"))
@@ -710,6 +822,7 @@ def _archive_works(manifest: ArchiveManifest) -> tuple[list[WorkRecord], list[st
                     size_bytes=entry.size_bytes,
                     sha256=entry.sha256,
                     path=archive_anchor.canonical_path / entry.archive_relative,
+                    rights=entry.rights,
                 )
                 versions.append(
                     WorkVersion(
@@ -768,6 +881,13 @@ def _stat_identity(path: Path) -> _StatIdentity | None:
     )
 
 
+def _dependency_identity(path: Path) -> _StatIdentity | None:
+    identity = _stat_identity(path)
+    if identity is not None and identity[0] == stat.S_IFDIR:
+        return (*identity[:3], 0, 0, 0)
+    return identity
+
+
 @dataclass(frozen=True)
 class _CachedProject:
     work: WorkRecord
@@ -784,20 +904,85 @@ class _CachedArchive:
 def _dependencies_current(
     dependencies: tuple[tuple[Path, _StatIdentity | None], ...],
 ) -> bool:
-    return all(_stat_identity(path) == identity for path, identity in dependencies)
+    return all(
+        _dependency_identity(path) == identity for path, identity in dependencies
+    )
+
+
+def _dependency_tree_paths(root: Path) -> tuple[Path, ...]:
+    if not root.exists() and not root.is_symlink():
+        return (root,)
+    paths = [root]
+    if root.is_dir() and not root.is_symlink():
+        for directory, names, files in os.walk(root, followlinks=False):
+            base = Path(directory)
+            names[:] = [name for name in names if not name.startswith(".")]
+            paths.extend(base / name for name in sorted(names))
+            paths.extend(
+                base / name for name in sorted(files) if not name.startswith(".")
+            )
+    return tuple(paths)
+
+
+def _registered_evidence_paths(project: Path) -> tuple[Path, ...]:
+    found: set[Path] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, Mapping):
+            raw_path = value.get("path")
+            digest = str(value.get("sha256") or "")
+            if isinstance(raw_path, str) and _HASH.fullmatch(digest):
+                candidate = Path(raw_path).expanduser()
+                found.add(candidate if candidate.is_absolute() else project / candidate)
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    reviews = project / "reviews"
+    if reviews.is_dir() and not reviews.is_symlink():
+        for path in sorted(reviews.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            visit(payload)
+    return tuple(sorted(found, key=str))
+
+
+def _authoritative_project_paths(project: Path) -> tuple[Path, ...]:
+    values = {project, project / "project.json", project / "production_package.json"}
+    for root in (
+        project / "reviews",
+        project / "stages" / "deliver",
+        project / "stages" / "eval",
+    ):
+        values.update(_dependency_tree_paths(root))
+    values.update(_registered_evidence_paths(project))
+    return tuple(sorted(values, key=str))
 
 
 def _project_dependencies(project: Path, work: WorkRecord) -> tuple[Path, ...]:
-    values = {
-        project / "project.json",
-        project / "production_package.json",
-        project / "reviews/deliver.revisions.json",
-        project / "reviews/deliver.review.json",
-        project / "stages/deliver/delivery_manifest.json",
-    }
+    values = set(_authoritative_project_paths(project))
     for artifact in WorkCatalog((work,)).artifacts():
         values.add(artifact.path)
     return tuple(sorted(values, key=str))
+
+
+def _catalog_dependency_snapshot(
+    runs: Path,
+    archive_manifest: str | Path | ArchiveManifest | Mapping[str, Any] | None,
+) -> tuple[tuple[Path, _StatIdentity | None], ...]:
+    paths: set[Path] = set(_dependency_tree_paths(runs))
+    if runs.is_dir() and not runs.is_symlink():
+        for project in runs.iterdir():
+            if project.is_dir() and _SAFE_TOKEN.fullmatch(project.name):
+                paths.update(_authoritative_project_paths(project))
+    if isinstance(archive_manifest, (str, Path)):
+        manifest_path = Path(archive_manifest).expanduser().absolute()
+        paths.update(_dependency_tree_paths(manifest_path.parent))
+    return tuple((path, _dependency_identity(path)) for path in sorted(paths, key=str))
 
 
 class WorkCatalogCache:
@@ -810,6 +995,9 @@ class WorkCatalogCache:
         self._projects: OrderedDict[str, _CachedProject] = OrderedDict()
         self._archive: _CachedArchive | None = None
         self._archive_source = ""
+        self._catalog_source: tuple[str, str] | None = None
+        self._catalog_dependencies: tuple[tuple[Path, _StatIdentity | None], ...] = ()
+        self._catalog: WorkCatalog | None = None
         self._lock = threading.RLock()
 
     @property
@@ -831,9 +1019,25 @@ class WorkCatalogCache:
             self._projects.pop(key, None)
             return None, None
         try:
-            work = _delivered_work(project)
-            paths = _project_dependencies(project.canonical_path, work)
-            dependencies = tuple((path, _stat_identity(path)) for path in paths)
+            for attempt in range(2):
+                before_paths = _authoritative_project_paths(project.canonical_path)
+                before = tuple(
+                    (path, _dependency_identity(path)) for path in before_paths
+                )
+                work = _delivered_work(project)
+                paths = _project_dependencies(project.canonical_path, work)
+                dependencies = tuple(
+                    (path, _dependency_identity(path)) for path in paths
+                )
+                before_map = dict(before)
+                after_authoritative = tuple(
+                    (path, _dependency_identity(path))
+                    for path in _authoritative_project_paths(project.canonical_path)
+                )
+                if before_map == dict(after_authoritative):
+                    break
+                if attempt == 1:
+                    raise ValueError("project changed while building catalog")
             self._projects[key] = _CachedProject(work, dependencies)
             self._projects.move_to_end(key)
             while len(self._projects) > self.max_entries:
@@ -883,7 +1087,7 @@ class WorkCatalogCache:
             self._archive = _CachedArchive(
                 tuple(works),
                 tuple(warnings),
-                tuple((path, _stat_identity(path)) for path in paths),
+                tuple((path, _dependency_identity(path)) for path in paths),
             )
             self._archive_source = source
         return works, warnings
@@ -894,48 +1098,76 @@ class WorkCatalogCache:
         archive_manifest: str | Path | ArchiveManifest | Mapping[str, Any] | None,
     ) -> WorkCatalog:
         with self._lock:
-            delivered: list[WorkRecord] = []
-            warnings: list[str] = []
             runs = Path(runs_dir).expanduser()
-            active_keys: set[str] = set()
-            if runs.exists():
-                try:
-                    with AnchoredDirectory.open(
-                        runs, label="Work catalog runs"
-                    ) as root:
-                        for name in sorted(root.listdir()):
-                            if name.startswith(".") or not _SAFE_TOKEN.fullmatch(name):
-                                continue
-                            active_keys.add(str(root.canonical_path / name))
-                            work, warning = self._project_work(root, name)
-                            if work is not None:
-                                delivered.append(work)
-                            if warning:
-                                warnings.append(warning)
-                except ValueError:
-                    warnings.append("runs_catalog_unavailable")
-            for key in tuple(self._projects):
-                if key.startswith(str(runs.absolute())) and key not in active_keys:
-                    self._projects.pop(key, None)
-            try:
-                archive_works, archive_warnings = self._archive_works_cached(
-                    archive_manifest
-                )
-                warnings.extend(archive_warnings)
-            except (OSError, TypeError, ValueError):
-                archive_works = []
-                warnings.append("archive_manifest_invalid")
-            delivered.sort(
-                key=lambda item: (item.delivered_at, item.title, item.work_id),
-                reverse=True,
+            source_key = (
+                str(runs.absolute()),
+                str(archive_manifest)
+                if isinstance(archive_manifest, (str, Path))
+                else repr(archive_manifest),
             )
-            works = tuple(delivered + archive_works)
-            if len({work.work_id for work in works}) != len(works):
-                return WorkCatalog(
-                    works=(),
-                    warnings=tuple(sorted(set((*warnings, "duplicate_work_id")))),
-                )
-            return WorkCatalog(works=works, warnings=tuple(sorted(set(warnings))))
+            for attempt in range(2):
+                before = _catalog_dependency_snapshot(runs, archive_manifest)
+                if (
+                    self._catalog is not None
+                    and self._catalog_source == source_key
+                    and self._catalog_dependencies == before
+                ):
+                    return self._catalog
+                catalog = self._build_once(runs, archive_manifest)
+                after = _catalog_dependency_snapshot(runs, archive_manifest)
+                if before == after:
+                    self._catalog_source = source_key
+                    self._catalog_dependencies = after
+                    self._catalog = catalog
+                    return catalog
+                if attempt == 1:
+                    return WorkCatalog(works=(), warnings=("catalog_dependency_race",))
+            raise AssertionError("unreachable")
+
+    def _build_once(
+        self,
+        runs: Path,
+        archive_manifest: str | Path | ArchiveManifest | Mapping[str, Any] | None,
+    ) -> WorkCatalog:
+        delivered: list[WorkRecord] = []
+        warnings: list[str] = []
+        active_keys: set[str] = set()
+        if runs.exists():
+            try:
+                with AnchoredDirectory.open(runs, label="Work catalog runs") as root:
+                    for name in sorted(root.listdir()):
+                        if name.startswith(".") or not _SAFE_TOKEN.fullmatch(name):
+                            continue
+                        active_keys.add(str(root.canonical_path / name))
+                        work, warning = self._project_work(root, name)
+                        if work is not None:
+                            delivered.append(work)
+                        if warning:
+                            warnings.append(warning)
+            except ValueError:
+                warnings.append("runs_catalog_unavailable")
+        for key in tuple(self._projects):
+            if key.startswith(str(runs.absolute())) and key not in active_keys:
+                self._projects.pop(key, None)
+        try:
+            archive_works, archive_warnings = self._archive_works_cached(
+                archive_manifest
+            )
+            warnings.extend(archive_warnings)
+        except (OSError, TypeError, ValueError):
+            archive_works = []
+            warnings.append("archive_manifest_invalid")
+        delivered.sort(
+            key=lambda item: (item.delivered_at, item.title, item.work_id),
+            reverse=True,
+        )
+        works = tuple(delivered + archive_works)
+        if len({work.work_id for work in works}) != len(works):
+            return WorkCatalog(
+                works=(),
+                warnings=tuple(sorted(set((*warnings, "duplicate_work_id")))),
+            )
+        return WorkCatalog(works=works, warnings=tuple(sorted(set(warnings))))
 
 
 def build_work_catalog(

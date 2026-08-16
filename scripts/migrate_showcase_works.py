@@ -66,6 +66,45 @@ class _PlannedFile:
     snapshot: _Snapshot
 
 
+@dataclass
+class _DestinationEvidence:
+    parent: int
+    name: str
+    descriptor: int
+    metadata: os.stat_result
+    sha256: str
+
+    def verify(self) -> None:
+        current_descriptor = os.fstat(self.descriptor)
+        current_path = os.stat(self.name, dir_fd=self.parent, follow_symlinks=False)
+        expected = (
+            self.metadata.st_dev,
+            self.metadata.st_ino,
+            self.metadata.st_size,
+            self.metadata.st_mtime_ns,
+            self.metadata.st_ctime_ns,
+        )
+        for current in (current_descriptor, current_path):
+            if (
+                (
+                    current.st_dev,
+                    current.st_ino,
+                    current.st_size,
+                    current.st_mtime_ns,
+                    current.st_ctime_ns,
+                )
+                != expected
+                or current.st_nlink != 1
+                or not stat.S_ISREG(current.st_mode)
+            ):
+                raise ValueError("archived file ownership verification failed")
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+
 def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
     return (
         left.st_dev,
@@ -231,6 +270,16 @@ def _classify_source(relative: str, snapshot: _Snapshot) -> ArchiveEntry:
         version_label = PurePosixPath(relative).name
         metadata = {"description": "旧展示站未归类素材，原样保留。"}
     media_type = _media_type(relative)
+    rights = {
+        "origin": "legacy_storymotion_showcase",
+        "creator": "unverified",
+        "license": "unverified",
+        "commercial_use": "unverified",
+        "redistribution_status": "unverified",
+        "distribution_warning": (
+            "Rights documentation is unavailable; do not redistribute publicly until cleared."
+        ),
+    }
     return ArchiveEntry(
         entry_id=f"archive_{hashlib.sha256((relative + chr(0) + snapshot.sha256).encode('utf-8')).hexdigest()[:32]}",
         source_relative=relative,
@@ -244,6 +293,7 @@ def _classify_source(relative: str, snapshot: _Snapshot) -> ArchiveEntry:
         size_bytes=snapshot.size,
         sha256=snapshot.sha256,
         metadata=metadata,
+        rights=rights,
     )
 
 
@@ -291,7 +341,7 @@ def _mkdir_secure(path: Path) -> None:
         os.close(descriptor)
 
 
-def _existing_digest(parent: int, name: str) -> str | None:
+def _existing_digest(parent: int, name: str) -> _DestinationEvidence | None:
     try:
         descriptor = os.open(name, _FILE_FLAGS, dir_fd=parent)
     except FileNotFoundError:
@@ -304,9 +354,135 @@ def _existing_digest(parent: int, name: str) -> str | None:
             raise ValueError("archive destination collision is not a regular file")
         if metadata.st_nlink != 1:
             raise ValueError("archive destination contains a hard link")
-        return _hash_descriptor(descriptor)
+        digest = _hash_descriptor(descriptor)
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if not _same_identity(metadata, after) or not _same_identity(metadata, current):
+            raise ValueError("archive destination identity changed while hashing")
+        evidence = _DestinationEvidence(parent, name, descriptor, after, digest)
+        evidence.verify()
+        descriptor = -1
+        return evidence
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _journal_name(destination_name: str) -> str:
+    return f".{destination_name}.publish.json"
+
+
+def _write_journal(
+    parent: int,
+    destination_name: str,
+    temporary_name: str,
+    expected_sha256: str,
+) -> None:
+    journal_name = _journal_name(destination_name)
+    payload = json.dumps(
+        {
+            "schema_version": "storymotion.archive-publish.v1",
+            "destination": destination_name,
+            "temporary": temporary_name,
+            "sha256": expected_sha256,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    descriptor = os.open(
+        journal_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=parent,
+    )
+    try:
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("archive publication journal could not be completed")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    os.fsync(parent)
+
+
+def _read_journal(parent: int, destination_name: str) -> dict[str, str] | None:
+    try:
+        descriptor = os.open(
+            _journal_name(destination_name), _FILE_FLAGS, dir_fd=parent
+        )
+    except FileNotFoundError:
+        return None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096:
+            raise ValueError("archive publication journal is unsafe")
+        payload = b""
+        while chunk := os.read(descriptor, 4096):
+            payload += chunk
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("archive publication journal is invalid") from exc
+    finally:
+        os.close(descriptor)
+    if not isinstance(value, dict):
+        raise ValueError("archive publication journal is invalid")
+    return {str(key): str(item) for key, item in value.items()}
+
+
+def _recover_publication(parent: int, destination_name: str, expected: str) -> None:
+    journal = _read_journal(parent, destination_name)
+    if journal is None:
+        return
+    temporary_name = journal.get("temporary", "")
+    if (
+        journal.get("schema_version") != "storymotion.archive-publish.v1"
+        or journal.get("destination") != destination_name
+        or journal.get("sha256") != expected
+        or not temporary_name.startswith(f".{destination_name}.")
+        or not temporary_name.endswith(".tmp")
+        or "/" in temporary_name
+    ):
+        raise ValueError("archive publication journal is not owned by this migration")
+    try:
+        temporary = os.stat(temporary_name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        temporary = None
+    try:
+        final = os.stat(destination_name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        final = None
+    if temporary is not None and final is not None:
+        if (
+            not stat.S_ISREG(temporary.st_mode)
+            or (temporary.st_dev, temporary.st_ino) != (final.st_dev, final.st_ino)
+            or temporary.st_nlink != 2
+            or final.st_nlink != 2
+        ):
+            raise ValueError("archive publication recovery ownership is invalid")
+        os.unlink(temporary_name, dir_fd=parent)
+    elif temporary is not None:
+        evidence = _existing_digest(parent, temporary_name)
+        try:
+            if evidence is None or evidence.sha256 != expected:
+                raise ValueError("archive publication recovery digest is invalid")
+        finally:
+            if evidence is not None:
+                evidence.close()
+        _publish_no_replace(parent, temporary_name, destination_name)
+    elif final is None:
+        raise ValueError("archive publication recovery has no owned payload")
+    evidence = _existing_digest(parent, destination_name)
+    try:
+        if evidence is None or evidence.sha256 != expected:
+            raise ValueError("archive publication recovery digest is invalid")
+    finally:
+        if evidence is not None:
+            evidence.close()
+    os.unlink(_journal_name(destination_name), dir_fd=parent)
+    os.fsync(parent)
 
 
 def _publish_no_replace(
@@ -354,13 +530,18 @@ def _write_bytes_no_replace(
     parent, name = _open_parent(destination, relative)
     temporary_name = f".{name}.{uuid4().hex}.tmp"
     descriptor = -1
+    journal_created = False
     try:
-        existing = _existing_digest(parent, name)
         expected = hashlib.sha256(content).hexdigest()
+        _recover_publication(parent, name, expected)
+        existing = _existing_digest(parent, name)
         if existing is not None:
-            if existing != expected:
-                raise ValueError("archive manifest collision has different content")
-            return
+            try:
+                if existing.sha256 != expected:
+                    raise ValueError("archive manifest collision has different content")
+                return
+            finally:
+                existing.close()
         descriptor = os.open(
             temporary_name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -376,14 +557,30 @@ def _write_bytes_no_replace(
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = -1
-        _publish_no_replace(parent, temporary_name, name)
+        _write_journal(parent, name, temporary_name, expected)
+        journal_created = True
+        try:
+            _publish_no_replace(parent, temporary_name, name)
+        except Exception:
+            try:
+                os.unlink(temporary_name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+            os.unlink(_journal_name(name), dir_fd=parent)
+            journal_created = False
+            os.fsync(parent)
+            raise
+        os.unlink(_journal_name(name), dir_fd=parent)
+        journal_created = False
+        os.fsync(parent)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        try:
-            os.unlink(temporary_name, dir_fd=parent)
-        except FileNotFoundError:
-            pass
+        if not journal_created:
+            try:
+                os.unlink(temporary_name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
         os.close(parent)
 
 
@@ -400,15 +597,26 @@ def _copy_file_atomic(
     source_descriptor = -1
     temporary_descriptor = -1
     temporary_name = f".{destination_path.name}.{uuid4().hex}.tmp"
+    journal_created = False
     try:
+        _recover_publication(
+            destination_parent, destination_path.name, planned.entry.sha256
+        )
         existing = _existing_digest(destination_parent, destination_path.name)
         if existing is not None:
-            if existing != planned.entry.sha256:
-                raise ValueError("archive destination collision has different content")
-            current = os.stat(source_name, dir_fd=source_parent, follow_symlinks=False)
-            if not _snapshot_matches(planned.snapshot, current):
-                raise ValueError("showcase source changed during migration")
-            return
+            try:
+                if existing.sha256 != planned.entry.sha256:
+                    raise ValueError(
+                        "archive destination collision has different content"
+                    )
+                current = os.stat(
+                    source_name, dir_fd=source_parent, follow_symlinks=False
+                )
+                if not _snapshot_matches(planned.snapshot, current):
+                    raise ValueError("showcase source changed during migration")
+                return
+            finally:
+                existing.close()
         source_descriptor = os.open(source_name, _FILE_FLAGS, dir_fd=source_parent)
         opened = os.fstat(source_descriptor)
         if not _snapshot_matches(planned.snapshot, opened):
@@ -439,18 +647,39 @@ def _copy_file_atomic(
             or not _snapshot_matches(planned.snapshot, current)
         ):
             raise ValueError("showcase source changed during migration")
-        _publish_no_replace(
+        _write_journal(
             destination_parent,
-            temporary_name,
             destination_path.name,
+            temporary_name,
+            planned.entry.sha256,
         )
+        journal_created = True
+        try:
+            _publish_no_replace(
+                destination_parent,
+                temporary_name,
+                destination_path.name,
+            )
+        except Exception:
+            try:
+                os.unlink(temporary_name, dir_fd=destination_parent)
+            except FileNotFoundError:
+                pass
+            os.unlink(_journal_name(destination_path.name), dir_fd=destination_parent)
+            journal_created = False
+            os.fsync(destination_parent)
+            raise
+        os.unlink(_journal_name(destination_path.name), dir_fd=destination_parent)
+        journal_created = False
+        os.fsync(destination_parent)
     finally:
         if temporary_descriptor >= 0:
             os.close(temporary_descriptor)
-        try:
-            os.unlink(temporary_name, dir_fd=destination_parent)
-        except FileNotFoundError:
-            pass
+        if not journal_created:
+            try:
+                os.unlink(temporary_name, dir_fd=destination_parent)
+            except FileNotFoundError:
+                pass
         if source_descriptor >= 0:
             os.close(source_descriptor)
         os.close(source_parent)
@@ -495,6 +724,7 @@ def migrate_showcase_media(
         with AnchoredDirectory.open(archive_path, label="Showcase archive") as archive:
             fcntl.flock(archive.descriptor, fcntl.LOCK_EX)
             try:
+                verified_destinations: list[_DestinationEvidence] = []
                 for item in plan:
                     _copy_file_atomic(source, archive, item)
                 for item in plan:
@@ -503,17 +733,22 @@ def migrate_showcase_media(
                         raise ValueError("showcase source changed during migration")
                     parent, name = _open_parent(archive, item.entry.archive_relative)
                     try:
-                        digest = _existing_digest(parent, name)
-                        metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
-                    finally:
+                        evidence = _existing_digest(parent, name)
+                        if evidence is None or evidence.sha256 != item.entry.sha256:
+                            raise ValueError(
+                                "archived file ownership verification failed"
+                            )
+                        if (evidence.metadata.st_dev, evidence.metadata.st_ino) == (
+                            item.snapshot.device,
+                            item.snapshot.inode,
+                        ):
+                            raise ValueError(
+                                "archived file ownership verification failed"
+                            )
+                        verified_destinations.append(evidence)
+                    except BaseException:
                         os.close(parent)
-                    if (
-                        digest != item.entry.sha256
-                        or metadata.st_nlink != 1
-                        or (metadata.st_dev, metadata.st_ino)
-                        == (item.snapshot.device, item.snapshot.inode)
-                    ):
-                        raise ValueError("archived file ownership verification failed")
+                        raise
                 encoded = (
                     json.dumps(
                         manifest.to_dict(),
@@ -523,8 +758,15 @@ def migrate_showcase_media(
                     )
                     + "\n"
                 ).encode("utf-8")
+                for evidence in verified_destinations:
+                    evidence.verify()
                 _write_bytes_no_replace(archive, "archive_manifest.json", encoded)
+                for evidence in verified_destinations:
+                    evidence.verify()
             finally:
+                for evidence in locals().get("verified_destinations", []):
+                    evidence.close()
+                    os.close(evidence.parent)
                 fcntl.flock(archive.descriptor, fcntl.LOCK_UN)
         return manifest
 

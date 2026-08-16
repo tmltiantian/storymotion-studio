@@ -36,6 +36,20 @@ function MediaPreview({ artifact }: { artifact: Artifact }) {
 }
 
 
+function RightsWarning({ artifact }: { artifact: Artifact }) {
+  if (artifact.rights?.redistribution_status !== "unverified") return null;
+  return (
+    <div className="state-row state-warning work-rights-warning" role="alert">
+      <AlertCircle aria-hidden="true" size={18} />
+      <div>
+        <strong>发布权利尚未核验</strong>
+        <span>{artifact.rights.distribution_warning || "公开发布或再分发前需要完成人工权利审核。"}</span>
+      </div>
+    </div>
+  );
+}
+
+
 function authorizedDownloadUrl(artifact: Artifact): string | null {
   const expected = `/api/download/${encodeURIComponent(artifact.artifact_id)}`;
   return artifact.download_url === expected ? expected : null;
@@ -133,6 +147,7 @@ export function WorkDetailPage({ api }: { api: WorkDetailPageApi }) {
                 </nav>
                 <div className="work-media-stage">
                   {selectedArtifact ? <MediaPreview artifact={selectedArtifact} /> : null}
+                  {selectedArtifact ? <RightsWarning artifact={selectedArtifact} /> : null}
                   {selectedArtifact && authorizedDownloadUrl(selectedArtifact) ? (
                     <a className="text-button work-download" href={authorizedDownloadUrl(selectedArtifact) ?? undefined} aria-label={`下载 ${selectedArtifact.name}`}><Download aria-hidden="true" size={15} />下载文件</a>
                   ) : null}

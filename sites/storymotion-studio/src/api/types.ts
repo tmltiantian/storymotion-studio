@@ -50,6 +50,7 @@ export interface Artifact {
   kind?: ArtifactKind;
   viewer?: ArtifactViewerMetadata;
   sha256?: string;
+  rights?: Record<string, string>;
 }
 
 export type ArtifactKind = "text" | "image" | "audio" | "video" | "eval" | "file";

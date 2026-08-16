@@ -8,7 +8,9 @@ import mimetypes
 import os
 import re
 import stat
+import tempfile
 import threading
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
@@ -279,6 +281,7 @@ class WorkbenchService:
         self._catalog_cache = WorkCatalogCache()
         self._catalog_lock = threading.RLock()
         self._catalog_index_catalog: WorkCatalog | None = None
+        self._catalog_index_binding: tuple[tuple[Any, ...], ...] = ()
         self._catalog_index: dict[str, _ArtifactRef] = {}
 
     def _worker_key(self, job_id: str) -> tuple[str, str]:
@@ -400,15 +403,34 @@ class WorkbenchService:
         return ref
 
     def _catalog_snapshot(self) -> tuple[WorkCatalog, dict[str, _ArtifactRef]]:
-        catalog = self._work_catalog()
         with self._catalog_lock:
-            if catalog != self._catalog_index_catalog:
+            catalog = self._work_catalog()
+            binding = tuple(
+                (
+                    artifact.artifact_id,
+                    str(artifact.path),
+                    artifact.size_bytes,
+                    artifact.sha256,
+                    (
+                        metadata.st_dev,
+                        metadata.st_ino,
+                        metadata.st_size,
+                        metadata.st_mtime_ns,
+                        metadata.st_ctime_ns,
+                    )
+                    if (metadata := artifact.path.stat(follow_symlinks=False))
+                    else (),
+                )
+                for artifact in catalog.artifacts()
+            )
+            if binding != self._catalog_index_binding:
                 index = {
                     artifact.artifact_id: self._register_catalog_artifact(artifact)
                     for artifact in catalog.artifacts()
                 }
-                self._catalog_index_catalog = catalog
+                self._catalog_index_binding = binding
                 self._catalog_index = index
+            self._catalog_index_catalog = catalog
             return catalog, dict(self._catalog_index)
 
     def _catalog_artifact_public(self, artifact: CatalogArtifact) -> dict[str, Any]:
@@ -417,20 +439,31 @@ class WorkbenchService:
         payload["sha256"] = artifact.sha256
         payload["kind"] = artifact.kind
         payload["viewer"]["size_bytes"] = artifact.size_bytes
+        payload["name"] = self._public_catalog_text(artifact.name, maximum=180)
+        if artifact.rights:
+            payload["rights"] = {
+                self._public_catalog_text(key, maximum=80): self._public_catalog_text(
+                    value, maximum=500
+                )
+                for key, value in artifact.rights.items()
+            }
         return payload
 
-    @staticmethod
-    def _work_summary(work: WorkRecord) -> dict[str, Any]:
+    def _work_summary(self, work: WorkRecord) -> dict[str, Any]:
         return {
             "work_id": work.work_id,
             "project_id": work.project_id,
-            "title": work.title,
+            "title": self._public_catalog_text(work.title, maximum=120),
             "mode": work.mode,
             "source": work.source,
             "delivered_at": work.delivered_at,
             "delivery_date": work.delivery_date,
-            "roles": list(work.roles),
-            "current_version": work.current_version,
+            "roles": [
+                self._public_catalog_text(role, maximum=80) for role in work.roles
+            ],
+            "current_version": self._public_catalog_text(
+                work.current_version, maximum=80
+            ),
         }
 
     def list_works(self) -> list[dict[str, Any]]:
@@ -446,7 +479,7 @@ class WorkbenchService:
             versions.append(
                 {
                     "version_id": version.version_id,
-                    "label": version.label,
+                    "label": self._public_catalog_text(version.label, maximum=80),
                     "created_at": version.created_at,
                     "outputs": [
                         self._catalog_artifact_public(artifact)
@@ -457,7 +490,11 @@ class WorkbenchService:
                         for artifact in version.eval_reports
                     ],
                     **(
-                        {"iteration_summary": version.iteration_summary}
+                        {
+                            "iteration_summary": self._public_catalog_text(
+                                version.iteration_summary, maximum=500
+                            )
+                        }
                         if version.iteration_summary
                         else {}
                     ),
@@ -1162,51 +1199,87 @@ class WorkbenchService:
 
     def open_media(self, artifact_id: str) -> OpenedMedia:
         ref = self._media_ref(artifact_id)
-        descriptor = -1
+        source_descriptor = -1
+        snapshot_descriptor = -1
         with AnchoredDirectory.open(
             ref.root, label="Authorized artifact root"
         ) as anchor:
             parent = self._open_artifact_parent(anchor, ref.relative_path)
             try:
-                descriptor = os.open(
+                listed = os.stat(
+                    ref.relative_path.name,
+                    dir_fd=parent,
+                    follow_symlinks=False,
+                )
+                source_descriptor = os.open(
                     ref.relative_path.name,
                     os.O_RDONLY | os.O_NOFOLLOW,
                     dir_fd=parent,
                 )
-                metadata = os.fstat(descriptor)
-                if not stat.S_ISREG(metadata.st_mode):
+                before = os.fstat(source_descriptor)
+                if not stat.S_ISREG(before.st_mode) or (
+                    listed.st_dev,
+                    listed.st_ino,
+                ) != (before.st_dev, before.st_ino):
                     raise KeyError(artifact_id)
-                if ref.expected_size is not None:
-                    if metadata.st_size != ref.expected_size:
-                        raise KeyError(artifact_id)
-                    before = metadata
+                if (
+                    ref.expected_size is not None
+                    and before.st_size != ref.expected_size
+                ):
+                    raise KeyError(artifact_id)
+                with tempfile.TemporaryFile(prefix=".storymotion-media-") as snapshot:
                     digest = hashlib.sha256()
-                    while chunk := os.read(descriptor, 1024 * 1024):
+                    copied = 0
+                    while chunk := os.read(source_descriptor, 1024 * 1024):
                         digest.update(chunk)
-                    metadata = os.fstat(descriptor)
+                        copied += len(chunk)
+                        remaining = memoryview(chunk)
+                        while remaining:
+                            written = os.write(snapshot.fileno(), remaining)
+                            if written <= 0:
+                                raise OSError("Authorized artifact snapshot failed")
+                            remaining = remaining[written:]
+                    after = os.fstat(source_descriptor)
+                    current = os.stat(
+                        ref.relative_path.name,
+                        dir_fd=parent,
+                        follow_symlinks=False,
+                    )
+
+                    def identity(
+                        value: os.stat_result,
+                    ) -> tuple[int, int, int, int, int]:
+                        return (
+                            value.st_dev,
+                            value.st_ino,
+                            value.st_size,
+                            value.st_mtime_ns,
+                            value.st_ctime_ns,
+                        )
+
                     if (
-                        before.st_dev,
-                        before.st_ino,
-                        before.st_size,
-                        before.st_mtime_ns,
-                        before.st_ctime_ns,
-                    ) != (
-                        metadata.st_dev,
-                        metadata.st_ino,
-                        metadata.st_size,
-                        metadata.st_mtime_ns,
-                        metadata.st_ctime_ns,
-                    ) or digest.hexdigest() != ref.expected_sha256:
+                        identity(before) != identity(after)
+                        or identity(before) != identity(current)
+                        or copied != before.st_size
+                        or (
+                            ref.expected_sha256
+                            and digest.hexdigest() != ref.expected_sha256
+                        )
+                    ):
                         raise KeyError(artifact_id)
-                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    os.lseek(snapshot.fileno(), 0, os.SEEK_SET)
+                    snapshot_descriptor = os.dup(snapshot.fileno())
+                    metadata = os.fstat(snapshot_descriptor)
             except BaseException:
-                if descriptor >= 0:
-                    os.close(descriptor)
+                if snapshot_descriptor >= 0:
+                    os.close(snapshot_descriptor)
                 raise
             finally:
+                if source_descriptor >= 0:
+                    os.close(source_descriptor)
                 os.close(parent)
         return OpenedMedia(
-            descriptor,
+            snapshot_descriptor,
             {
                 "artifact_id": ref.artifact_id,
                 "name": ref.name,
@@ -2103,6 +2176,14 @@ class WorkbenchService:
         if Path(text).is_absolute():
             return "[redacted-path]"
         return _EMBEDDED_PATH.sub("[redacted-path]", text)
+
+    def _public_catalog_text(self, value: Any, *, maximum: int) -> str:
+        text = unicodedata.normalize("NFC", self._public_text(str(value)))
+        text = _URL_TEXT.sub("[redacted-url]", text)
+        text = "".join(
+            character for character in text if unicodedata.category(character) != "Cc"
+        ).strip()
+        return text[:maximum]
 
     def _reject_path_input(self, value: Any) -> Any:
         if isinstance(value, Mapping):

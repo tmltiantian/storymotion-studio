@@ -15,6 +15,14 @@
         "speed": "+4",
         "voice_name": "魅力女友"
       },
+      "rights": {
+        "commercial_use": "unverified",
+        "creator": "unverified",
+        "distribution_warning": "Rights documentation is unavailable; do not redistribute publicly until cleared.",
+        "license": "unverified",
+        "origin": "legacy_storymotion_showcase",
+        "redistribution_status": "unverified"
+      },
       "sha256": "fe8404a2340359db26620d89ab41c266243aa928ec22b1012553f7dc6754f1c4",
       "size_bytes": 110974,
       "source_relative": "audio/black-cat-approved.m4a",
@@ -36,6 +44,14 @@
         "speed": "+2",
         "voice_name": "调皮公主"
       },
+      "rights": {
+        "commercial_use": "unverified",
+        "creator": "unverified",
+        "distribution_warning": "Rights documentation is unavailable; do not redistribute publicly until cleared.",
+        "license": "unverified",
+        "origin": "legacy_storymotion_showcase",
+        "redistribution_status": "unverified"
+      },
       "sha256": "dbed55470c7faf997926377b49ecc1ce80a036954eecd3420b004f2fd5c81dd6",
       "size_bytes": 116058,
       "source_relative": "audio/orange-cat-approved.m4a",
@@ -54,6 +70,14 @@
         "description": "黑白猫与橘猫的定版对话试听。",
         "role": "双猫"
       },
+      "rights": {
+        "commercial_use": "unverified",
+        "creator": "unverified",
+        "distribution_warning": "Rights documentation is unavailable; do not redistribute publicly until cleared.",
+        "license": "unverified",
+        "origin": "legacy_storymotion_showcase",
+        "redistribution_status": "unverified"
+      },
       "sha256": "8f436e104a138f3d474f0877d1c99ec7ad876ba149e04fa45058e83288a3603c",
       "size_bytes": 228214,
       "source_relative": "audio/two-cat-approved-dialogue.m4a",
@@ -70,6 +94,14 @@
       "media_type": "image/svg+xml",
       "metadata": {
         "description": "旧展示站未归类素材，原样保留。"
+      },
+      "rights": {
+        "commercial_use": "unverified",
+        "creator": "unverified",
+        "distribution_warning": "Rights documentation is unavailable; do not redistribute publicly until cleared.",
+        "license": "unverified",
+        "origin": "legacy_storymotion_showcase",
+        "redistribution_status": "unverified"
       },
       "sha256": "e6d2e59b7b5bbb0342e0fb496dfc262decbfe4426bbb7b047aec8d467d1dc6f7",
       "size_bytes": 712,
@@ -88,6 +120,14 @@
       "metadata": {
         "description": "旧展示站未归类素材，原样保留。"
       },
+      "rights": {
+        "commercial_use": "unverified",
+        "creator": "unverified",
+        "distribution_warning": "Rights documentation is unavailable; do not redistribute publicly until cleared.",
+        "license": "unverified",
+        "origin": "legacy_storymotion_showcase",
+        "redistribution_status": "unverified"
+      },
       "sha256": "1e0ae4d1a1ddfa36752988647b731e4abf150c414d069ec83c96fb0aaeff0307",
       "size_bytes": 392,
       "source_relative": "file.svg",
@@ -105,6 +145,14 @@
       "metadata": {
         "description": "旧展示站未归类素材，原样保留。"
       },
+      "rights": {
+        "commercial_use": "unverified",
+        "creator": "unverified",
+        "distribution_warning": "Rights documentation is unavailable; do not redistribute publicly until cleared.",
+        "license": "unverified",
+        "origin": "legacy_storymotion_showcase",
+        "redistribution_status": "unverified"
+      },
       "sha256": "d051a8c47936990a9085693d307bb7cea1bc1b6d7ed956bcbaacf674f4ec96b9",
       "size_bytes": 1036,
       "source_relative": "globe.svg",
@@ -121,6 +169,14 @@
       "media_type": "image/svg+xml",
       "metadata": {
         "description": "旧展示站未归类素材，原样保留。"
+      },
+      "rights": {
+        "commercial_use": "unverified",
+        "creator": "unverified",
+        "distribution_warning": "Rights documentation is unavailable; do not redistribute publicly until cleared.",
+        "license": "unverified",
+        "origin": "legacy_storymotion_showcase",
+        "redistribution_status": "unverified"
       },
       "sha256": "decf1cf7bb22b5c99c4857cfcd5718ce5465c4454166317589c83fc73df74b66",
       "size_bytes": 386,
