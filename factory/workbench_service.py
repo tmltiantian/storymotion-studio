@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from .gateway_video_batch import render_gateway_video_batch
+from .media_types import safe_media_type
 from .openmontage_adapter import write_openmontage_package
 from .pipeline_context import StageContext
 from .pipeline_contracts import (
@@ -85,20 +86,20 @@ _MEDIA_TYPES = {
     ".jpeg": "image/jpeg",
     ".jpg": "image/jpeg",
     ".m4a": "audio/mp4",
-    ".md": "text/markdown; charset=utf-8",
+    ".md": "text/markdown",
     ".mov": "video/quicktime",
     ".mp3": "audio/mpeg",
     ".mp4": "video/mp4",
     ".ogg": "audio/ogg",
     ".pdf": "application/pdf",
     ".png": "image/png",
-    ".srt": "application/x-subrip; charset=utf-8",
+    ".srt": "application/x-subrip",
     ".svg": "image/svg+xml",
-    ".txt": "text/plain; charset=utf-8",
+    ".txt": "text/plain",
     ".wav": "audio/wav",
     ".webm": "video/webm",
     ".webp": "image/webp",
-    ".json": "application/json; charset=utf-8",
+    ".json": "application/json",
 }
 _ACTIVE_WORKERS: set[tuple[str, str]] = set()
 _ACTIVE_WORKERS_LOCK = threading.Lock()
@@ -268,11 +269,14 @@ def _safe_identifier(value: str, label: str) -> str:
 
 
 def _media_type(name: str, registered: str = "") -> str:
-    if registered and registered != "application/octet-stream":
-        return registered
-    return _MEDIA_TYPES.get(
-        Path(name).suffix.lower(),
-        mimetypes.guess_type(name, strict=True)[0] or "application/octet-stream",
+    if registered:
+        return safe_media_type(registered)
+    return safe_media_type(
+        _MEDIA_TYPES.get(
+            Path(name).suffix.lower(),
+            mimetypes.guess_type(name, strict=True)[0]
+            or "application/octet-stream",
+        )
     )
 
 
@@ -834,7 +838,7 @@ class WorkbenchService:
         return {
             "artifact_id": ref.artifact_id,
             "name": ref.name,
-            "media_type": ref.media_type,
+            "media_type": safe_media_type(ref.media_type),
             "media_url": f"/api/media/{ref.artifact_id}",
             "download_url": f"/api/download/{ref.artifact_id}",
             "kind": kind,

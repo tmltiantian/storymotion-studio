@@ -10,10 +10,17 @@ import pytest
 from factory.media_validation import MediaProbeResult
 from factory import pipeline_generic_stages
 from factory.pipeline_artifacts import load_stage_manifest, manifest_artifact_paths
-from factory.pipeline_contracts import ProjectMode, ProjectSpec, StageName, StageState
-from factory.pipeline_context import StageContext
+from factory.pipeline_contracts import (
+    ProjectMode,
+    ProjectSpec,
+    ReviewState,
+    StageName,
+    StageState,
+)
+from factory.pipeline_context import StageContext, StageExecution
 from factory.pipeline_modes import get_mode_adapter
 from factory.pipeline_runner import run_pipeline
+from factory.pipeline_review import ApprovalPreset, resolve_review_config
 from factory.pipeline_store import (
     approve_stage,
     create_project,
@@ -233,6 +240,86 @@ def test_native_media_stages_keep_outputs_isolated_and_stop_at_review_gates(
         report_evidence["sha256"]
         == hashlib.sha256(eval_report.read_bytes()).hexdigest()
     )
+
+
+def test_quick_preset_auto_eval_reaches_generic_delivery_without_review_file(
+    tmp_path: Path,
+) -> None:
+    root = _project(tmp_path, ProjectMode.ORIGINAL)
+    review_config = resolve_review_config(ApprovalPreset.QUICK, {})
+
+    def execute(context: StageContext) -> StageExecution:
+        if context.stage is StageName.EDIT:
+            preview = context.stage_dir / "final_preview.mp4"
+            preview.write_bytes(b"quick-final")
+            manifest = context.stage_dir / "edit_manifest.json"
+            manifest.write_text(
+                json.dumps({"final_preview": str(preview)}), encoding="utf-8"
+            )
+            return StageExecution.passed(
+                executor=context.step.executor_id,
+                artifacts=(manifest, preview),
+            )
+        if context.stage is StageName.EVAL:
+            report = context.stage_dir / "eval_result.json"
+            report.write_text('{"automatic_passed":true}', encoding="utf-8")
+            return StageExecution.passed(
+                executor=context.step.executor_id,
+                artifacts=(report,),
+            )
+        if context.stage is StageName.DELIVER:
+            return pipeline_generic_stages.execute_deliver(context)
+        artifact = context.stage_dir / f"{context.stage.value}.json"
+        artifact.write_text("{}", encoding="utf-8")
+        return StageExecution.passed(
+            executor=context.step.executor_id,
+            artifacts=(artifact,),
+        )
+
+    storyboard_wait = run_pipeline(
+        root,
+        through=StageName.STORYBOARD,
+        executor=execute,
+        review_config=review_config,
+    )
+    assert storyboard_wait.stopped_at is StageName.STORYBOARD
+    approve_stage(
+        root,
+        StageName.STORYBOARD,
+        note="Quick storyboard approved",
+        evidence=(root / "stages/storyboard/storyboard.json",),
+    )
+    video_wait = run_pipeline(
+        root,
+        through=StageName.VIDEO,
+        executor=execute,
+        review_config=review_config,
+    )
+    assert video_wait.stopped_at is StageName.VIDEO
+    approve_stage(
+        root,
+        StageName.VIDEO,
+        note="Quick video approved",
+        evidence=(root / "stages/video/video.json",),
+    )
+
+    delivery = run_pipeline(
+        root,
+        through=StageName.DELIVER,
+        executor=execute,
+        review_config=review_config,
+    )
+    package = load_production_package(root)
+    eval_record = next(item for item in package.stages if item.stage is StageName.EVAL)
+    manifest = json.loads(
+        (root / "stages/deliver/delivery_manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert delivery.stopped_at is StageName.DELIVER
+    assert eval_record.review_state is ReviewState.AUTO_APPROVED
+    assert not (root / "reviews/eval.review.json").exists()
+    assert manifest["eval_evidence"]["policy"] == "automatic"
+    assert manifest["eval_evidence"]["state"] == "auto_approved"
 
 
 def test_edit_assembles_preserved_and_repaired_clips_in_storyboard_order(

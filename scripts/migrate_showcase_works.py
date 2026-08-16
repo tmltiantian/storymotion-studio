@@ -26,7 +26,10 @@ _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
 _TRANSACTION_NAMESPACE = ".storymotion-migration-transactions"
 _TRANSACTION_SCHEMA = "storymotion.archive-publish.v2"
+_OWNER_SCHEMA = "storymotion.archive-transaction-owner.v1"
 _TRANSACTION_ID = re.compile(r"tx-[0-9a-f]{32}")
+_OWNER_TEMP = re.compile(r"\.owner\.[0-9a-f]{32}\.tmp")
+_JOURNAL_TEMP = re.compile(r"\.journal\.[0-9a-f]{32}\.tmp")
 _APPROVED_AUDIO: dict[str, dict[str, str]] = {
     "audio/black-cat-approved.m4a": {
         "version_label": "黑白猫定版音色",
@@ -116,6 +119,7 @@ class _PublishTransaction:
     transaction_id: str
     destination: str
     expected_sha256: str
+    owner_sha256: str = ""
     payload_descriptor: int = -1
     payload_metadata: os.stat_result | None = None
 
@@ -430,6 +434,7 @@ def _journal_payload(
         "transaction_id": transaction.transaction_id,
         "destination": transaction.destination,
         "expected_sha256": transaction.expected_sha256,
+        "owner_sha256": transaction.owner_sha256,
         "phase": phase,
         "owner_uid": os.geteuid(),
         "namespace": {"device": namespace.st_dev, "inode": namespace.st_ino},
@@ -447,6 +452,62 @@ def _journal_payload(
             "sha256": payload_sha256,
         }
     return payload
+
+
+def _owner_payload(transaction: _PublishTransaction) -> dict[str, Any]:
+    namespace = _private_directory(transaction.namespace)
+    owned = _private_directory(transaction.descriptor)
+    return {
+        "schema_version": _OWNER_SCHEMA,
+        "transaction_id": transaction.transaction_id,
+        "destination": transaction.destination,
+        "expected_sha256": transaction.expected_sha256,
+        "owner_uid": os.geteuid(),
+        "namespace": {"device": namespace.st_dev, "inode": namespace.st_ino},
+        "transaction": {"device": owned.st_dev, "inode": owned.st_ino},
+    }
+
+
+def _write_owner_marker(transaction: _PublishTransaction) -> str:
+    payload = _owner_payload(transaction)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    temporary_name = f".owner.{uuid4().hex}.tmp"
+    descriptor = os.open(
+        temporary_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=transaction.descriptor,
+    )
+    published = False
+    try:
+        remaining = memoryview(encoded)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("archive transaction owner marker could not be completed")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.rename(
+            temporary_name,
+            "owner.json",
+            src_dir_fd=transaction.descriptor,
+            dst_dir_fd=transaction.descriptor,
+        )
+        published = True
+        os.fsync(transaction.descriptor)
+        return hashlib.sha256(encoded).hexdigest()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if not published:
+            try:
+                os.unlink(temporary_name, dir_fd=transaction.descriptor)
+            except FileNotFoundError:
+                pass
 
 
 def _write_journal(
@@ -496,9 +557,17 @@ def _begin_transaction(
 ) -> _PublishTransaction:
     namespace = _transaction_namespace(destination)
     transaction_id = f"tx-{uuid4().hex}"
+    created = False
     try:
         os.mkdir(transaction_id, mode=0o700, dir_fd=namespace)
+        created = True
         descriptor = os.open(transaction_id, _DIRECTORY_FLAGS, dir_fd=namespace)
+    except Exception:
+        if created:
+            os.rmdir(transaction_id, dir_fd=namespace)
+            os.fsync(namespace)
+        os.close(namespace)
+        raise
     except BaseException:
         os.close(namespace)
         raise
@@ -511,11 +580,46 @@ def _begin_transaction(
     )
     try:
         _private_directory(descriptor)
+        transaction.owner_sha256 = _write_owner_marker(transaction)
         _write_journal(transaction, _journal_payload(transaction, phase="initialized"))
         return transaction
+    except Exception:
+        _discard_new_transaction(transaction)
+        transaction.close()
+        raise
     except BaseException:
         transaction.close()
         raise
+
+
+def _unlink_owned_private_file(descriptor: int, name: str) -> None:
+    metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_nlink != 1
+    ):
+        raise ValueError("archive transaction contains an unsafe private file")
+    os.unlink(name, dir_fd=descriptor)
+
+
+def _discard_new_transaction(transaction: _PublishTransaction) -> None:
+    names = set(os.listdir(transaction.descriptor))
+    allowed = {
+        name
+        for name in names
+        if name in {"owner.json", "journal.json"}
+        or _OWNER_TEMP.fullmatch(name)
+        or _JOURNAL_TEMP.fullmatch(name)
+    }
+    if names != allowed:
+        raise ValueError("archive transaction contains unowned residue")
+    for name in sorted(names):
+        _unlink_owned_private_file(transaction.descriptor, name)
+    os.fsync(transaction.descriptor)
+    os.rmdir(transaction.transaction_id, dir_fd=transaction.namespace)
+    os.fsync(transaction.namespace)
 
 
 def _create_payload(transaction: _PublishTransaction) -> int:
@@ -572,9 +676,9 @@ def _payload_ready(transaction: _PublishTransaction, *, size: int, digest: str) 
     )
 
 
-def _read_transaction_journal(descriptor: int) -> Mapping[str, Any] | None:
+def _read_private_json(descriptor: int, name: str) -> Mapping[str, Any] | None:
     try:
-        journal = os.open("journal.json", _FILE_FLAGS, dir_fd=descriptor)
+        journal = os.open(name, _FILE_FLAGS, dir_fd=descriptor)
     except FileNotFoundError:
         return None
     try:
@@ -598,17 +702,72 @@ def _read_transaction_journal(descriptor: int) -> Mapping[str, Any] | None:
         os.close(journal)
 
 
+def _read_transaction_journal(descriptor: int) -> Mapping[str, Any] | None:
+    return _read_private_json(descriptor, "journal.json")
+
+
+def _read_owner_marker(descriptor: int) -> Mapping[str, Any] | None:
+    return _read_private_json(descriptor, "owner.json")
+
+
+def _valid_transaction_relative(value: Any) -> str | None:
+    text = str(value or "")
+    path = PurePosixPath(text)
+    if (
+        not text
+        or path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        return None
+    return path.as_posix()
+
+
+def _owner_owned(
+    transaction_id: str,
+    namespace: int,
+    descriptor: int,
+    owner: Mapping[str, Any],
+) -> bool:
+    namespace_stat = _private_directory(namespace)
+    transaction_stat = _private_directory(descriptor)
+    return (
+        set(owner)
+        == {
+            "schema_version",
+            "transaction_id",
+            "destination",
+            "expected_sha256",
+            "owner_uid",
+            "namespace",
+            "transaction",
+        }
+        and owner.get("schema_version") == _OWNER_SCHEMA
+        and owner.get("transaction_id") == transaction_id
+        and owner.get("owner_uid") == os.geteuid()
+        and _valid_transaction_relative(owner.get("destination")) is not None
+        and re.fullmatch(r"[0-9a-f]{64}", str(owner.get("expected_sha256") or ""))
+        is not None
+        and owner.get("namespace")
+        == {"device": namespace_stat.st_dev, "inode": namespace_stat.st_ino}
+        and owner.get("transaction")
+        == {"device": transaction_stat.st_dev, "inode": transaction_stat.st_ino}
+    )
+
+
 def _journal_owned(
     transaction_id: str,
     namespace: int,
     descriptor: int,
     journal: Mapping[str, Any],
+    owner_sha256: str,
 ) -> bool:
     namespace_stat = _private_directory(namespace)
     transaction_stat = _private_directory(descriptor)
     return (
         journal.get("schema_version") == _TRANSACTION_SCHEMA
         and journal.get("transaction_id") == transaction_id
+        and journal.get("owner_sha256") == owner_sha256
         and journal.get("owner_uid") == os.geteuid()
         and journal.get("namespace")
         == {"device": namespace_stat.st_dev, "inode": namespace_stat.st_ino}
@@ -619,9 +778,25 @@ def _journal_owned(
 
 def _finish_transaction(transaction: _PublishTransaction) -> None:
     names = set(os.listdir(transaction.descriptor))
-    if names != {"journal.json"}:
+    if names != {"owner.json", "journal.json"}:
         raise ValueError("archive transaction contains unowned residue")
-    os.unlink("journal.json", dir_fd=transaction.descriptor)
+    _unlink_owned_private_file(transaction.descriptor, "journal.json")
+    _unlink_owned_private_file(transaction.descriptor, "owner.json")
+    os.fsync(transaction.descriptor)
+    os.rmdir(transaction.transaction_id, dir_fd=transaction.namespace)
+    os.fsync(transaction.namespace)
+
+
+def _finish_empty_transaction(transaction: _PublishTransaction) -> None:
+    names = set(os.listdir(transaction.descriptor))
+    temporary = {
+        name for name in names if _JOURNAL_TEMP.fullmatch(name) is not None
+    }
+    if names != {"owner.json", *temporary}:
+        raise ValueError("archive transaction contains unowned residue")
+    for name in sorted(temporary):
+        _unlink_owned_private_file(transaction.descriptor, name)
+    _unlink_owned_private_file(transaction.descriptor, "owner.json")
     os.fsync(transaction.descriptor)
     os.rmdir(transaction.transaction_id, dir_fd=transaction.namespace)
     os.fsync(transaction.namespace)
@@ -788,11 +963,10 @@ def _recover_transaction(
 
 def _recover_publication(
     destination: AnchoredDirectory,
-    relative: str,
-    expected: str,
+    _relative: str,
+    _expected: str,
 ) -> None:
     namespace = _transaction_namespace(destination)
-    destination_parent, destination_name = _open_parent(destination, relative)
     try:
         for transaction_id in sorted(os.listdir(namespace)):
             if not _TRANSACTION_ID.fullmatch(transaction_id):
@@ -801,31 +975,65 @@ def _recover_publication(
                 descriptor = os.open(transaction_id, _DIRECTORY_FLAGS, dir_fd=namespace)
             except OSError:
                 continue
+            owner = _read_owner_marker(descriptor)
+            if owner is None or not _owner_owned(
+                transaction_id,
+                namespace,
+                descriptor,
+                owner,
+            ):
+                os.close(descriptor)
+                continue
+            relative = _valid_transaction_relative(owner.get("destination"))
+            expected = str(owner.get("expected_sha256") or "")
+            if relative is None:
+                os.close(descriptor)
+                continue
+            owner_sha256 = hashlib.sha256(
+                json.dumps(
+                    dict(owner), sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest()
             transaction = _PublishTransaction(
                 os.dup(namespace),
                 descriptor,
                 transaction_id,
-                PurePosixPath(relative).as_posix(),
+                relative,
                 expected,
+                owner_sha256,
             )
             try:
                 journal = _read_transaction_journal(descriptor)
-                if (
-                    journal is None
-                    or not _journal_owned(
-                        transaction_id, namespace, descriptor, journal
-                    )
-                    or journal.get("destination") != transaction.destination
-                    or journal.get("expected_sha256") != expected
-                ):
+                if journal is None:
+                    if "journal.json" in os.listdir(descriptor):
+                        continue
+                    _finish_empty_transaction(transaction)
                     continue
-                _recover_transaction(
-                    transaction, destination_parent, destination_name, journal
+                if not _journal_owned(
+                    transaction_id,
+                    namespace,
+                    descriptor,
+                    journal,
+                    owner_sha256,
+                ) or journal.get("destination") != transaction.destination or journal.get(
+                    "expected_sha256"
+                ) != expected:
+                    continue
+                destination_parent, destination_name = _open_parent(
+                    destination, relative
                 )
+                try:
+                    _recover_transaction(
+                        transaction,
+                        destination_parent,
+                        destination_name,
+                        journal,
+                    )
+                finally:
+                    os.close(destination_parent)
             finally:
                 transaction.close()
     finally:
-        os.close(destination_parent)
         os.close(namespace)
 
 
