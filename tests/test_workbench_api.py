@@ -48,7 +48,9 @@ class FakeWorkbenchService:
             "schema_version": "motion-comic-factory.video-workspace.v1",
             "project_id": project_id,
             "shots": [{"shot_id": "shot_01", "duration_seconds": 5.0}],
+            "selected_shot_ids": ["shot_01"],
             "job": None,
+            "failed_job_recovery": None,
         }
 
     def provider_status(self):
@@ -124,7 +126,9 @@ def test_video_workspace_route_returns_path_free_shots_and_persisted_job(client:
         "schema_version": "motion-comic-factory.video-workspace.v1",
         "project_id": "episode_01",
         "shots": [{"shot_id": "shot_01", "duration_seconds": 5.0}],
+        "selected_shot_ids": ["shot_01"],
         "job": None,
+        "failed_job_recovery": None,
     }
 
 

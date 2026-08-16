@@ -15,12 +15,19 @@ from factory.pipeline_contracts import (
     ProjectSpec,
     ReviewPolicy,
     ReviewState,
+    StageName,
     StageState,
 )
 from factory.pipeline_jobs import JobManager, ProjectBusyError
 from factory.pipeline_migration import migrate_existing_project
-from factory.pipeline_store import create_project, load_production_package
+from factory.pipeline_review import approve_stage_revision, write_stage_revision
+from factory.pipeline_store import (
+    create_project,
+    load_production_package,
+    update_stage,
+)
 from factory.provider_profile import CapabilityConfig, ProviderProfile
+from factory.video_preflight import VideoGenerationRequest, build_video_preflight
 from factory.workbench_service import WorkbenchService
 
 
@@ -88,6 +95,142 @@ def _failed_video_job(
         )
     manager.fail(job_id, error="interrupted")
     return job_id
+
+
+def _ready_video_workspace(
+    tmp_path: Path,
+    *,
+    project_id: str = "episode_ready",
+) -> tuple[Path, Path]:
+    workspace = tmp_path
+    project = workspace / "runs" / project_id
+    create_project(
+        project,
+        ProjectSpec(
+            project_id=project_id,
+            title="Ready video project",
+            mode=ProjectMode.ORIGINAL,
+            input={"kind": "idea", "text": "A canonical recovery fixture"},
+            output_dir=project / "output",
+            target={
+                "video_resolution": "768P",
+                "video_price_yuan_per_second": 0.5,
+            },
+            providers={
+                "video_provider": "minimax",
+                "video_model": "MiniMax-H3",
+            },
+        ),
+    )
+    storyboard_payload = {
+        "project_id": project_id,
+        "title": "Ready video project",
+        "language": "zh-CN",
+        "style": "motion comic",
+        "target_aspect_ratio": "9:16",
+        "target_resolution": "768x1365",
+        "characters": [],
+        "shots": [
+            {
+                "id": "shot-1",
+                "index": 1,
+                "scene_title": "一",
+                "action": "等待",
+                "visual_prompt": "室内",
+                "camera": "locked",
+                "duration_seconds": 5,
+                "audio_mood": "quiet",
+                "dialogue": [],
+            },
+            {
+                "id": "shot-2",
+                "index": 2,
+                "scene_title": "二",
+                "action": "回应",
+                "visual_prompt": "室内",
+                "camera": "medium",
+                "duration_seconds": 4,
+                "audio_mood": "warm",
+                "dialogue": [],
+            },
+        ],
+    }
+    payloads = {
+        StageName.SCRIPT: {"script": "ready"},
+        StageName.STORYBOARD: storyboard_payload,
+        StageName.ASSETS: {"production_ready": True},
+        StageName.AUDIO: {"voiceover_audio": "ready.wav"},
+    }
+    evidence = project / "approval-evidence.json"
+    evidence.write_text('{"approved":true}', encoding="utf-8")
+    for stage, payload in payloads.items():
+        artifact = project / "stages" / stage.value / (
+            "episode.json" if stage is StageName.STORYBOARD else f"{stage.value}.json"
+        )
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(json.dumps(payload), encoding="utf-8")
+        revision = write_stage_revision(
+            project,
+            stage,
+            (artifact,),
+            f"sig-{stage.value}",
+            "fixture",
+        )
+        approve_stage_revision(
+            project,
+            stage,
+            revision.number,
+            f"approve {stage.value}",
+            (evidence,),
+        )
+        update_stage(
+            project,
+            stage,
+            StageState.PASSED,
+            executor="fixture",
+            input_signature=f"sig-{stage.value}",
+            artifacts=(artifact,),
+            revision=revision.number,
+            review_policy=ReviewPolicy.MANUAL,
+            review_state=ReviewState.APPROVED,
+        )
+    return workspace, project
+
+
+def _canonical_video_request(
+    project: Path,
+    shot_ids: tuple[str, ...] = ("shot-1",),
+) -> VideoGenerationRequest:
+    return VideoGenerationRequest.from_preflight(
+        build_video_preflight(project, shot_ids)
+    )
+
+
+def _canonical_failed_video_job(
+    manager: JobManager,
+    project: Path,
+    *,
+    with_provider_tasks: bool,
+    shot_ids: tuple[str, ...] = ("shot-1",),
+) -> tuple[str, VideoGenerationRequest]:
+    request = _canonical_video_request(project, shot_ids)
+    job_id = manager.submit(
+        project_id=request.project_id,
+        operation="video_generate",
+        payload={"generation_request": request.to_dict()},
+    )
+    manager.start(job_id)
+    if with_provider_tasks:
+        for shot_id in request.shot_ids:
+            manager.record_provider_task(
+                job_id,
+                shot_id=shot_id,
+                provider=request.provider,
+                task_id=f"task-{shot_id}",
+                status="submitted",
+            )
+    manager.fail(job_id, error="interrupted")
+    return job_id, request
 
 
 @pytest.fixture
@@ -356,7 +499,9 @@ def test_video_workspace_and_dialogues_use_registered_authoritative_contracts(
             {"shot_id": "shot_01", "duration_seconds": 4.0},
             {"shot_id": "shot_02", "duration_seconds": 5.0},
         ],
+        "selected_shot_ids": ["shot_01", "shot_02"],
         "job": service.job_detail(latest_job),
+        "failed_job_recovery": None,
     }
     assert descriptor["viewer"] == {
         "size_bytes": len(b"video"),
@@ -380,6 +525,43 @@ def test_video_workspace_and_dialogues_use_registered_authoritative_contracts(
         json.dumps(
             {
                 "schema_version": "motion-comic-factory.video.v1",
+                "project_id": "episode_video",
+                "clip_by_shot": {
+                    "shot_01": str(clip.resolve()),
+                    "shot_02": str(clip.resolve()),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    duplicate = service.stage_detail("episode_video", "video")
+    duplicate_descriptor = next(
+        item for item in duplicate["artifacts"] if item["name"] == "shot_02.mp4"
+    )
+    assert "shot_id" not in duplicate_descriptor["viewer"]
+    assert "dialogues" not in duplicate_descriptor["viewer"]
+
+    video_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "motion-comic-factory.video.v1",
+                "project_id": "episode_video",
+                "clip_by_shot": {"unknown-shot": str(clip.resolve())},
+            }
+        ),
+        encoding="utf-8",
+    )
+    unknown = service.stage_detail("episode_video", "video")
+    unknown_descriptor = next(
+        item for item in unknown["artifacts"] if item["name"] == "shot_02.mp4"
+    )
+    assert "shot_id" not in unknown_descriptor["viewer"]
+    assert "dialogues" not in unknown_descriptor["viewer"]
+
+    video_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "motion-comic-factory.video.v1",
                 "project_id": "another_project",
                 "clip_by_shot": {"shot_02": str(clip.resolve())},
             }
@@ -392,6 +574,109 @@ def test_video_workspace_and_dialogues_use_registered_authoritative_contracts(
     )
     assert "shot_id" not in changed_descriptor["viewer"]
     assert "dialogues" not in changed_descriptor["viewer"]
+
+
+def test_failed_video_workspace_requires_new_confirmation_before_submit(
+    tmp_path: Path,
+) -> None:
+    workspace, project = _ready_video_workspace(tmp_path)
+    manager = JobManager(workspace)
+    job_id, _request = _canonical_failed_video_job(
+        manager,
+        project,
+        with_provider_tasks=False,
+    )
+    calls: list[dict[str, object]] = []
+    service = WorkbenchService(
+        workspace,
+        job_manager=manager,
+        video_renderer=lambda **kwargs: calls.append(kwargs) or {"success": True},
+        dispatch=lambda callback: callback(),
+    )
+
+    payload = service.video_workspace("episode_ready")
+
+    assert payload["failed_job_recovery"] == {
+        "mode": "new_submission_required",
+        "shot_ids": ["shot-1"],
+    }
+    assert payload["selected_shot_ids"] == ["shot-1"]
+    with pytest.raises(ValueError, match="fresh confirmation"):
+        service.resume_job(job_id)
+    assert calls == []
+    assert manager.get(job_id).status == "failed"
+
+
+def test_failed_video_workspace_marks_changed_revision_historical(
+    tmp_path: Path,
+) -> None:
+    workspace, project = _ready_video_workspace(tmp_path)
+    manager = JobManager(workspace)
+    job_id, _request = _canonical_failed_video_job(
+        manager,
+        project,
+        with_provider_tasks=True,
+    )
+    script = project / "stages" / "script" / "script.json"
+    script.write_text('{"script":"current revision changed"}', encoding="utf-8")
+    old_output = project / "stages" / "video" / "old-output.mp4"
+    old_output.parent.mkdir(parents=True, exist_ok=True)
+    old_output.write_bytes(b"old output")
+    calls: list[dict[str, object]] = []
+    service = WorkbenchService(
+        workspace,
+        job_manager=manager,
+        video_renderer=lambda **kwargs: calls.append(kwargs) or {
+            "output_path": str(old_output)
+        },
+        dispatch=lambda callback: callback(),
+    )
+
+    payload = service.video_workspace("episode_ready")
+
+    assert payload["failed_job_recovery"] == {
+        "mode": "historical",
+        "shot_ids": [],
+    }
+    assert payload["selected_shot_ids"] == ["shot-1", "shot-2"]
+    with pytest.raises(ValueError, match="current project revision"):
+        service.resume_job(job_id)
+    assert calls == []
+    assert all(
+        artifact["name"] != "old-output.mp4"
+        for artifact in service.stage_detail("episode_ready", "video")["artifacts"]
+    )
+
+
+def test_failed_video_workspace_allows_same_revision_provider_task_poll(
+    tmp_path: Path,
+) -> None:
+    workspace, project = _ready_video_workspace(tmp_path)
+    manager = JobManager(workspace)
+    job_id, request = _canonical_failed_video_job(
+        manager,
+        project,
+        with_provider_tasks=True,
+    )
+    calls: list[dict[str, object]] = []
+    service = WorkbenchService(
+        workspace,
+        job_manager=manager,
+        video_renderer=lambda **kwargs: calls.append(kwargs) or {"success": True},
+        dispatch=lambda callback: callback(),
+    )
+
+    payload = service.video_workspace("episode_ready")
+
+    assert payload["failed_job_recovery"] == {
+        "mode": "poll_only",
+        "shot_ids": ["shot-1"],
+    }
+    service.resume_job(job_id)
+    assert calls[0]["generation_token"] == ""
+    assert calls[0]["generation_request"] == request
+    assert calls[0]["provider_tasks"]["shot-1"]["task_id"] == "task-shot-1"
+    assert manager.get(job_id).status == "completed"
 
 
 def test_job_detail_includes_persisted_last_event_sequence(
@@ -638,17 +923,14 @@ def test_job_events_redact_token_shaped_text_and_raw_paths(
 
 
 def test_failed_video_resume_reuses_provider_tasks_without_a_fresh_token(
-    project_workspace: tuple[Path, Path],
+    tmp_path: Path,
 ) -> None:
-    workspace, _artifact = project_workspace
+    workspace, _project = _ready_video_workspace(tmp_path)
     manager = JobManager(workspace)
     calls: list[dict[str, object]] = []
 
     def render_video(**kwargs):
         calls.append(kwargs)
-        if len(calls) == 1:
-            kwargs["provider_task_persisted"]("shot-1", "task-123", "submitted")
-            raise RuntimeError("interrupted after provider submission")
         return {"resumed_count": 1}
 
     service = WorkbenchService(
@@ -658,36 +940,17 @@ def test_failed_video_resume_reuses_provider_tasks_without_a_fresh_token(
         video_renderer=render_video,
         dispatch=lambda callback: callback(),
     )
-    request = {
-        "schema_version": "motion-comic-factory.video-generation-request.v1",
-        "project_id": "episode_01",
-        "project_sha256": "a" * 64,
-        "package_sha256": "b" * 64,
-        "revision_hashes": {},
-        "artifact_hashes": {},
-        "approval_hashes": {},
-        "repair_plan_sha256": "",
-        "shot_ids": ["shot-1"],
-        "shots": [{"shot_id": "shot-1", "duration": 5, "resolution": "720p"}],
-        "provider": "gateway",
-        "model": "safe-model",
-        "resolution": "720p",
-        "output_seconds": 5,
-        "estimated_cost_yuan": 1.0,
-        "price_yuan_per_second": 0.2,
-    }
-    submitted = service.submit_video_generation(
-        "episode_01",
-        generation_token="token-id.secret",
-        generation_request=request,
-        test_mode=True,
+    job_id, _request = _canonical_failed_video_job(
+        manager,
+        _project,
+        with_provider_tasks=True,
     )
 
-    service.resume_job(submitted["job_id"])
+    service.resume_job(job_id)
 
-    assert calls[1]["generation_token"] == ""
-    assert calls[1]["provider_tasks"]["shot-1"]["task_id"] == "task-123"
-    assert manager.get(submitted["job_id"]).status == "completed"
+    assert calls[0]["generation_token"] == ""
+    assert calls[0]["provider_tasks"]["shot-1"]["task_id"] == "task-shot-1"
+    assert manager.get(job_id).status == "completed"
 
 
 def test_job_artifacts_remain_authorized_after_service_restart(
@@ -775,28 +1038,15 @@ def test_live_stage_traversal_cannot_reach_video_without_confirmation(
 
 
 def test_failed_provider_result_is_resumable_and_keeps_provider_task(
-    project_workspace: tuple[Path, Path],
+    tmp_path: Path,
 ) -> None:
-    workspace, _artifact = project_workspace
+    workspace, _project = _ready_video_workspace(tmp_path)
     manager = JobManager(workspace)
     attempts = 0
 
     def render_video(**kwargs):
         nonlocal attempts
         attempts += 1
-        kwargs["provider_task_persisted"]("shot-1", "task-123", "submitted")
-        if attempts == 1:
-            return {
-                "success": False,
-                "failed_count": 1,
-                "errors": [
-                    {
-                        "error": (
-                            "sk-secret-value failed at /private/provider/result.json"
-                        )
-                    }
-                ],
-            }
         return {"success": True, "completed_count": 1}
 
     service = WorkbenchService(
@@ -807,13 +1057,26 @@ def test_failed_provider_result_is_resumable_and_keeps_provider_task(
         dispatch=lambda callback: callback(),
     )
 
-    submitted = service.submit_video_generation(
-        "episode_01",
-        generation_token="token-id.secret",
-        generation_request=_video_request(),
-        test_mode=True,
+    request = _canonical_video_request(_project)
+    job_id = manager.submit(
+        project_id=request.project_id,
+        operation="video_generate",
+        payload={"generation_request": request.to_dict()},
     )
-    failed = manager.get(submitted["job_id"])
+    manager.start(job_id)
+    manager.record_provider_task(
+        job_id,
+        shot_id="shot-1",
+        provider=request.provider,
+        task_id="task-123",
+        status="submitted",
+    )
+    manager.fail(
+        job_id,
+        error="sk-secret-value failed at /private/provider/result.json",
+        result={"success": False, "failed_count": 1},
+    )
+    failed = manager.get(job_id)
 
     assert failed.status == "failed"
     assert failed.result["success"] is False
@@ -824,7 +1087,7 @@ def test_failed_provider_result_is_resumable_and_keeps_provider_task(
     service.resume_job(failed.job_id)
 
     assert manager.get(failed.job_id).status == "completed"
-    assert attempts == 2
+    assert attempts == 1
 
 
 def test_invalid_resume_does_not_mutate_or_reclaim_failed_job(
@@ -888,11 +1151,15 @@ def test_resume_does_not_dispatch_duplicate_for_live_worker(
 
 
 def test_cross_process_worker_lease_blocks_duplicate_and_releases_on_sigkill(
-    project_workspace: tuple[Path, Path],
+    tmp_path: Path,
 ) -> None:
-    workspace, _artifact = project_workspace
+    workspace, project = _ready_video_workspace(tmp_path)
     manager = JobManager(workspace)
-    job_id = _failed_video_job(manager)
+    job_id, _request = _canonical_failed_video_job(
+        manager,
+        project,
+        with_provider_tasks=True,
+    )
     ready = workspace / "child-worker-ready"
     script = """
 import sys
@@ -1027,12 +1294,16 @@ def test_worker_lease_releases_when_dispatch_fails(
     lease.release()
 
 
-def test_resume_allows_renderer_to_validate_clip_state_without_job_task_record(
-    project_workspace: tuple[Path, Path],
+def test_resume_without_provider_task_requires_a_fresh_confirmation(
+    tmp_path: Path,
 ) -> None:
-    workspace, _artifact = project_workspace
+    workspace, project = _ready_video_workspace(tmp_path)
     manager = JobManager(workspace)
-    job_id = _failed_video_job(manager, with_provider_task=False)
+    job_id, _request = _canonical_failed_video_job(
+        manager,
+        project,
+        with_provider_tasks=False,
+    )
     calls: list[dict[str, object]] = []
 
     def render_video(**kwargs):
@@ -1047,11 +1318,11 @@ def test_resume_allows_renderer_to_validate_clip_state_without_job_task_record(
         dispatch=lambda callback: callback(),
     )
 
-    service.resume_job(job_id)
+    with pytest.raises(ValueError, match="fresh confirmation"):
+        service.resume_job(job_id)
 
-    assert calls[0]["generation_token"] == ""
-    assert calls[0]["provider_tasks"] == {}
-    assert manager.get(job_id).status == "completed"
+    assert calls == []
+    assert manager.get(job_id).status == "failed"
 
 
 def test_resume_validates_project_ownership_before_mutation(

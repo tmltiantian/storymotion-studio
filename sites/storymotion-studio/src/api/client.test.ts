@@ -78,7 +78,9 @@ describe("Task 5 API contracts", () => {
       schema_version: "motion-comic-factory.video-workspace.v1",
       project_id: "episode_01",
       shots: [{ shot_id: "shot_03", duration_seconds: 5 }],
+      selected_shot_ids: ["shot_03"],
       job: null,
+      failed_job_recovery: null,
     };
     const fetchFake = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } }),

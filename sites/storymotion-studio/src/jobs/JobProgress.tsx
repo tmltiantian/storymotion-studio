@@ -64,11 +64,13 @@ export function JobProgress({
   jobId,
   connect = streamSse,
   onJobChange,
+  allowResume = true,
 }: {
   api: JobProgressApi;
   jobId: string;
   connect?: JobEventConnector;
   onJobChange?: (job: JobDetail) => void;
+  allowResume?: boolean;
 }) {
   const [state, setState] = useState<ViewState>({ status: "loading" });
   const [resumePending, setResumePending] = useState(false);
@@ -76,9 +78,11 @@ export function JobProgress({
   const [recoveryGeneration, setRecoveryGeneration] = useState(0);
   const mountedRef = useRef(false);
   const jobIdRef = useRef(jobId);
+  const lastJobRef = useRef<JobDetail | null>(null);
 
   useEffect(() => {
     jobIdRef.current = jobId;
+    lastJobRef.current = null;
   }, [jobId]);
 
   useEffect(() => {
@@ -99,6 +103,7 @@ export function JobProgress({
       try {
         const next = await api.getJob(jobId);
         if (!active || controller.signal.aborted || jobIdRef.current !== jobId) return null;
+        lastJobRef.current = next;
         setState({ status: "ready", job: next });
         onJobChange?.(next);
         const persistedSequence = next.last_event_sequence ?? 0;
@@ -109,7 +114,9 @@ export function JobProgress({
         }
         return next;
       } catch {
-        if (active && !controller.signal.aborted) setState({ status: "error" });
+        if (active && !controller.signal.aborted && lastJobRef.current === null) {
+          setState({ status: "error" });
+        }
         return null;
       }
     };
@@ -120,13 +127,13 @@ export function JobProgress({
       silenceTimer = window.setTimeout(() => {
         silenceTimer = null;
         void refresh().then((next) => {
-          if (next && !isTerminal(next)) armSilenceFallback();
+          if (!next || !isTerminal(next)) armSilenceFallback();
         });
       }, 5000);
     };
 
     const run = async () => {
-      setState({ status: "loading" });
+      if (lastJobRef.current === null) setState({ status: "loading" });
       const persisted = await refresh();
       if (!persisted || isTerminal(persisted) || controller.signal.aborted) return;
       while (active && !controller.signal.aborted) {
@@ -158,7 +165,8 @@ export function JobProgress({
             }
             armSilenceFallback();
             const next = await refresh();
-            if (!next || isTerminal(next)) return;
+            if (next && isTerminal(next)) return;
+            armSilenceFallback();
           }
         } catch (error) {
           if (controller.signal.aborted || !active || (error instanceof DOMException && error.name === "AbortError")) return;
@@ -202,7 +210,7 @@ export function JobProgress({
   };
 
   if (state.status === "loading") return <section className="job-progress"><div className="job-progress-state" role="status"><LoaderCircle className="loading-icon" aria-hidden="true" size={17} />正在恢复作业状态</div></section>;
-  if (state.status === "error") return <section className="job-progress"><div className="job-progress-state job-progress-error" role="alert"><AlertCircle aria-hidden="true" size={17} />无法读取作业状态</div></section>;
+  if (state.status === "error") return <section className="job-progress"><div className="job-progress-state job-progress-error" role="alert"><AlertCircle aria-hidden="true" size={17} />无法读取作业状态<button className="text-button" type="button" onClick={() => setRecoveryGeneration((value) => value + 1)}><RotateCcw aria-hidden="true" size={15} />重新读取作业</button></div></section>;
 
   const value = progress(state.job);
   const complete = state.job.status === "completed";
@@ -215,7 +223,7 @@ export function JobProgress({
       {value.total ? <div className="job-progress-meter"><span>已完成 {value.completed} / {value.total} 镜</span><progress max={value.total} value={value.completed}>{value.completed} / {value.total}</progress></div> : null}
       {state.job.error ? <p className="job-error-text">{state.job.error}</p> : null}
       {resumeMessage ? <p className="job-resume-message" role="alert">{resumeMessage}</p> : null}
-      {state.job.status === "failed" ? <button className="text-button" type="button" disabled={resumePending} onClick={() => void resume()}><RotateCcw aria-hidden="true" size={15} />{resumePending ? "正在恢复" : "恢复生成"}</button> : null}
+      {state.job.status === "failed" && allowResume ? <button className="text-button" type="button" disabled={resumePending} onClick={() => void resume()}><RotateCcw aria-hidden="true" size={15} />{resumePending ? "正在恢复" : "恢复生成"}</button> : null}
     </section>
   );
 }

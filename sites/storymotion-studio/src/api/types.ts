@@ -246,7 +246,12 @@ export interface VideoWorkspace {
   schema_version: "motion-comic-factory.video-workspace.v1";
   project_id: string;
   shots: VideoWorkspaceShot[];
+  selected_shot_ids: string[];
   job: JobDetail | null;
+  failed_job_recovery: {
+    mode: "poll_only" | "new_submission_required" | "historical";
+    shot_ids: string[];
+  } | null;
 }
 
 export interface ProviderCapability {

@@ -148,7 +148,9 @@ async function interceptWorkbench(page: Page) {
         { shot_id: "shot_03", duration_seconds: 5 },
         { shot_id: "shot_04", duration_seconds: 4 },
       ],
+      selected_shot_ids: ["shot_03", "shot_04"],
       job: persistedJob ? job : null,
+      failed_job_recovery: null,
     } }),
   );
   await page.route(/\/api\/projects\/episode_01\/video\/preflight$/, (route) =>
@@ -226,12 +228,11 @@ test("video inspection controls remain usable and unobstructed", async ({ page }
   expect(intercepted.generationCalls()).toBe(1);
 
   const reloadedVideo = page.getByTestId("stage-video");
+  await page.getByRole("button", { name: "退回修改" }).click();
+  await page.getByRole("textbox", { name: "问题说明" }).fill("动作衔接错误。");
   await page.getByRole("button", { name: "在当前时间标记问题" }).click();
   await expect(page.getByRole("textbox", { name: "问题说明" })).toHaveValue(
-    "镜头 shot_03\n候选成果 art_video_a\n时间码 3.125 秒\n",
-  );
-  await page.getByRole("textbox", { name: "问题说明" }).fill(
-    "镜头 shot_03\n候选成果 art_video_a\n时间码 3.125 秒\n动作衔接错误。",
+    "动作衔接错误。\n\n--- 视频时间标记 ---\n镜头 shot_03\n候选成果 art_video_a\n时间码 3.125 秒\n--- 标记结束 ---",
   );
   await page.getByRole("button", { name: "退回整阶段" }).click();
   await expect(page.getByText("问题已提交到当前修订。")).toBeVisible();

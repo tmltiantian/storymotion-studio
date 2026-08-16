@@ -451,12 +451,86 @@ class WorkbenchService:
             project_id,
             operations=("video_test", "video_generate"),
         )
+        job = jobs[0] if jobs else None
+        selected_shot_ids = [shot["shot_id"] for shot in shots]
+        failed_job_recovery: dict[str, Any] | None = None
+        if job is not None:
+            raw_request = job.payload.get("generation_request")
+            try:
+                request = (
+                    VideoGenerationRequest.from_dict(raw_request)
+                    if isinstance(raw_request, dict)
+                    else None
+                )
+            except (KeyError, TypeError, ValueError):
+                request = None
+            known_shot_ids = set(selected_shot_ids)
+            if (
+                request is not None
+                and request.project_id == project_id
+                and set(request.shot_ids).issubset(known_shot_ids)
+            ):
+                selected_shot_ids = list(request.shot_ids)
+            if job.status == "failed":
+                mode, current_request = self._video_job_recovery(job)
+                recovery_shots = (
+                    list(current_request.shot_ids)
+                    if current_request is not None and mode != "historical"
+                    else []
+                )
+                failed_job_recovery = {
+                    "mode": mode,
+                    "shot_ids": recovery_shots,
+                }
+                if mode == "historical":
+                    selected_shot_ids = [shot["shot_id"] for shot in shots]
         return {
             "schema_version": "motion-comic-factory.video-workspace.v1",
             "project_id": spec.project_id,
             "shots": shots,
-            "job": self._job_public(jobs[0]) if jobs else None,
+            "selected_shot_ids": selected_shot_ids,
+            "job": self._job_public(job) if job is not None else None,
+            "failed_job_recovery": failed_job_recovery,
         }
+
+    def _video_job_recovery(
+        self,
+        record: JobRecord,
+    ) -> tuple[str, VideoGenerationRequest | None]:
+        raw_request = record.payload.get("generation_request")
+        if not isinstance(raw_request, dict):
+            return "historical", None
+        try:
+            stored = VideoGenerationRequest.from_dict(raw_request)
+        except (KeyError, TypeError, ValueError):
+            return "historical", None
+        if stored.project_id != record.project_id:
+            return "historical", None
+        try:
+            current = VideoGenerationRequest.from_preflight(
+                build_video_preflight(
+                    self._project_dir(record.project_id),
+                    stored.shot_ids,
+                )
+            )
+        except (FileNotFoundError, OSError, TypeError, ValueError):
+            return "historical", None
+        if current != stored:
+            return "historical", current
+
+        expected_shots = set(current.shot_ids)
+        tasks = record.provider_tasks
+        poll_only = set(tasks) == expected_shots and all(
+            isinstance(task, Mapping)
+            and str(task.get("provider") or "") == current.provider
+            and bool(str(task.get("task_id") or "").strip())
+            and bool(str(task.get("status") or "").strip())
+            for task in tasks.values()
+        )
+        return (
+            "poll_only" if poll_only else "new_submission_required",
+            current,
+        )
 
     def _artifact_list(
         self, project_id: str, values: Sequence[str]
@@ -726,19 +800,53 @@ class WorkbenchService:
             or payload.get("project_id") != ref.project_id
         ):
             return result
-        clip_by_shot = payload.get("clip_by_shot")
-        if isinstance(clip_by_shot, Mapping):
-            for shot_id, raw_path in clip_by_shot.items():
-                candidate = self._register_artifact(ref.project_id, str(raw_path))
-                if candidate is not None and candidate.artifact_id == ref.artifact_id:
-                    result["shot_id"] = self._public_text(str(shot_id))
-                    dialogues = self._video_dialogues(
-                        ref.project_id, str(shot_id)
-                    )
-                    if dialogues:
-                        result["dialogues"] = dialogues
-                    break
+        bindings = self._validated_video_bindings(ref.project_id, payload)
+        if bindings is not None and ref.artifact_id in bindings:
+            shot_id = bindings[ref.artifact_id]
+            result["shot_id"] = self._public_text(shot_id)
+            dialogues = self._video_dialogues(ref.project_id, shot_id)
+            if dialogues:
+                result["dialogues"] = dialogues
         return result
+
+    def _validated_video_bindings(
+        self,
+        project_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, str] | None:
+        storyboard = self._registered_json(
+            project_id,
+            stage="storyboard",
+            name="episode.json",
+        )
+        if storyboard is None:
+            return None
+        _episode_ref, episode_payload = storyboard
+        try:
+            episode = episode_from_dict(episode_payload)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if episode.project_id != project_id:
+            return None
+        known_shots = {str(shot.id) for shot in episode.shots}
+        if len(known_shots) != len(episode.shots) or not all(known_shots):
+            return None
+
+        clip_by_shot = payload.get("clip_by_shot")
+        if not isinstance(clip_by_shot, Mapping):
+            return None
+        bindings: dict[str, str] = {}
+        for raw_shot_id, raw_path in clip_by_shot.items():
+            shot_id = str(raw_shot_id)
+            if shot_id not in known_shots or not isinstance(raw_path, str):
+                return None
+            candidate = self._register_artifact(project_id, raw_path)
+            if candidate is None or not candidate.media_type.lower().startswith("video/"):
+                return None
+            if candidate.artifact_id in bindings:
+                return None
+            bindings[candidate.artifact_id] = shot_id
+        return bindings
 
     def _candidate_roots(self, project_id: str) -> tuple[Path, ...]:
         return (self._project_dir(project_id), *self.artifact_roots)
@@ -1502,6 +1610,15 @@ class WorkbenchService:
         request = VideoGenerationRequest.from_dict(raw_request)
         if request.project_id != record.project_id:
             raise ValueError("Stored generation request belongs to another project")
+        if record.status == "failed":
+            recovery_mode, current_request = self._video_job_recovery(record)
+            if recovery_mode == "historical":
+                raise ValueError(
+                    "Stored generation request does not match the current project revision"
+                )
+            if recovery_mode != "poll_only" or current_request is None:
+                raise ValueError("Video generation requires a fresh confirmation")
+            request = current_request
         if record.provider_tasks and any(
             str(task.get("provider") or "") != request.provider
             or not str(task.get("task_id") or "")
