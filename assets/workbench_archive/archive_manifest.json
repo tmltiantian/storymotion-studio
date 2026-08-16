@@ -1,0 +1,136 @@
+{
+  "entries": [
+    {
+      "archive_relative": "linked/approved-cat-voices/black-cat-approved.m4a",
+      "classification": "linked",
+      "collection_id": "approved-cat-voices",
+      "created_at": "",
+      "entry_id": "archive_30609073e22d1e8fa08bee32b04543e7",
+      "media_kind": "audio",
+      "media_type": "audio/mp4",
+      "metadata": {
+        "description": "自然偏低、冷静克制、短停顿。",
+        "personality": "高冷御姐",
+        "role": "黑白猫",
+        "speed": "+4",
+        "voice_name": "魅力女友"
+      },
+      "sha256": "fe8404a2340359db26620d89ab41c266243aa928ec22b1012553f7dc6754f1c4",
+      "size_bytes": 110974,
+      "source_relative": "audio/black-cat-approved.m4a",
+      "title": "双猫定版音色",
+      "version_label": "黑白猫定版音色"
+    },
+    {
+      "archive_relative": "linked/approved-cat-voices/orange-cat-approved.m4a",
+      "classification": "linked",
+      "collection_id": "approved-cat-voices",
+      "created_at": "",
+      "entry_id": "archive_a1920d0180f8aef341e01708244eee1e",
+      "media_kind": "audio",
+      "media_type": "audio/mp4",
+      "metadata": {
+        "description": "声线轻亮、反应灵动、有自然笑意。",
+        "personality": "可爱活泼",
+        "role": "橘猫",
+        "speed": "+2",
+        "voice_name": "调皮公主"
+      },
+      "sha256": "dbed55470c7faf997926377b49ecc1ce80a036954eecd3420b004f2fd5c81dd6",
+      "size_bytes": 116058,
+      "source_relative": "audio/orange-cat-approved.m4a",
+      "title": "双猫定版音色",
+      "version_label": "橘猫定版音色"
+    },
+    {
+      "archive_relative": "linked/approved-cat-voices/two-cat-approved-dialogue.m4a",
+      "classification": "linked",
+      "collection_id": "approved-cat-voices",
+      "created_at": "",
+      "entry_id": "archive_a5937fa4fbd01654d28350f762c6e68b",
+      "media_kind": "audio",
+      "media_type": "audio/mp4",
+      "metadata": {
+        "description": "黑白猫与橘猫的定版对话试听。",
+        "role": "双猫"
+      },
+      "sha256": "8f436e104a138f3d474f0877d1c99ec7ad876ba149e04fa45058e83288a3603c",
+      "size_bytes": 228214,
+      "source_relative": "audio/two-cat-approved-dialogue.m4a",
+      "title": "双猫定版音色",
+      "version_label": "双猫对话试听"
+    },
+    {
+      "archive_relative": "unclassified/favicon.svg",
+      "classification": "unclassified",
+      "collection_id": "historical-unclassified",
+      "created_at": "",
+      "entry_id": "archive_9d7a4d4fce9959d0aedeb2d3640eb156",
+      "media_kind": "image",
+      "media_type": "image/svg+xml",
+      "metadata": {
+        "description": "旧展示站未归类素材，原样保留。"
+      },
+      "sha256": "e6d2e59b7b5bbb0342e0fb496dfc262decbfe4426bbb7b047aec8d467d1dc6f7",
+      "size_bytes": 712,
+      "source_relative": "favicon.svg",
+      "title": "历史归档",
+      "version_label": "favicon.svg"
+    },
+    {
+      "archive_relative": "unclassified/file.svg",
+      "classification": "unclassified",
+      "collection_id": "historical-unclassified",
+      "created_at": "",
+      "entry_id": "archive_dd47ba9a6f49c379eafb988233361962",
+      "media_kind": "image",
+      "media_type": "image/svg+xml",
+      "metadata": {
+        "description": "旧展示站未归类素材，原样保留。"
+      },
+      "sha256": "1e0ae4d1a1ddfa36752988647b731e4abf150c414d069ec83c96fb0aaeff0307",
+      "size_bytes": 392,
+      "source_relative": "file.svg",
+      "title": "历史归档",
+      "version_label": "file.svg"
+    },
+    {
+      "archive_relative": "unclassified/globe.svg",
+      "classification": "unclassified",
+      "collection_id": "historical-unclassified",
+      "created_at": "",
+      "entry_id": "archive_c3b5e9dc5551b5176a6e5b3e1dc328de",
+      "media_kind": "image",
+      "media_type": "image/svg+xml",
+      "metadata": {
+        "description": "旧展示站未归类素材，原样保留。"
+      },
+      "sha256": "d051a8c47936990a9085693d307bb7cea1bc1b6d7ed956bcbaacf674f4ec96b9",
+      "size_bytes": 1036,
+      "source_relative": "globe.svg",
+      "title": "历史归档",
+      "version_label": "globe.svg"
+    },
+    {
+      "archive_relative": "unclassified/window.svg",
+      "classification": "unclassified",
+      "collection_id": "historical-unclassified",
+      "created_at": "",
+      "entry_id": "archive_8ade47b95336340465df69f4f1f8e3a7",
+      "media_kind": "image",
+      "media_type": "image/svg+xml",
+      "metadata": {
+        "description": "旧展示站未归类素材，原样保留。"
+      },
+      "sha256": "decf1cf7bb22b5c99c4857cfcd5718ce5465c4454166317589c83fc73df74b66",
+      "size_bytes": 386,
+      "source_relative": "window.svg",
+      "title": "历史归档",
+      "version_label": "window.svg"
+    }
+  ],
+  "linked_count": 3,
+  "schema_version": "storymotion.archive-manifest.v1",
+  "source_file_count": 7,
+  "unclassified_count": 4
+}

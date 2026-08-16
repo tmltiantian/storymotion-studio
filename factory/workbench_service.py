@@ -49,7 +49,7 @@ from .video_preflight import (
     issue_generation_token,
 )
 from .video_provider import build_video_client, default_video_resolution
-from .work_catalog import CatalogArtifact, WorkRecord, build_work_catalog
+from .work_catalog import CatalogArtifact, WorkCatalog, WorkCatalogCache, WorkRecord
 
 
 DEFAULT_FRONTEND_ORIGINS = (
@@ -99,14 +99,25 @@ class _ArtifactRef:
     relative_path: Path
     name: str
     media_type: str
+    expected_size: int | None = None
+    expected_sha256: str = ""
 
 
 class OpenedMedia:
     """An authorized media descriptor owned by one response or reader."""
 
-    def __init__(self, descriptor: int, info: Mapping[str, Any]):
+    def __init__(
+        self,
+        descriptor: int,
+        info: Mapping[str, Any],
+        *,
+        verified_stat: os.stat_result,
+        expected_sha256: str = "",
+    ):
         self._descriptor = descriptor
         self.info = dict(info)
+        self._verified_stat = verified_stat
+        self._expected_sha256 = expected_sha256
         self._closed = False
         self._close_lock = threading.Lock()
 
@@ -138,12 +149,33 @@ class OpenedMedia:
             try:
                 os.lseek(self._descriptor, start, os.SEEK_SET)
                 remaining = end - start + 1
+                digest = hashlib.sha256() if start == 0 and end == size - 1 else None
                 while remaining:
                     chunk = os.read(self._descriptor, min(chunk_size, remaining))
                     if not chunk:
                         raise OSError("Authorized artifact changed while reading")
                     remaining -= len(chunk)
+                    if digest is not None:
+                        digest.update(chunk)
                     yield chunk
+                current = os.fstat(self._descriptor)
+                verified = self._verified_stat
+                if (
+                    current.st_dev,
+                    current.st_ino,
+                    current.st_size,
+                    current.st_mtime_ns,
+                ) != (
+                    verified.st_dev,
+                    verified.st_ino,
+                    verified.st_size,
+                    verified.st_mtime_ns,
+                ) or (
+                    digest is not None
+                    and self._expected_sha256
+                    and digest.hexdigest() != self._expected_sha256
+                ):
+                    raise OSError("Authorized artifact changed while reading")
             finally:
                 self.close()
 
@@ -229,7 +261,7 @@ class WorkbenchService:
             Path(archive_manifest).expanduser()
             if archive_manifest is not None
             else self.workspace
-            / "output"
+            / "assets"
             / "workbench_archive"
             / "archive_manifest.json"
         )
@@ -244,6 +276,10 @@ class WorkbenchService:
         self._dispatch = dispatch or self._dispatch_thread
         self._job_artifacts: dict[str, _ArtifactRef] = {}
         self._registry_lock = threading.Lock()
+        self._catalog_cache = WorkCatalogCache()
+        self._catalog_lock = threading.RLock()
+        self._catalog_index_catalog: WorkCatalog | None = None
+        self._catalog_index: dict[str, _ArtifactRef] = {}
 
     def _worker_key(self, job_id: str) -> tuple[str, str]:
         return str(self.jobs.jobs_dir), str(job_id)
@@ -342,30 +378,15 @@ class WorkbenchService:
     def list_projects(self) -> list[dict[str, Any]]:
         return [self.project_detail(project_id) for project_id in self._project_ids()]
 
-    def _work_catalog(self):
+    def _work_catalog(self) -> WorkCatalog:
         archive = self.archive_manifest if self.archive_manifest.is_file() else None
-        return build_work_catalog(self.runs_dir, archive)
+        return self._catalog_cache.build(self.runs_dir, archive)
 
     def _register_catalog_artifact(self, artifact: CatalogArtifact) -> _ArtifactRef:
         with AnchoredDirectory.open(
             artifact.path.parent, label="Catalog artifact root"
         ) as root:
             relative = root.relative_path(artifact.path)
-            parent = self._open_artifact_parent(root, relative)
-            try:
-                descriptor = os.open(
-                    relative.name,
-                    os.O_RDONLY | os.O_NOFOLLOW,
-                    dir_fd=parent,
-                )
-                try:
-                    metadata = os.fstat(descriptor)
-                    if not stat.S_ISREG(metadata.st_mode):
-                        raise KeyError(artifact.artifact_id)
-                finally:
-                    os.close(descriptor)
-            finally:
-                os.close(parent)
             ref = _ArtifactRef(
                 artifact_id=artifact.artifact_id,
                 project_id="catalog",
@@ -373,8 +394,22 @@ class WorkbenchService:
                 relative_path=relative,
                 name=artifact.name,
                 media_type=_media_type(artifact.name, artifact.media_type),
+                expected_size=artifact.size_bytes,
+                expected_sha256=artifact.sha256,
             )
         return ref
+
+    def _catalog_snapshot(self) -> tuple[WorkCatalog, dict[str, _ArtifactRef]]:
+        catalog = self._work_catalog()
+        with self._catalog_lock:
+            if catalog != self._catalog_index_catalog:
+                index = {
+                    artifact.artifact_id: self._register_catalog_artifact(artifact)
+                    for artifact in catalog.artifacts()
+                }
+                self._catalog_index_catalog = catalog
+                self._catalog_index = index
+            return catalog, dict(self._catalog_index)
 
     def _catalog_artifact_public(self, artifact: CatalogArtifact) -> dict[str, Any]:
         ref = self._register_catalog_artifact(artifact)
@@ -393,15 +428,19 @@ class WorkbenchService:
             "mode": work.mode,
             "source": work.source,
             "delivered_at": work.delivered_at,
+            "delivery_date": work.delivery_date,
+            "roles": list(work.roles),
             "current_version": work.current_version,
         }
 
     def list_works(self) -> list[dict[str, Any]]:
-        return [self._work_summary(work) for work in self._work_catalog().works]
+        catalog, _index = self._catalog_snapshot()
+        return [self._work_summary(work) for work in catalog.works]
 
     def work_detail(self, work_id: str) -> dict[str, Any]:
         selected = _safe_identifier(work_id, "work_id")
-        work = self._work_catalog().find(selected)
+        catalog, _index = self._catalog_snapshot()
+        work = catalog.find(selected)
         versions = []
         for version in work.versions:
             versions.append(
@@ -658,6 +697,7 @@ class WorkbenchService:
             "name": ref.name,
             "media_type": ref.media_type,
             "media_url": f"/api/media/{ref.artifact_id}",
+            "download_url": f"/api/download/{ref.artifact_id}",
             "kind": kind,
             "viewer": viewer,
         }
@@ -1013,12 +1053,6 @@ class WorkbenchService:
         registry: dict[str, _ArtifactRef] = {}
         with self._registry_lock:
             registry.update(self._job_artifacts)
-        try:
-            for artifact in self._work_catalog().artifacts():
-                ref = self._register_catalog_artifact(artifact)
-                registry[ref.artifact_id] = ref
-        except (FileNotFoundError, KeyError, OSError, TypeError, ValueError):
-            pass
         for project_id in self._project_ids():
             project = self._project_dir(project_id)
             _spec, package = self._load_project_records(project)
@@ -1116,6 +1150,12 @@ class WorkbenchService:
         if not _ARTIFACT_ID.fullmatch(value):
             raise KeyError(value)
         try:
+            _catalog, index = self._catalog_snapshot()
+            if value in index:
+                return index[value]
+        except (FileNotFoundError, OSError, TypeError, ValueError):
+            pass
+        try:
             return self._registered_artifacts()[value]
         except KeyError as exc:
             raise KeyError(value) from exc
@@ -1136,6 +1176,29 @@ class WorkbenchService:
                 metadata = os.fstat(descriptor)
                 if not stat.S_ISREG(metadata.st_mode):
                     raise KeyError(artifact_id)
+                if ref.expected_size is not None:
+                    if metadata.st_size != ref.expected_size:
+                        raise KeyError(artifact_id)
+                    before = metadata
+                    digest = hashlib.sha256()
+                    while chunk := os.read(descriptor, 1024 * 1024):
+                        digest.update(chunk)
+                    metadata = os.fstat(descriptor)
+                    if (
+                        before.st_dev,
+                        before.st_ino,
+                        before.st_size,
+                        before.st_mtime_ns,
+                        before.st_ctime_ns,
+                    ) != (
+                        metadata.st_dev,
+                        metadata.st_ino,
+                        metadata.st_size,
+                        metadata.st_mtime_ns,
+                        metadata.st_ctime_ns,
+                    ) or digest.hexdigest() != ref.expected_sha256:
+                        raise KeyError(artifact_id)
+                    os.lseek(descriptor, 0, os.SEEK_SET)
             except BaseException:
                 if descriptor >= 0:
                     os.close(descriptor)
@@ -1150,6 +1213,8 @@ class WorkbenchService:
                 "media_type": ref.media_type,
                 "size": metadata.st_size,
             },
+            verified_stat=metadata,
+            expected_sha256=ref.expected_sha256,
         )
 
     def media_info(self, artifact_id: str) -> dict[str, Any]:

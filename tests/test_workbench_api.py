@@ -88,6 +88,8 @@ class FakeWorkbenchService:
                 "mode": "replica",
                 "source": "delivered",
                 "delivered_at": "2026-08-15T12:00:00Z",
+                "delivery_date": "2026-08-15",
+                "roles": ["豆包"],
                 "current_version": "V3.1",
             }
         ]
@@ -192,6 +194,8 @@ def test_works_routes_return_path_free_catalog_and_safe_404(client: TestClient):
 
     assert listed.status_code == 200
     assert listed.json()[0]["title"] == "咪要去面试"
+    assert listed.json()[0]["roles"] == ["豆包"]
+    assert listed.json()[0]["delivery_date"] == "2026-08-15"
     assert detail.status_code == 200
     assert detail.json()["versions"][0]["label"] == "V3.1"
     assert missing.status_code == 404
@@ -246,6 +250,88 @@ def test_archived_work_media_is_available_only_through_opaque_descriptor(
     assert media.status_code == 200
     assert media.content == content
     assert api.get("/api/media/audio/black-cat-approved.m4a").status_code in {400, 404}
+
+
+def test_catalog_media_rejects_replacement_after_authorization(tmp_path: Path) -> None:
+    source = tmp_path / "public/audio"
+    source.mkdir(parents=True)
+    (source / "black-cat-approved.m4a").write_bytes(b"approved-voice")
+    archive = tmp_path / "assets/workbench_archive"
+    migrate_showcase_media(source.parent, archive)
+    service = WorkbenchService(
+        tmp_path,
+        archive_manifest=archive / "archive_manifest.json",
+        job_manager=JobManager(tmp_path),
+        provider_profile_loader=lambda: None,
+    )
+    detail = service.work_detail(service.list_works()[0]["work_id"])
+    artifact_id = detail["versions"][0]["outputs"][0]["artifact_id"]
+    archived = next(archive.rglob("black-cat-approved.m4a"))
+    replacement = archived.with_suffix(".replacement")
+    replacement.write_bytes(b"replacement bytes")
+    os.replace(replacement, archived)
+
+    response = TestClient(create_workbench_app(service)).get(
+        f"/api/media/{artifact_id}"
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {"code": "not_found", "message": "Resource was not found"}
+    }
+
+
+def test_catalog_media_detects_in_place_mutation_during_stream(tmp_path: Path) -> None:
+    source = tmp_path / "public/audio"
+    source.mkdir(parents=True)
+    (source / "black-cat-approved.m4a").write_bytes(b"0123456789")
+    archive = tmp_path / "assets/workbench_archive"
+    migrate_showcase_media(source.parent, archive)
+    service = WorkbenchService(
+        tmp_path,
+        archive_manifest=archive / "archive_manifest.json",
+        job_manager=JobManager(tmp_path),
+        provider_profile_loader=lambda: None,
+    )
+    detail = service.work_detail(service.list_works()[0]["work_id"])
+    artifact_id = detail["versions"][0]["outputs"][0]["artifact_id"]
+    opened = service.open_media(artifact_id)
+    archived = next(archive.rglob("black-cat-approved.m4a"))
+    archived.write_bytes(b"abcdefghij")
+
+    with pytest.raises(OSError, match="changed while reading"):
+        b"".join(opened.iter_range(start=0, end=9, chunk_size=3))
+
+
+def test_download_route_sets_safe_attachment_headers_for_get_head_and_range(
+    tmp_path: Path,
+) -> None:
+    service, artifact, artifact_id = _authorized_media_service(tmp_path)
+    artifact.rename(artifact.with_name("预览 final.mp4"))
+    package_path = tmp_path / "runs/episode_01/production_package.json"
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    package["stages"][0]["artifacts"] = [str(artifact.with_name("预览 final.mp4"))]
+    package_path.write_text(json.dumps(package), encoding="utf-8")
+    artifact_id = service.project_detail("episode_01")["stages"][0]["artifacts"][0][
+        "artifact_id"
+    ]
+    api = TestClient(create_workbench_app(service))
+
+    preview = api.get(f"/api/media/{artifact_id}")
+    downloaded = api.get(f"/api/download/{artifact_id}")
+    head = api.head(f"/api/download/{artifact_id}")
+    partial = api.get(f"/api/download/{artifact_id}", headers={"Range": "bytes=2-5"})
+
+    assert preview.headers.get("content-disposition") is None
+    for response in (downloaded, head, partial):
+        disposition = response.headers["content-disposition"]
+        assert disposition.startswith("attachment; filename=")
+        assert "filename*=UTF-8''" in disposition
+        assert "\r" not in disposition and "\n" not in disposition
+    assert downloaded.content == b"0123456789"
+    assert head.content == b""
+    assert partial.status_code == 206
+    assert partial.content == b"2345"
 
 
 def test_settings_keep_public_defaults_when_no_provider_profile_exists(

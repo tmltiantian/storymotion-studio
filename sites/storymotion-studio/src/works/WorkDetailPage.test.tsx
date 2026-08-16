@@ -9,13 +9,15 @@ import type { WorkDetail } from "../api/types";
 import { WorkDetailPage } from "./WorkDetailPage";
 
 
-const work: WorkDetail = {
+const work = {
   work_id: "work_delivered",
   project_id: "interview-cat",
   title: "咪要去面试",
   mode: "replica",
   source: "delivered",
   delivered_at: "2026-08-15T12:00:00Z",
+  delivery_date: "2026-08-15",
+  roles: ["豆包"],
   current_version: "V3.1",
   versions: [
     {
@@ -28,6 +30,7 @@ const work: WorkDetail = {
           name: "master.mp4",
           media_type: "video/mp4",
           media_url: "/api/media/art_master",
+          download_url: "/api/download/art_master",
           kind: "video",
           viewer: { size_bytes: 2048, width: 1080, height: 1920 },
           sha256: "a".repeat(64),
@@ -39,6 +42,7 @@ const work: WorkDetail = {
           name: "eval_result.json",
           media_type: "application/json",
           media_url: "/api/media/art_eval",
+          download_url: "/api/download/art_eval",
           kind: "eval",
           viewer: { size_bytes: 512 },
           sha256: "b".repeat(64),
@@ -54,7 +58,7 @@ const work: WorkDetail = {
       eval_reports: [],
     },
   ],
-};
+} as WorkDetail;
 
 
 function renderDetail(getWork = vi.fn().mockResolvedValue(work)) {
@@ -79,7 +83,7 @@ describe("WorkDetailPage", () => {
     expect(video).toHaveAttribute("src", "/api/media/art_master");
     expect(screen.getByRole("link", { name: "下载 master.mp4" })).toHaveAttribute(
       "href",
-      "/api/media/art_master",
+      "/api/download/art_master",
     );
     expect(screen.getByText("逐镜返修通过")).toBeInTheDocument();
 
