@@ -159,14 +159,51 @@ function VideoGenerationWorkspace({
   );
   const [job, setJob] = useState<Pick<JobDetail, "job_id" | "status"> | null>(workspace.job);
   const [failedRecovery, setFailedRecovery] = useState(workspace.failed_job_recovery);
+  const [classificationState, setClassificationState] = useState<"idle" | "pending" | "error">("idle");
+  const trackedStatusRef = useRef<JobDetail["status"] | null>(workspace.job?.status ?? null);
+  const classificationControllerRef = useRef<AbortController | null>(null);
+  const loadAuthoritativeClassification = useCallback(() => {
+    classificationControllerRef.current?.abort();
+    const controller = new AbortController();
+    classificationControllerRef.current = controller;
+    setClassificationState("pending");
+    void api.getVideoWorkspace(projectId, controller.signal).then(
+      (authoritative) => {
+        if (controller.signal.aborted || classificationControllerRef.current !== controller) return;
+        setSelectedShotIds(authoritative.selected_shot_ids);
+        setFailedRecovery(authoritative.failed_job_recovery);
+        setJob(authoritative.job ? {
+          job_id: authoritative.job.job_id,
+          status: authoritative.job.status,
+        } : null);
+        trackedStatusRef.current = authoritative.job?.status ?? null;
+        setClassificationState("idle");
+      },
+      () => {
+        if (!controller.signal.aborted && classificationControllerRef.current === controller) {
+          setClassificationState("error");
+        }
+      },
+    );
+  }, [api, projectId]);
+  useEffect(() => () => classificationControllerRef.current?.abort(), []);
   const updateJob = useCallback((next: JobDetail) => {
+    const previous = trackedStatusRef.current;
+    trackedStatusRef.current = next.status;
     setJob({ job_id: next.job_id, status: next.status });
-  }, []);
+    if (
+      previous !== null
+      && !["completed", "failed", "cancelled"].includes(previous)
+      && ["completed", "failed", "cancelled"].includes(next.status)
+    ) {
+      loadAuthoritativeClassification();
+    }
+  }, [loadAuthoritativeClassification]);
   const activeJob = Boolean(job && ["queued", "running"].includes(job.status));
   const pollOnlyFailure = Boolean(
     job?.status === "failed" && failedRecovery?.mode === "poll_only",
   );
-  const generationLocked = activeJob || pollOnlyFailure;
+  const generationLocked = activeJob || pollOnlyFailure || classificationState !== "idle";
   const recoveryLabel = job?.status === "failed"
     ? failedRecovery?.mode === "historical"
       ? "历史作业，与当前修订不一致"
@@ -205,12 +242,23 @@ function VideoGenerationWorkspace({
       </fieldset>
       {job ? (
         <>
+          {classificationState === "pending" ? (
+            <p className="job-history-label" role="status">正在确认作业恢复方式</p>
+          ) : null}
+          {classificationState === "error" ? (
+            <button className="text-button" type="button" onClick={loadAuthoritativeClassification}>
+              <RefreshCw aria-hidden="true" size={15} />重新确认恢复方式
+            </button>
+          ) : null}
           {recoveryLabel ? <p className="job-history-label">{recoveryLabel}</p> : null}
           <JobProgress
             api={api}
             jobId={job.job_id}
             onJobChange={updateJob}
-            allowResume={failedRecovery?.mode === "poll_only"}
+            allowResume={
+              classificationState === "idle"
+              && failedRecovery?.mode === "poll_only"
+            }
           />
         </>
       ) : null}
@@ -220,6 +268,7 @@ function VideoGenerationWorkspace({
           projectId={projectId}
           shotIds={selectedShotIds}
           onJobAccepted={(accepted) => {
+            trackedStatusRef.current = accepted.status;
             setFailedRecovery(null);
             setJob(accepted);
           }}

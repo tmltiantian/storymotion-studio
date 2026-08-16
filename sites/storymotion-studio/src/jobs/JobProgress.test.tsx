@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -251,7 +251,37 @@ describe("JobProgress recovery", () => {
     await user.click(await screen.findByRole("button", { name: "恢复生成" }));
 
     expect(await screen.findByText("生成中")).toBeVisible();
+    expect(client.getJob).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers after the first persisted read fails following accepted resume", async () => {
+    vi.useFakeTimers();
+    const failed = job("failed");
+    const running = job("running", { resume_count: 1 });
+    const client = api(failed);
+    vi.mocked(client.getJob)
+      .mockResolvedValueOnce(failed)
+      .mockRejectedValueOnce(new Error("temporary post-resume read failure"))
+      .mockResolvedValue(running);
+    vi.mocked(client.resumeJob).mockResolvedValue({
+      job_id: failed.job_id,
+      status: "queued",
+    });
+
+    render(<JobProgress api={client} jobId={failed.job_id} connect={idleStream} />);
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    fireEvent.click(screen.getByRole("button", { name: "恢复生成" }));
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+
+    expect(screen.getByText("生成失败")).toBeVisible();
+    expect(screen.getByText("正在恢复作业状态")).toBeVisible();
+    expect(client.resumeJob).toHaveBeenCalledTimes(1);
+
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+
+    expect(screen.getByText("生成中")).toBeVisible();
     expect(client.getJob).toHaveBeenCalledTimes(3);
+    expect(client.resumeJob).toHaveBeenCalledTimes(1);
   });
 
   it("uses a full resume response and reports cross-process busy", async () => {
