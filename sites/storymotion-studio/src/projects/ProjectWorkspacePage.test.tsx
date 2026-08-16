@@ -149,6 +149,7 @@ function workspaceApi(
     getProject: vi.fn().mockResolvedValue(project),
     getStage: vi.fn().mockResolvedValue(selected),
     getVideoWorkspace: vi.fn().mockResolvedValue(videoWorkspaceFixture()),
+    runStage: vi.fn().mockResolvedValue({ job_id: "2".repeat(32), status: "queued" }),
     approveStage: vi.fn().mockResolvedValue({
       ...selected,
       review_state: "approved",
@@ -326,6 +327,65 @@ beforeEach(() => {
 });
 
 describe("project review workspace", () => {
+  it("runs a pending stage through the production job contract and reloads its revision", async () => {
+    const user = userEvent.setup();
+    const pending = stageFixture({
+      stage: "concept",
+      execution_state: "pending",
+      review_state: "not_ready",
+      review_blocks_progress: false,
+      revision: 0,
+      executor: "",
+      artifacts: [],
+    });
+    const passed = stageFixture({
+      stage: "concept",
+      revision: 1,
+      executor: "generic.concept",
+      artifacts: [{
+        artifact_id: "art_concept",
+        name: "concept.json",
+        media_type: "application/json",
+        media_url: "/api/media/art_concept",
+      }],
+    });
+    const initialProject = projectFixture(pending, {
+      next_stage: "concept",
+      required_action: "run_or_resume",
+    });
+    const completedProject = projectFixture(passed, {
+      next_stage: "concept",
+      required_action: "approve_review_evidence",
+    });
+    const client = workspaceApi(pending, initialProject) as ProjectWorkspaceApi & {
+      runStage: ReturnType<typeof vi.fn>;
+    };
+    client.runStage = vi.fn().mockResolvedValue({
+      job_id: "2".repeat(32),
+      status: "queued",
+    });
+    vi.mocked(client.getJob).mockResolvedValue({
+      ...videoJob("completed"),
+      job_id: "2".repeat(32),
+      operation: "run_stage",
+      result: { completed_stages: ["concept"] },
+      provider_tasks: {},
+    });
+    vi.mocked(client.getProject)
+      .mockResolvedValueOnce(initialProject)
+      .mockResolvedValue(completedProject);
+    vi.mocked(client.getStage)
+      .mockResolvedValueOnce(pending)
+      .mockResolvedValue(passed);
+
+    render(<WorkspaceTestTree api={client} route="/projects/episode_01/stages/concept" />);
+    await user.click(await screen.findByRole("button", { name: "运行概念阶段" }));
+
+    expect(client.runStage).toHaveBeenCalledWith("episode_01", "concept", { enable_live: false });
+    expect((await screen.findAllByText("concept.json"))[0]).toBeVisible();
+    expect(screen.getAllByText("等待确认")[0]).toBeVisible();
+  });
+
   it("loads a deep-linked project and stage in parallel and shows both states", async () => {
     let resolveProject: (value: ProjectDetail) => void = () => undefined;
     let resolveStage: (value: StageDetail) => void = () => undefined;

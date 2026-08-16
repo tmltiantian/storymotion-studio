@@ -220,6 +220,8 @@ export function ProjectListPage({ api }: { api: ProjectListApi }) {
             ref={createTriggerRef}
             className="command-button"
             type="button"
+            aria-label="新建项目"
+            title="新建项目"
             onClick={() => setCreateOpen(true)}
           >
             <Plus aria-hidden="true" size={17} />

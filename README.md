@@ -45,6 +45,30 @@ ENABLE_GATEWAY_VIDEO=1
 
 豆包 TTS 可使用 Speech API Key，或 AppID + Access Key 的流式凭据。真实密钥只放在 `.env`，不要提交到仓库。
 
+不配置 Provider 也可以使用本机工作台、运行本地阶段、审核历史作品并执行离线测试。收费生成只有在视频预检、费用确认和显式提交全部完成后才会启动。
+
+## 本机制作工作台
+
+一个命令同时启动 Python 制作 API 和 React 工作台：
+
+```bash
+.venv/bin/python scripts/run_workbench.py
+```
+
+启动器只监听本机回环地址，自动避开占用端口，并在 API 与页面都可用后打印实际地址。`Ctrl+C`、`SIGINT` 或 `SIGTERM` 会一起关闭两个子进程；命令不会修改 `.env`。
+
+工作台使用固定九阶段流程：
+
+1. 在“制作项目”创建原创、小说改编或参考复刻项目，并选择快速、标准或严格审批模板。
+2. 在项目工作区运行当前阶段，检查有版本和哈希绑定的成果，再确认通过或退回修改。
+3. 局部修改先展示影响计划；只有再次确认“应用返修计划”后，受影响阶段和镜头才会失效，未受影响素材继续复用。
+4. 视频阶段先核对 Provider、模型、镜头、时长和费用。测试镜头限制为 1 至 3 个；测试结果通过后再提交整批生成。
+5. 交付审核完成后，版本进入“作品中心”，可查看母版、历史版本、EVAL、迭代说明和受控下载。
+
+审批模板不会关闭收费视频门禁、客观 EVAL 门禁或最终交付确认。作业中断后优先恢复已有任务状态，局部返修也不会自动重新提交收费请求。
+
+旧展示站的 7 个公开文件已按 SHA-256 迁入 `assets/workbench_archive/`：3 个音频归入历史音色作品，4 个未归类 SVG 保留在历史归档。页面会持续显示“发布权利尚未核验”；其中音频样本在权利得到书面确认或从发布内容排除前，不应进入公开仓库或再分发。因此后续 GitHub 发布默认使用私有仓库。
+
 MiniMax H3 视频路线：
 
 ```dotenv
@@ -194,8 +218,17 @@ delivery/                  母版、报告和版本记录
 ## 开发验证
 
 ```bash
-.venv/bin/python -m ruff check factory tests factory_cli.py
-.venv/bin/python -m pytest -q
+.venv/bin/ruff check factory factory_cli.py scripts tests
+.venv/bin/python -m compileall -q factory factory_cli.py scripts
+.venv/bin/pytest -q
+cd sites/storymotion-studio
+npm test -- --run
+npm run typecheck
+npm run lint
+npm run build
+npx playwright test
 ```
+
+这套验证使用本地夹具覆盖创建、阶段执行、审批、退回、影响计划、视频预检、任务恢复、作品和设置，不调用外部 Provider，不产生费用，也不修改 `.env`。
 
 代码职责见 [docs/pipeline-code-map.md](docs/pipeline-code-map.md)，部署与密钥管理见 [docs/deployment.md](docs/deployment.md)，完整 bad case 与迭代过程保留在 [docs/iteration-log.md](docs/iteration-log.md)。

@@ -4,7 +4,7 @@ output/
 # Legacy local queue history is retained outside source control.
 queue/
 models/
-.venv/
+.venv
 **/node_modules/
 sites/**/.git/
 __pycache__/

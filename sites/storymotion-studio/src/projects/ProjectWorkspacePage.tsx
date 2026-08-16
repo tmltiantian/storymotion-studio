@@ -3,6 +3,7 @@ import {
   FolderOpen,
   LoaderCircle,
   Menu,
+  Play,
   RefreshCw,
   X,
 } from "lucide-react";
@@ -42,6 +43,7 @@ export type ProjectWorkspaceApi = Pick<
   | "getProject"
   | "getStage"
   | "getVideoWorkspace"
+  | "runStage"
   | "approveStage"
   | "requestStageChanges"
   | "previewImpact"
@@ -74,6 +76,12 @@ type WorkspaceMessage = {
   text: string;
   tone: MessageTone;
 };
+
+type StageRunState =
+  | { status: "idle" }
+  | { status: "submitting" }
+  | { status: "running"; jobId: string }
+  | { status: "error" };
 
 type MutationOwner = {
   token: symbol;
@@ -348,6 +356,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
   const [impactDraft, setImpactDraft] = useState<ImpactDraft | null>(null);
   const [reviewIssue, setReviewIssue] = useState<ReviewIssueDraft | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [stageRun, setStageRun] = useState<StageRunState>({ status: "idle" });
   const drawerTriggerRef = useRef<HTMLButtonElement>(null);
   const impactTriggerRef = useRef<HTMLElement>(null);
   const loadGeneration = useRef(0);
@@ -356,6 +365,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
   const routeGenerationRef = useRef(0);
   const routeIdentityRef = useRef("");
   const mountedRef = useRef(true);
+  const stageRunGenerationRef = useRef(0);
 
   const invalidStageRoute = routeStage !== undefined && !isStageName(routeStage);
   const selectedRouteStage = isStageName(routeStage) ? routeStage : undefined;
@@ -423,6 +433,8 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
       setImpactDraft(null);
       setReviewIssue(null);
       setDrawerOpen(false);
+      stageRunGenerationRef.current += 1;
+      setStageRun({ status: "idle" });
       if (!invalidStageRoute) void load(false);
     });
     return () => {
@@ -482,6 +494,43 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
     }
   }, [load]);
 
+  useEffect(() => {
+    if (stageRun.status !== "running") return;
+    const generation = stageRunGenerationRef.current;
+    let timer = 0;
+    let active = true;
+
+    const poll = async () => {
+      try {
+        const job = await api.getJob(stageRun.jobId);
+        if (!active || generation !== stageRunGenerationRef.current) return;
+        if (["completed", "failed", "cancelled"].includes(job.status)) {
+          await load(false);
+          if (!active || generation !== stageRunGenerationRef.current) return;
+          if (job.status === "completed") {
+            setMessage({ text: "阶段运行完成，已载入当前修订。", tone: "neutral" });
+            setStageRun({ status: "idle" });
+          } else {
+            setMessage({ text: "阶段运行未完成，请检查作业记录后重试。", tone: "error" });
+            setStageRun({ status: "error" });
+          }
+          return;
+        }
+        timer = window.setTimeout(() => void poll(), 500);
+      } catch {
+        if (!active || generation !== stageRunGenerationRef.current) return;
+        setMessage({ text: "无法读取阶段作业，请重新载入后重试。", tone: "error" });
+        setStageRun({ status: "error" });
+      }
+    };
+
+    void poll();
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [api, load, stageRun]);
+
   if (invalidStageRoute) {
     return <Navigate to={id ? `/projects/${encodeURIComponent(id)}` : "/projects"} replace />;
   }
@@ -518,6 +567,25 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
 
   const { project, stage } = state;
   const selectedStage = stage.stage;
+  const canRunStage = ["pending", "ready", "failed", "stale"].includes(
+    stage.execution_state,
+  );
+
+  async function runSelectedStage() {
+    if (!canRunStage || stageRun.status === "submitting" || stageRun.status === "running") return;
+    const generation = ++stageRunGenerationRef.current;
+    setMessage(null);
+    setStageRun({ status: "submitting" });
+    try {
+      const accepted = await api.runStage(project.project_id, stage.stage, { enable_live: false });
+      if (!mountedRef.current || generation !== stageRunGenerationRef.current) return;
+      setStageRun({ status: "running", jobId: accepted.job_id });
+    } catch (error) {
+      if (!mountedRef.current || generation !== stageRunGenerationRef.current) return;
+      setMessage(mutationMessage(error));
+      setStageRun({ status: "error" });
+    }
+  }
 
   return (
     <div className="workspace-page">
@@ -568,6 +636,29 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
             });
           }}
         />
+        {canRunStage ? (
+          <section className="stage-run-control" aria-label="阶段执行">
+            <div>
+              <strong>{stageRun.status === "running" ? "阶段正在本机运行" : "准备生成本阶段成果"}</strong>
+              <span>本机执行不会开启收费视频生成。</span>
+            </div>
+            <button
+              className="command-button"
+              type="button"
+              disabled={stageRun.status === "submitting" || stageRun.status === "running"}
+              onClick={() => void runSelectedStage()}
+            >
+              {stageRun.status === "submitting" || stageRun.status === "running" ? (
+                <LoaderCircle className="loading-icon" aria-hidden="true" size={16} />
+              ) : (
+                <Play aria-hidden="true" size={16} />
+              )}
+              {stageRun.status === "submitting" || stageRun.status === "running"
+                ? `正在运行${stageLabel(stage.stage)}`
+                : `${stage.execution_state === "failed" || stage.execution_state === "stale" ? "重新" : ""}运行${stageLabel(stage.stage)}阶段`}
+            </button>
+          </section>
+        ) : null}
         {stage.stage === "video" && state.videoWorkspace ? (
           <VideoGenerationWorkspace
             key={`${project.project_id}:${state.videoWorkspace.job?.job_id ?? "new"}`}

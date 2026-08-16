@@ -1436,7 +1436,8 @@
     width: 34px;
     padding: 0;
     overflow: hidden;
-    color: transparent;
+    color: #fff;
+    font-size: 0;
     white-space: nowrap;
   }
 
@@ -2186,6 +2187,33 @@
   border-bottom: 1px solid var(--failed);
   color: var(--failed);
   font-size: 11px;
+}
+
+.stage-run-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  max-width: 980px;
+  margin: 20px auto 0;
+  padding: 14px 0;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}
+
+.stage-run-control > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.stage-run-control strong {
+  font-size: 11px;
+}
+
+.stage-run-control span {
+  color: var(--steel);
+  font-size: 9px;
 }
 
 .review-panel {
