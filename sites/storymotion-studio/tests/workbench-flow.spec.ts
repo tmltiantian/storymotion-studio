@@ -10,13 +10,8 @@ const stageLabels = {
 } as const;
 type StageName = keyof typeof stageLabels;
 
-test("uses the release QA viewport", async ({ page }, testInfo) => {
-  const expected = {
-    desktop: { width: 1440, height: 900 },
-    tablet: { width: 1024, height: 768 },
-    mobile: { width: 390, height: 844 },
-  }[testInfo.project.name];
-  expect(page.viewportSize()).toEqual(expected);
+test("uses the desktop release QA viewport", async ({ page }) => {
+  expect(page.viewportSize()).toEqual({ width: 1440, height: 900 });
 });
 
 async function installNetworkGuard(page: Page) {

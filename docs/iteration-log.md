@@ -3072,3 +3072,4 @@ Security:
 - 网关改为必须显式配置 `GATEWAY_BASE_URL`，仓库只使用 `example.invalid`。退役评估移入历史归档，当前操作文档和代码地图不再包含个人 checkout 路径或旧生产建议。
 - 移动端补充顶部/底部滚动保留区，正常指针点击在 390x844 通过。六张临时 QA 截图显示三种视口无横向溢出、控件裁切、外部请求或意外控制台错误，未核验权利警告持续可见。
 - 最终矩阵：后端 3,026 项、前端 102 项、真实 Playwright 15 项、launcher/bootstrap/security/catalog 107 项，以及 Ruff、compileall、TypeScript、ESLint、Vite build 和 diff 检查全部通过。旧站 7 个源 blob、manifest 与 tracked archive 哈希再次 7/7 一致，8 个归档文件和 7 条 `unverified` 权利记录保持不变。
+- 2026-08-16: 按最终交付范围将工作台收敛为本机桌面网页端。移除手机/平板专用底部导航、阶段抽屉、响应式样式和多视口 Playwright 项目，仅保留 `1440x900` 桌面验收；同时为干净发布导出补充直接命令回归测试，避免模块导入测试通过但文档命令无法运行。

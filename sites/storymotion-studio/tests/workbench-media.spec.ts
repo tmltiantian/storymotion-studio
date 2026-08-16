@@ -178,7 +178,7 @@ async function interceptWorkbench(page: Page) {
   return { generationCalls: () => generationCalls };
 }
 
-test("video inspection controls remain usable and unobstructed", async ({ page }, testInfo) => {
+test("video inspection controls remain usable and unobstructed", async ({ page }) => {
   const intercepted = await interceptWorkbench(page);
   await page.goto("/projects/episode_01/stages/video");
 
@@ -238,11 +238,4 @@ test("video inspection controls remain usable and unobstructed", async ({ page }
   await expect(page.getByText("问题已提交到当前修订。")).toBeVisible();
   expect(await reloadedVideo.boundingBox()).not.toBeNull();
 
-  if (testInfo.project.name === "mobile") {
-    const artifact = page.getByRole("region", { name: "视频成果" });
-    const review = page.getByRole("complementary", { name: "审核检查" });
-    const artifactBox = await artifact.boundingBox();
-    const reviewBox = await review.boundingBox();
-    expect((reviewBox?.y ?? 0)).toBeGreaterThanOrEqual((artifactBox?.y ?? 0) + (artifactBox?.height ?? 0));
-  }
 });

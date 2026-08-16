@@ -2,19 +2,15 @@ import {
   AlertCircle,
   FolderOpen,
   LoaderCircle,
-  Menu,
   Play,
   RefreshCw,
-  X,
 } from "lucide-react";
 import {
-  type RefObject,
   useCallback,
   useEffect,
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
 import { Link, Navigate, useParams } from "react-router";
 
 import type { ApiClient } from "../api/client";
@@ -36,7 +32,6 @@ import { StageViewer } from "../stages/StageViewer";
 import { ImpactDialog } from "./ImpactDialog";
 import { ReviewPanel, type ReviewIssueDraft } from "./ReviewPanel";
 import { StageRail, stageLabel } from "./StageRail";
-import { useContainedSurface } from "./useContainedSurface";
 
 export type ProjectWorkspaceApi = Pick<
   ApiClient,
@@ -286,68 +281,6 @@ function VideoGenerationWorkspace({
   );
 }
 
-function NavigationDrawer({
-  project,
-  selectedStage,
-  returnFocusRef,
-  onClose,
-}: {
-  project: ProjectDetail;
-  selectedStage: StageName;
-  returnFocusRef: RefObject<HTMLElement | null>;
-  onClose: () => void;
-}) {
-  const drawerRef = useRef<HTMLElement>(null);
-  const closeRef = useRef<HTMLButtonElement>(null);
-  const busyRef = useRef(false);
-  const close = useCallback(() => onClose(), [onClose]);
-  useContainedSurface({
-    surfaceRef: drawerRef,
-    initialFocusRef: closeRef,
-    returnFocusRef,
-    busyRef,
-    onClose: close,
-  });
-
-  return createPortal(
-    <div className="drawer-backdrop">
-      <section
-        ref={drawerRef}
-        className="workspace-drawer"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="workspace-drawer-title"
-        tabIndex={-1}
-      >
-        <div className="drawer-heading">
-          <div>
-            <span id="workspace-drawer-title">项目与阶段导航</span>
-            <strong>{project.title}</strong>
-          </div>
-          <button
-            ref={closeRef}
-            className="icon-button"
-            type="button"
-            aria-label="关闭项目与阶段导航"
-            title="关闭项目与阶段导航"
-            onClick={onClose}
-          >
-            <X aria-hidden="true" size={17} />
-          </button>
-        </div>
-        <Link className="drawer-project-link" to="/projects" onClick={onClose}>返回制作项目</Link>
-        <StageRail
-          project={project}
-          selectedStage={selectedStage}
-          inDrawer
-          onNavigate={onClose}
-        />
-      </section>
-    </div>,
-    document.body,
-  );
-}
-
 export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
   const { id, stage: routeStage } = useParams();
   const [state, setState] = useState<WorkspaceState>({ status: "loading" });
@@ -355,9 +288,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
   const [mutationPending, setMutationPending] = useState(false);
   const [impactDraft, setImpactDraft] = useState<ImpactDraft | null>(null);
   const [reviewIssue, setReviewIssue] = useState<ReviewIssueDraft | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
   const [stageRun, setStageRun] = useState<StageRunState>({ status: "idle" });
-  const drawerTriggerRef = useRef<HTMLButtonElement>(null);
   const impactTriggerRef = useRef<HTMLElement>(null);
   const loadGeneration = useRef(0);
   const loadController = useRef<AbortController | null>(null);
@@ -434,7 +365,6 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
       setMessage(null);
       setImpactDraft(null);
       setReviewIssue(null);
-      setDrawerOpen(false);
       stageRunGenerationRef.current += 1;
       handledStageRunRef.current = "";
       setStageRun({ status: "idle" });
@@ -583,24 +513,6 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
 
   return (
     <div className="workspace-page">
-      <header className="workspace-mobile-heading">
-        <button
-          ref={drawerTriggerRef}
-          className="icon-button workspace-nav-button"
-          type="button"
-          aria-label="打开项目与阶段导航"
-          title="打开项目与阶段导航"
-          aria-expanded={drawerOpen}
-          onClick={() => setDrawerOpen(true)}
-        >
-          <Menu aria-hidden="true" size={18} />
-        </button>
-        <div>
-          <strong>{project.title}</strong>
-          <span>{stageLabel(stage.stage)} · 修订 {stage.revision || "-"}</span>
-        </div>
-      </header>
-
       <aside className="workspace-navigation-column">
         <Link className="workspace-project-back" to="/projects">制作项目</Link>
         <div className="workspace-project-identity">
@@ -711,15 +623,6 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
           setImpactDraft({ request, issueLabel, description, trigger });
         }}
       />
-
-      {drawerOpen ? (
-        <NavigationDrawer
-          project={project}
-          selectedStage={selectedStage}
-          returnFocusRef={drawerTriggerRef}
-          onClose={() => setDrawerOpen(false)}
-        />
-      ) : null}
 
       {impactDraft ? (
         <ImpactDialog

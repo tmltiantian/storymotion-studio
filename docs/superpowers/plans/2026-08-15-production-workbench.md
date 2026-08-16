@@ -585,7 +585,7 @@ Video controls include frame step, 0.5x/1x playback, mute, dialogue-only, candid
 
 Run: `cd sites/storymotion-studio && npm test -- --run src/stages src/jobs && npx playwright test tests/workbench-media.spec.ts`
 
-Expected: all pass at desktop and mobile viewports.
+Expected: all pass in the local desktop web viewport.
 
 - [ ] **Step 5: Commit**
 
@@ -718,9 +718,9 @@ Expected: launcher import or flow fails before implementation.
 
 Start Uvicorn and Vite as child processes, print both local URLs, stop both on SIGINT/SIGTERM, and never print environment values. Document project creation, approval presets, local repair, test-shot gate, and works migration.
 
-- [ ] **Step 4: Perform real browser QA at desktop and mobile sizes**
+- [ ] **Step 4: Perform real browser QA for the local desktop workbench**
 
-Use Playwright screenshots at `1440x900`, `1024x768`, and `390x844`. Verify no overlap, no clipped text, stable media aspect ratios, keyboard navigation, visible focus, error states, empty states, and the full create/review/repair flow. Inspect browser console and network failures.
+Use Playwright screenshots at `1440x900`. Verify no overlap, no clipped text, stable media aspect ratios, keyboard navigation, visible focus, error states, empty states, and the full create/review/repair flow. Inspect browser console and network failures. Phone and tablet layouts are outside the local-workbench delivery scope.
 
 - [ ] **Step 5: Remove old site only after catalog and browser verification**
 

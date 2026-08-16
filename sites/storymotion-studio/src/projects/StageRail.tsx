@@ -80,20 +80,13 @@ export function ProjectStageMiniRail({ project }: { project: ProjectDetail }) {
 export function StageRail({
   project,
   selectedStage,
-  inDrawer = false,
-  onNavigate,
 }: {
   project: ProjectDetail;
   selectedStage: StageName;
-  inDrawer?: boolean;
-  onNavigate?: () => void;
 }) {
   const records = new Map(project.stages.map((stage) => [stage.stage, stage]));
   return (
-    <nav
-      className={inDrawer ? "workspace-stage-nav drawer-stage-nav" : "workspace-stage-nav"}
-      aria-label="项目阶段"
-    >
+    <nav className="workspace-stage-nav" aria-label="项目阶段">
       <ol>
         {STAGES.map((item) => {
           const stage = records.get(item.name);
@@ -107,7 +100,6 @@ export function StageRail({
                 aria-label={accessibleLabel}
                 aria-current={current ? "step" : undefined}
                 title={accessibleLabel}
-                onClick={onNavigate}
               >
                 <span className="workspace-stage-index">{item.number}</span>
                 <span className="workspace-stage-copy">

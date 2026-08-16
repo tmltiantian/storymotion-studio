@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -138,6 +139,32 @@ def test_clean_release_export_requires_a_clean_tracked_head(tmp_path: Path) -> N
         export_clean_release(source, tmp_path / "clean-release")
 
 
+def test_clean_release_export_cli_runs_from_repository_root(tmp_path: Path) -> None:
+    source = _repository(tmp_path)
+    (source / "README.md").write_text("sanitized release\n", encoding="utf-8")
+    (source / "scripts").mkdir()
+    for name in ("export_clean_release.py", "release_security.py"):
+        (source / "scripts" / name).write_bytes((Path("scripts") / name).read_bytes())
+    _commit(source, "add release tools")
+    destination = tmp_path / "clean-release"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/export_clean_release.py",
+            str(destination),
+            "--source",
+            str(source),
+        ],
+        cwd=source,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert _git(destination, "rev-list", "--count", "--all") == "1"
+
+
 def test_current_operator_docs_have_no_retired_runtime_or_machine_paths() -> None:
     current_docs = (
         Path("README.md"),
@@ -153,13 +180,11 @@ def test_current_operator_docs_have_no_retired_runtime_or_machine_paths() -> Non
 
 
 def test_tracked_text_has_no_retired_private_gateway_host() -> None:
-    for path in Path.cwd().rglob("*"):
-        if (
-            not path.is_file()
-            or {".git", ".venv", "node_modules", "dist", "test-results"}
-            & set(path.parts)
-        ):
+    tracked = subprocess.check_output(["git", "ls-files", "-z"]).split(b"\0")
+    for raw_path in tracked:
+        if not raw_path:
             continue
+        path = Path(raw_path.decode("utf-8"))
         try:
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
