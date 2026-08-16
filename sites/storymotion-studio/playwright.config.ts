@@ -1,4 +1,4 @@
-import { defineConfig, devices } from "playwright/test";
+import { defineConfig } from "playwright/test";
 
 export default defineConfig({
   testDir: "./tests",
@@ -14,18 +14,6 @@ export default defineConfig({
     {
       name: "desktop",
       use: { viewport: { width: 1440, height: 900 } },
-    },
-    {
-      name: "tablet",
-      use: { viewport: { width: 1024, height: 768 } },
-    },
-    {
-      name: "mobile",
-      use: {
-        ...devices["iPhone 13"],
-        browserName: "chromium",
-        viewport: { width: 390, height: 844 },
-      },
     },
   ],
   webServer: [

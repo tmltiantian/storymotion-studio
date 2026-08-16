@@ -30,18 +30,14 @@ const navigation = [
   { to: "/settings", label: "设置", icon: Settings },
 ] as const;
 
-function PrimaryNavigation({ mobile = false }: { mobile?: boolean }) {
+function PrimaryNavigation() {
   return (
-    <nav
-      className={mobile ? "mobile-navigation" : "primary-navigation"}
-      aria-label="主导航"
-    >
+    <nav className="primary-navigation" aria-label="主导航">
       {navigation.map(({ to, label, icon: Icon }) => (
         <NavLink
           key={to}
           to={to}
           className={({ isActive }) => (isActive ? "is-active" : undefined)}
-          aria-label={mobile ? `${label}（移动端）` : undefined}
           title={label}
         >
           <Icon aria-hidden="true" size={17} strokeWidth={1.8} />
@@ -102,7 +98,6 @@ export function AppShell() {
       <main className="workbench-main">
         <Outlet />
       </main>
-      <PrimaryNavigation mobile />
     </div>
   );
 }

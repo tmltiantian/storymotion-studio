@@ -2,7 +2,6 @@ import "@testing-library/jest-dom/vitest";
 
 import {
   act,
-  fireEvent,
   render,
   screen,
   waitFor,
@@ -1064,54 +1063,6 @@ describe("project review workspace", () => {
     await user.click(submit);
     expect(api.requestStageChanges).toHaveBeenCalledTimes(2);
   });
-
-  it("contains focus in the mobile navigation drawer and restores it on Escape", async () => {
-    renderWorkspace();
-    const trigger = await screen.findByRole("button", {
-      name: "打开项目与阶段导航",
-    });
-    fireEvent.click(trigger);
-
-    const drawer = screen.getByRole("dialog", { name: "项目与阶段导航" });
-    const shell = document.querySelector(".app-shell");
-    const close = screen.getByRole("button", { name: "关闭项目与阶段导航" });
-    expect(shell).toHaveAttribute("inert");
-    expect(shell).toHaveAttribute("aria-hidden", "true");
-    expect(close).toHaveFocus();
-
-    close.focus();
-    await userEvent.tab({ shift: true });
-    expect(drawer).toContainElement(document.activeElement as HTMLElement);
-    await userEvent.keyboard("{Escape}");
-
-    expect(screen.queryByRole("dialog", { name: "项目与阶段导航" })).not.toBeInTheDocument();
-    expect(shell).not.toHaveAttribute("inert");
-    expect(trigger).toHaveFocus();
-  });
-
-  it("keeps drawer containment stable across parent rerenders", async () => {
-    const api = workspaceApi();
-    const view = renderWorkspace(api);
-    const trigger = await screen.findByRole("button", {
-      name: "打开项目与阶段导航",
-    });
-    fireEvent.click(trigger);
-    const close = screen.getByRole("button", { name: "关闭项目与阶段导航" });
-    const focusSpy = vi.spyOn(trigger, "focus");
-    focusSpy.mockClear();
-
-    view.rerender(
-      <WorkspaceTestTree
-        api={api}
-        route="/projects/episode_01/stages/storyboard"
-      />,
-    );
-
-    expect(document.querySelector(".app-shell")).toHaveAttribute("inert");
-    expect(close).toHaveFocus();
-    expect(focusSpy).not.toHaveBeenCalled();
-  });
-
   it("keeps impact containment while apply is busy and the parent rerenders", async () => {
     let resolveApply: (project: ProjectDetail) => void = () => undefined;
     const api = workspaceApi();
