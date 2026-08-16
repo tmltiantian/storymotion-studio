@@ -225,6 +225,14 @@ def create_workbench_app(service: WorkbenchService) -> FastAPI:
     async def projects() -> Any:
         return service.list_projects()
 
+    @app.get("/api/works")
+    async def works() -> Any:
+        return service.list_works()
+
+    @app.get("/api/works/{work_id}")
+    async def work_detail(work_id: str) -> Any:
+        return service.work_detail(_identifier(work_id))
+
     @app.post("/api/projects", status_code=202)
     async def create_project(body: CreateProjectBody) -> Any:
         return service.create_project_job(**body.model_dump())

@@ -49,6 +49,7 @@ from .video_preflight import (
     issue_generation_token,
 )
 from .video_provider import build_video_client, default_video_resolution
+from .work_catalog import CatalogArtifact, WorkRecord, build_work_catalog
 
 
 DEFAULT_FRONTEND_ORIGINS = (
@@ -79,6 +80,7 @@ _MEDIA_TYPES = {
     ".pdf": "application/pdf",
     ".png": "image/png",
     ".srt": "application/x-subrip; charset=utf-8",
+    ".svg": "image/svg+xml",
     ".txt": "text/plain; charset=utf-8",
     ".wav": "audio/wav",
     ".webm": "video/webm",
@@ -197,6 +199,7 @@ class WorkbenchService:
         *,
         runs_dir: str | Path | None = None,
         artifact_roots: Sequence[str | Path] = (),
+        archive_manifest: str | Path | None = None,
         frontend_origins: Sequence[str] = DEFAULT_FRONTEND_ORIGINS,
         config: Mapping[str, Any] | None = None,
         job_manager: JobManager | None = None,
@@ -222,6 +225,14 @@ class WorkbenchService:
             ) as anchor:
                 resolved_artifact_roots.append(anchor.canonical_path)
         self.artifact_roots = tuple(resolved_artifact_roots)
+        self.archive_manifest = (
+            Path(archive_manifest).expanduser()
+            if archive_manifest is not None
+            else self.workspace
+            / "output"
+            / "workbench_archive"
+            / "archive_manifest.json"
+        )
         self.frontend_origins = self._frontend_origins(frontend_origins)
         self.config = dict(config or {})
         self.jobs = job_manager or JobManager(self.workspace)
@@ -330,6 +341,93 @@ class WorkbenchService:
 
     def list_projects(self) -> list[dict[str, Any]]:
         return [self.project_detail(project_id) for project_id in self._project_ids()]
+
+    def _work_catalog(self):
+        archive = self.archive_manifest if self.archive_manifest.is_file() else None
+        return build_work_catalog(self.runs_dir, archive)
+
+    def _register_catalog_artifact(self, artifact: CatalogArtifact) -> _ArtifactRef:
+        with AnchoredDirectory.open(
+            artifact.path.parent, label="Catalog artifact root"
+        ) as root:
+            relative = root.relative_path(artifact.path)
+            parent = self._open_artifact_parent(root, relative)
+            try:
+                descriptor = os.open(
+                    relative.name,
+                    os.O_RDONLY | os.O_NOFOLLOW,
+                    dir_fd=parent,
+                )
+                try:
+                    metadata = os.fstat(descriptor)
+                    if not stat.S_ISREG(metadata.st_mode):
+                        raise KeyError(artifact.artifact_id)
+                finally:
+                    os.close(descriptor)
+            finally:
+                os.close(parent)
+            ref = _ArtifactRef(
+                artifact_id=artifact.artifact_id,
+                project_id="catalog",
+                root=root.canonical_path,
+                relative_path=relative,
+                name=artifact.name,
+                media_type=_media_type(artifact.name, artifact.media_type),
+            )
+        return ref
+
+    def _catalog_artifact_public(self, artifact: CatalogArtifact) -> dict[str, Any]:
+        ref = self._register_catalog_artifact(artifact)
+        payload = self._artifact_public(ref)
+        payload["sha256"] = artifact.sha256
+        payload["kind"] = artifact.kind
+        payload["viewer"]["size_bytes"] = artifact.size_bytes
+        return payload
+
+    @staticmethod
+    def _work_summary(work: WorkRecord) -> dict[str, Any]:
+        return {
+            "work_id": work.work_id,
+            "project_id": work.project_id,
+            "title": work.title,
+            "mode": work.mode,
+            "source": work.source,
+            "delivered_at": work.delivered_at,
+            "current_version": work.current_version,
+        }
+
+    def list_works(self) -> list[dict[str, Any]]:
+        return [self._work_summary(work) for work in self._work_catalog().works]
+
+    def work_detail(self, work_id: str) -> dict[str, Any]:
+        selected = _safe_identifier(work_id, "work_id")
+        work = self._work_catalog().find(selected)
+        versions = []
+        for version in work.versions:
+            versions.append(
+                {
+                    "version_id": version.version_id,
+                    "label": version.label,
+                    "created_at": version.created_at,
+                    "outputs": [
+                        self._catalog_artifact_public(artifact)
+                        for artifact in version.outputs
+                    ],
+                    "eval_reports": [
+                        self._catalog_artifact_public(artifact)
+                        for artifact in version.eval_reports
+                    ],
+                    **(
+                        {"iteration_summary": version.iteration_summary}
+                        if version.iteration_summary
+                        else {}
+                    ),
+                }
+            )
+        payload = {**self._work_summary(work), "versions": versions}
+        if work.cover is not None:
+            payload["cover"] = self._catalog_artifact_public(work.cover)
+        return payload
 
     def project_detail(self, project_id: str) -> dict[str, Any]:
         project = self._project_dir(project_id)
@@ -611,9 +709,7 @@ class WorkbenchService:
         name: str,
     ) -> tuple[_ArtifactRef, dict[str, Any]] | None:
         try:
-            _spec, package = self._load_project_records(
-                self._project_dir(project_id)
-            )
+            _spec, package = self._load_project_records(self._project_dir(project_id))
             record = next(item for item in package.stages if item.stage.value == stage)
         except (FileNotFoundError, KeyError, OSError, StopIteration, ValueError):
             return None
@@ -671,9 +767,7 @@ class WorkbenchService:
             if not isinstance(item, Mapping):
                 return None
             shot_id = str(item.get("shot_id") or "").strip()
-            speaker = str(
-                item.get("speaker_name") or item.get("speaker") or ""
-            ).strip()
+            speaker = str(item.get("speaker_name") or item.get("speaker") or "").strip()
             try:
                 start = float(item["start_seconds"])
                 end = float(item["end_seconds"])
@@ -713,9 +807,7 @@ class WorkbenchService:
             for row in rows
         ]
 
-    def _video_dialogues(
-        self, project_id: str, shot_id: str
-    ) -> list[dict[str, Any]]:
+    def _video_dialogues(self, project_id: str, shot_id: str) -> list[dict[str, Any]]:
         timings = self._registered_audio_timings(project_id)
         episode_record = self._registered_json(
             project_id,
@@ -841,7 +933,9 @@ class WorkbenchService:
             if shot_id not in known_shots or not isinstance(raw_path, str):
                 return None
             candidate = self._register_artifact(project_id, raw_path)
-            if candidate is None or not candidate.media_type.lower().startswith("video/"):
+            if candidate is None or not candidate.media_type.lower().startswith(
+                "video/"
+            ):
                 return None
             if candidate.artifact_id in bindings:
                 return None
@@ -919,6 +1013,12 @@ class WorkbenchService:
         registry: dict[str, _ArtifactRef] = {}
         with self._registry_lock:
             registry.update(self._job_artifacts)
+        try:
+            for artifact in self._work_catalog().artifacts():
+                ref = self._register_catalog_artifact(artifact)
+                registry[ref.artifact_id] = ref
+        except (FileNotFoundError, KeyError, OSError, TypeError, ValueError):
+            pass
         for project_id in self._project_ids():
             project = self._project_dir(project_id)
             _spec, package = self._load_project_records(project)
@@ -1100,34 +1200,102 @@ class WorkbenchService:
 
     def provider_status(self) -> dict[str, Any]:
         profile = self._load_provider_profile()
-        if profile is None:
-            return {"capabilities": {}}
-        provider_secrets = self._profile_redaction_values(profile)
+        provider_secrets = (
+            self._profile_redaction_values(profile) if profile is not None else ()
+        )
         capabilities: dict[str, dict[str, Any]] = {}
-        for name in ("text", "image", "video", "audio"):
-            capability = getattr(profile, name)
-            payload: dict[str, Any] = {
-                "provider": self._public_text(
-                    capability.provider, exact_values=provider_secrets
-                ),
-                "model": self._public_text(
-                    capability.model, exact_values=provider_secrets
-                ),
-                "ready": capability.ready,
-                "blockers": [
-                    self._public_text(item, exact_values=provider_secrets)
-                    for item in capability.blockers
-                ],
-                "enabled": capability.enabled,
-            }
-            if capability.supports_reference_images is not None:
-                payload["supports_reference_images"] = (
-                    capability.supports_reference_images
-                )
-            if capability.voice:
-                payload["voice_configured"] = True
-            capabilities[name] = payload
-        return {"capabilities": capabilities}
+        if profile is not None:
+            for name in ("text", "image", "video", "audio"):
+                capability = getattr(profile, name)
+                payload: dict[str, Any] = {
+                    "provider": self._public_text(
+                        capability.provider, exact_values=provider_secrets
+                    ),
+                    "model": self._public_text(
+                        capability.model, exact_values=provider_secrets
+                    ),
+                    "ready": capability.ready,
+                    "credential_present": bool(capability.api_key),
+                    "blockers": (
+                        []
+                        if not capability.blockers
+                        else ["服务尚未就绪，请检查本机配置。"]
+                    ),
+                    "enabled": capability.enabled,
+                }
+                if capability.supports_reference_images is not None:
+                    payload["supports_reference_images"] = (
+                        capability.supports_reference_images
+                    )
+                if capability.voice:
+                    payload["voice_configured"] = True
+                capabilities[name] = payload
+        episode = self.config.get("episodeDefaults")
+        episode_defaults = episode if isinstance(episode, Mapping) else {}
+        workbench = self.config.get("workbenchDefaults")
+        workbench_defaults = workbench if isinstance(workbench, Mapping) else {}
+        raw_voices = workbench_defaults.get("voiceMapping")
+        voice_mapping = raw_voices if isinstance(raw_voices, list) else []
+        public_voices = []
+        for item in voice_mapping:
+            if not isinstance(item, Mapping):
+                continue
+            public_voices.append(
+                {
+                    "role_id": self._public_text(
+                        str(item.get("role_id") or ""), exact_values=provider_secrets
+                    ),
+                    "role_name": self._public_text(
+                        str(item.get("role_name") or ""), exact_values=provider_secrets
+                    ),
+                    "personality": self._public_text(
+                        str(item.get("personality") or ""),
+                        exact_values=provider_secrets,
+                    ),
+                    "voice_name": self._public_text(
+                        str(item.get("voice_name") or ""), exact_values=provider_secrets
+                    ),
+                    "speed": self._public_text(
+                        str(item.get("speed") or ""), exact_values=provider_secrets
+                    ),
+                }
+            )
+        raw_fee_cap = workbench_defaults.get("feeCapYuan")
+        fee_cap = (
+            float(raw_fee_cap)
+            if isinstance(raw_fee_cap, (int, float)) and raw_fee_cap >= 0
+            else None
+        )
+        raw_concurrency = workbench_defaults.get("concurrency", 1)
+        concurrency = (
+            int(raw_concurrency)
+            if isinstance(raw_concurrency, int) and raw_concurrency > 0
+            else 1
+        )
+        return {
+            "capabilities": capabilities,
+            "defaults": {
+                "voice_mapping": public_voices,
+                "output": {
+                    "aspect_ratio": self._public_text(
+                        str(episode_defaults.get("targetAspectRatio") or "9:16"),
+                        exact_values=provider_secrets,
+                    ),
+                    "resolution": self._public_text(
+                        str(episode_defaults.get("targetResolution") or "1080x1920"),
+                        exact_values=provider_secrets,
+                    ),
+                    "fps": int(episode_defaults.get("targetFps") or 30),
+                    "target_duration_seconds": int(
+                        episode_defaults.get("targetDurationSeconds") or 75
+                    ),
+                },
+                "generation": {
+                    "concurrency": concurrency,
+                    "fee_cap_yuan": fee_cap,
+                },
+            },
+        }
 
     def _load_provider_profile(self) -> ProviderProfile | None:
         loader = self._provider_profile_loader
