@@ -77,6 +77,7 @@ def _port_is_free(host: str, port: int) -> bool:
     family = socket.AF_INET6 if host == "::1" else socket.AF_INET
     probe = socket.socket(family, socket.SOCK_STREAM)
     try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind((host, port))
     except OSError:
         return False

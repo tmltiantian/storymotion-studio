@@ -62,6 +62,24 @@ def test_launcher_skips_ports_that_are_already_occupied():
     assert config.api_port != config.web_port
 
 
+def test_launcher_reuses_requested_port_after_previous_listener_closes():
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = int(listener.getsockname()[1])
+
+    client = socket.create_connection(("127.0.0.1", port))
+    connection, _ = listener.accept()
+    connection.close()
+    client.recv(1)
+    client.close()
+    listener.close()
+
+    config = build_launch_config(api_port=0, web_port=port)
+
+    assert config.web_port == port
+
+
 @pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.2", "example.test"])
 def test_launcher_rejects_non_loopback_hosts(host: str):
     with pytest.raises(ValueError, match="loopback"):
