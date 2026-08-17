@@ -61,6 +61,7 @@ function stageFixture(
     executor: "pipeline.storyboard",
     blocked_reasons: [],
     error: "",
+    presentation: null,
     review_evidence: [{ artifact_id: evidence.artifact_id, label: "阶段成果 1" }],
     artifacts: [evidence],
     active_run_job: null,
@@ -343,13 +344,14 @@ describe("project review workspace", () => {
     const passed = stageFixture({
       stage: "concept",
       revision: 1,
-      executor: "generic.concept",
-      artifacts: [{
-        artifact_id: "art_concept",
-        name: "concept.json",
-        media_type: "application/json",
-        media_url: "/api/media/art_concept",
-      }],
+      presentation: {
+        stage: "concept",
+        state: "ready",
+        title: "雨夜来电",
+        premise: "一个深夜电话改变了她的选择。",
+        characters: [{ name: "阿眠", role: "主角", description: "谨慎但好奇" }],
+      },
+      artifacts: [],
     });
     const initialProject = projectFixture(pending, {
       next_stage: "concept",
@@ -384,7 +386,8 @@ describe("project review workspace", () => {
     await user.click(await screen.findByRole("button", { name: "运行概念阶段" }));
 
     expect(client.runStage).toHaveBeenCalledWith("episode_01", "concept", { enable_live: false });
-    expect((await screen.findAllByText("concept.json"))[0]).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "雨夜来电" })).toBeVisible();
+    expect(screen.queryByText("concept.json")).not.toBeInTheDocument();
     expect(screen.getAllByText("等待确认")[0]).toBeVisible();
   });
 
@@ -520,6 +523,23 @@ describe("project review workspace", () => {
 
     expect(open).toHaveAttribute("href", "/api/media/art_storyboard_preview");
     expect(image.compareDocumentPosition(review) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("renders creator-facing stage content before remaining media artifacts", async () => {
+    const selected = stageFixture({
+      presentation: {
+        stage: "storyboard",
+        state: "ready",
+        title: "门外",
+        shots: [{ index: 1, title: "门外", action: "她停下。" }],
+      },
+    });
+    renderWorkspace(workspaceApi(selected, projectFixture(selected)));
+
+    const title = await screen.findByRole("heading", { name: "门外" });
+    const image = screen.getByRole("img", { name: "storyboard-preview.png" });
+
+    expect(title.compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("runs the paid video flow once and recovers the persisted job on remount", async () => {
@@ -745,7 +765,22 @@ describe("project review workspace", () => {
 
   it("approves a JSON-only stage from opaque review evidence", async () => {
     const selected = {
-      ...stageFixture({ stage: "script", artifacts: [] }),
+      ...stageFixture({
+        stage: "script",
+        artifacts: [],
+        presentation: {
+          stage: "script",
+          state: "ready",
+          title: "雨夜来电",
+          characters: [{ name: "阿眠", role: "主角" }],
+          shots: [{
+            index: 1,
+            title: "门外",
+            action: "她停在门边听见铃声。",
+            dialogue: [{ speaker: "阿眠", text: "谁？" }],
+          }],
+        },
+      }),
       review_evidence: [
         { artifact_id: "art_script_internal", label: "阶段成果 1" },
       ],
@@ -754,6 +789,7 @@ describe("project review workspace", () => {
     const user = userEvent.setup();
     renderWorkspace(api, "/projects/episode_01/stages/script");
 
+    expect(await screen.findByRole("heading", { name: "雨夜来电" })).toBeVisible();
     await user.type(await screen.findByRole("textbox", { name: "确认说明" }), "剧本已核对。");
     expect(screen.getByRole("checkbox", { name: "阶段成果 1" })).toBeChecked();
     expect(screen.queryByText("art_script_internal")).not.toBeInTheDocument();

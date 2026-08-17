@@ -1,6 +1,5 @@
 import {
   AlertCircle,
-  FolderOpen,
   LoaderCircle,
   Play,
   RefreshCw,
@@ -28,6 +27,7 @@ import type {
 import { STAGES } from "../app/AppShell";
 import { JobProgress } from "../jobs/JobProgress";
 import { VideoPreflight } from "../jobs/VideoPreflight";
+import { StagePresentationView } from "../stages/StagePresentation";
 import { StageViewer } from "../stages/StageViewer";
 import { ImpactDialog } from "./ImpactDialog";
 import { ReviewPanel, type ReviewIssueDraft } from "./ReviewPanel";
@@ -119,10 +119,9 @@ function ArtifactWorkspace({
     <section className="artifact-workspace" aria-labelledby="artifact-workspace-title">
       <div className="artifact-heading">
         <div>
-          <p className="eyebrow">STAGE ARTIFACTS</p>
+          <p className="eyebrow">阶段成果</p>
           <h1 id="artifact-workspace-title">{stageLabel(stage.stage)}成果</h1>
         </div>
-        <code>{stage.executor || "-"}</code>
       </div>
 
       {stage.error ? (
@@ -132,18 +131,15 @@ function ArtifactWorkspace({
         </div>
       ) : null}
 
-      {stage.artifacts.length === 0 ? (
-        <div className="artifact-empty">
-          <FolderOpen aria-hidden="true" size={22} />
-          <strong>当前阶段没有可查看的成果</strong>
-        </div>
-      ) : (
+      <StagePresentationView presentation={stage.presentation} />
+
+      {stage.artifacts.length > 0 ? (
         <StageViewer
           stage={stage.stage}
           artifacts={stage.artifacts}
           onIssueAtTime={onIssueAtTime}
         />
-      )}
+      ) : null}
     </section>
   );
 }
