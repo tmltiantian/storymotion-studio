@@ -518,7 +518,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
         <Link className="workspace-project-back" to="/projects">制作项目</Link>
         <div className="workspace-project-identity">
           <strong>{project.title}</strong>
-          <code>{project.project_id}</code>
+          <span>{project.project_id}</span>
         </div>
         <StageRail project={project} selectedStage={selectedStage} />
       </aside>

@@ -150,7 +150,7 @@ export function ReviewPanel({
           <p className="eyebrow">REVIEW</p>
           <h2 id="review-panel-title">审核检查</h2>
         </div>
-        <code>修订 {stage.revision || "-"}</code>
+        <span className="review-revision">修订 {stage.revision || "-"}</span>
       </div>
 
       <dl className="stage-state-pair">

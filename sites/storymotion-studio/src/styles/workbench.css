@@ -1339,7 +1339,7 @@
   line-height: 1.4;
 }
 
-.workspace-project-identity code {
+.workspace-project-identity span {
   overflow: hidden;
   color: var(--steel);
   font-size: 9px;
@@ -2206,7 +2206,7 @@
   font-size: 15px;
 }
 
-.review-heading code {
+.review-revision {
   color: var(--steel);
   font-size: 9px;
 }

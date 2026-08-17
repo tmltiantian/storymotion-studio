@@ -54,7 +54,15 @@ const selectedStage = {
   executor: "generic.video",
   blocked_reasons: [],
   error: "",
+  presentation: {
+    state: "ready",
+    stage: "video",
+    production_ready: true,
+    clip_count: 2,
+  },
+  review_evidence: [],
   artifacts: videoArtifacts,
+  active_run_job: null,
 };
 
 const project = {
@@ -178,7 +186,7 @@ async function interceptWorkbench(page: Page) {
   return { generationCalls: () => generationCalls };
 }
 
-test("video inspection controls remain usable and unobstructed", async ({ page }) => {
+test("video inspection controls remain usable and unobstructed", async ({ page }, testInfo) => {
   const intercepted = await interceptWorkbench(page);
   await page.goto("/projects/episode_01/stages/video");
 
@@ -215,6 +223,8 @@ test("video inspection controls remain usable and unobstructed", async ({ page }
     ));
   });
   expect(overlaps).toBe(false);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: testInfo.outputPath("video-media-inspection.png") });
 
   await expect(page.getByText("视频生成预检")).toBeVisible();
   await page.getByRole("button", { name: "确认费用与输入" }).click();
