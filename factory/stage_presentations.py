@@ -31,14 +31,21 @@ _TARGET_NUMBER_FIELDS = {
     "fps": ("fps",),
     "shots": ("shots",),
 }
-_SAFE_EVIDENCE_KEYS = (
-    "overlap_count",
-    "actual_seconds",
-    "expected_seconds",
-    "tolerance_seconds",
-    "expected",
-    "actual",
-)
+_EVIDENCE_LABELS = {
+    "overlap_count": ("重叠对白", "条"),
+    "expected_seconds": ("目标时长", "秒"),
+    "actual_seconds": ("实际时长", "秒"),
+    "tolerance_seconds": ("允许偏差", "秒"),
+    "expected": ("目标数量", ""),
+    "actual": ("实际数量", ""),
+    "operation_code": ("检查状态码", ""),
+}
+_SUMMARY_FINDING_LABELS = {
+    "cue_count": ("台词段数", "段"),
+    "overlap_count": ("重叠对白", "条"),
+    "expected_count": ("目标镜头数", ""),
+    "rendered_count": ("已生成镜头数", ""),
+}
 _PASS_STATUSES = {"approved", "auto_approved", "pass", "passed", "success"}
 
 
@@ -437,8 +444,9 @@ def _human_scalar(value: Any) -> str:
         return "是" if value else "否"
     if isinstance(value, str):
         return _public_string(value, maximum=200)
-    if _finite_number(value) is not None:
-        return _public_string(str(value), maximum=200)
+    number = _finite_number(value)
+    if number is not None:
+        return str(int(number)) if float(number).is_integer() else _public_string(str(number), maximum=200)
     return ""
 
 
@@ -446,12 +454,13 @@ def _evidence_findings(evidence: Any) -> list[str]:
     if not isinstance(evidence, Mapping):
         return []
     findings: list[str] = []
-    for key in _SAFE_EVIDENCE_KEYS:
+    for key, (label, unit) in _EVIDENCE_LABELS.items():
         if key not in evidence:
             continue
         value = _human_scalar(evidence[key])
         if value:
-            findings.append(f"{key}: {value}")
+            suffix = f" {unit}" if unit else ""
+            findings.append(f"{label}：{value}{suffix}")
     return findings
 
 
@@ -481,8 +490,10 @@ def _summary_check(
     name: str, values: tuple[tuple[str, Any], ...], passed: bool
 ) -> dict[str, Any]:
     findings = [
-        f"{key}: {value}"
+        f"{label}：{value}{f' {unit}' if unit else ''}"
         for key, raw_value in values
+        if (label_and_unit := _SUMMARY_FINDING_LABELS.get(key)) is not None
+        for label, unit in (label_and_unit,)
         if (value := _human_scalar(raw_value))
     ]
     result: dict[str, Any] = {
@@ -542,7 +553,7 @@ def _eval(documents: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
             )
             if values:
                 overlap = _finite_number(timing.get("overlap_count"))
-                checks.append(_summary_check("timing", values, overlap in (None, 0)))
+                checks.append(_summary_check("时间安排", values, overlap in (None, 0)))
         shots = _mapping(source.get("shots"))
         if shots is not None:
             values = tuple(
@@ -553,7 +564,7 @@ def _eval(documents: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
             if values:
                 expected = _finite_number(shots.get("expected_count"))
                 rendered = _finite_number(shots.get("rendered_count"))
-                checks.append(_summary_check("shots", values, expected in (None, rendered)))
+                checks.append(_summary_check("镜头完成情况", values, expected in (None, rendered)))
     else:
         for raw_check in _items(source.get("checks")):
             check = _mapping(raw_check)

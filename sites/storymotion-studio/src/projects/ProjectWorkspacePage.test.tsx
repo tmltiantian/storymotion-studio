@@ -34,6 +34,7 @@ const evidence: Artifact = {
   name: "storyboard-preview.png",
   media_type: "image/png",
   media_url: "/api/media/art_storyboard_preview",
+  kind: "image",
 };
 
 const stageNames: StageName[] = [
@@ -540,6 +541,23 @@ describe("project review workspace", () => {
     const image = screen.getByRole("img", { name: "storyboard-preview.png" });
 
     expect(title.compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("does not pass generic binary artifacts to the stage viewer", async () => {
+    const selected = stageFixture({
+      artifacts: [{
+        artifact_id: "art_delivery_package",
+        name: "delivery-package.zip",
+        media_type: "application/octet-stream",
+        media_url: "/api/media/art_delivery_package",
+        kind: "file",
+      }],
+    });
+    renderWorkspace(workspaceApi(selected, projectFixture(selected)));
+
+    expect(await screen.findByText("本阶段尚未生成可查看的成果")).toBeVisible();
+    expect(screen.queryByText("delivery-package.zip")).not.toBeInTheDocument();
+    expect(screen.queryByText("application/octet-stream")).not.toBeInTheDocument();
   });
 
   it("runs the paid video flow once and recovers the persisted job on remount", async () => {

@@ -3,6 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
+import type { StagePresentation } from "../api/types";
 import { StagePresentationView } from "./StagePresentation";
 
 describe("StagePresentationView", () => {
@@ -96,6 +97,46 @@ describe("StagePresentationView", () => {
 
   it("uses the creator-facing unavailable state", () => {
     render(<StagePresentationView presentation={{ stage: "assets", state: "unavailable" }} />);
+
+    expect(screen.getByText("本阶段尚未生成可查看的成果")).toBeVisible();
+  });
+
+  it("replaces malformed ready sections with the unavailable state", () => {
+    render(<StagePresentationView presentation={{
+      stage: "script",
+      state: "ready",
+      title: "雨夜来电",
+      characters: "bad",
+    } as unknown as StagePresentation} />);
+
+    expect(screen.getByText("本阶段尚未生成可查看的成果")).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "雨夜来电" })).not.toBeInTheDocument();
+  });
+
+  it("replaces malformed nested arrays with the unavailable state", () => {
+    render(<StagePresentationView presentation={{
+      stage: "storyboard",
+      state: "ready",
+      shots: [{ index: 1, dialogue: ["bad"] }],
+    } as unknown as StagePresentation} />);
+
+    expect(screen.getByText("本阶段尚未生成可查看的成果")).toBeVisible();
+  });
+
+  it("replaces an unknown presentation variant with the unavailable state", () => {
+    render(<StagePresentationView presentation={{
+      stage: "unknown",
+      state: "ready",
+    } as unknown as StagePresentation} />);
+
+    expect(screen.getByText("本阶段尚未生成可查看的成果")).toBeVisible();
+  });
+
+  it("replaces an unknown presentation state with the unavailable state", () => {
+    render(<StagePresentationView presentation={{
+      stage: "script",
+      state: "invalid",
+    } as unknown as StagePresentation} />);
 
     expect(screen.getByText("本阶段尚未生成可查看的成果")).toBeVisible();
   });
