@@ -429,6 +429,43 @@ def test_overflowing_numeric_values_are_omitted():
     }
 
 
+def test_aggregate_shot_duration_overflow_is_omitted():
+    result = build_stage_presentation(
+        "storyboard",
+        [
+            {
+                "project_id": "internal",
+                "title": "大时长",
+                "characters": [],
+                "shots": [
+                    {"index": 1, "duration_seconds": 1.7e308},
+                    {"index": 2, "duration_seconds": 1.7e308},
+                ],
+            }
+        ],
+    )
+
+    assert result["stage"] == "storyboard"
+    assert result["state"] == "ready"
+    assert "total_duration_seconds" not in result
+    assert all(math.isfinite(shot["duration_seconds"]) for shot in result["shots"])
+
+
+@pytest.mark.parametrize(
+    "episode_draft",
+    [None, "malformed"],
+)
+def test_recognized_script_with_missing_or_malformed_episode_is_unavailable(episode_draft):
+    source = {"schema_version": "motion-comic-factory.script.v1"}
+    if episode_draft is not None:
+        source["episode_draft"] = episode_draft
+
+    assert build_stage_presentation("script", [source]) == {
+        "stage": "script",
+        "state": "unavailable",
+    }
+
+
 @pytest.mark.parametrize(
     ("stage", "documents"),
     [

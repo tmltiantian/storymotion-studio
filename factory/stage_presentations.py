@@ -200,6 +200,7 @@ def _episode_projection(root: Mapping[str, Any], stage: StageName) -> dict[str, 
     shots: list[dict[str, Any]] = []
     total_duration = 0.0
     has_duration = False
+    aggregate_is_finite = True
     for raw_shot in _items(root.get("shots")):
         shot = _mapping(raw_shot)
         if shot is None:
@@ -207,12 +208,16 @@ def _episode_projection(root: Mapping[str, Any], stage: StageName) -> dict[str, 
         projected, duration = _shot_projection(shot, character_names)
         if projected:
             shots.append(projected)
-        if duration is not None:
-            total_duration += duration
-            has_duration = True
+        if duration is not None and duration > 0 and aggregate_is_finite:
+            candidate_total = total_duration + duration
+            if math.isfinite(candidate_total):
+                total_duration = candidate_total
+                has_duration = True
+            else:
+                aggregate_is_finite = False
     if shots:
         fields["shots"] = shots
-    if has_duration:
+    if has_duration and aggregate_is_finite:
         fields["total_duration_seconds"] = total_duration
     return fields
 
@@ -266,8 +271,9 @@ def _script(documents: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
         return None
     root = _mapping(supported[0].get("episode_draft"))
     if root is None:
-        return _ready(StageName.SCRIPT, {})
-    return _ready(StageName.SCRIPT, _episode_projection(root, StageName.SCRIPT))
+        return None
+    fields = _episode_projection(root, StageName.SCRIPT)
+    return _ready(StageName.SCRIPT, fields) if fields else None
 
 
 def _is_episode_document(document: Mapping[str, Any]) -> bool:
