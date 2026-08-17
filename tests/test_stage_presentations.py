@@ -100,16 +100,18 @@ def test_narrative_presentation_suppresses_prompt_fragments_and_translates_known
     assert "wide dynamic orbit" not in serialized
 
 
-def test_concept_presentation_normalizes_only_creator_target_fields():
+def test_concept_presentation_localizes_actual_generic_artifact_fields():
     source = {
         "schema_version": "motion-comic-factory.concept.v1",
         "project_id": "secret",
         "title": "雨夜来电",
+        "mode": "original",
+        "source_kind": "idea",
         "premise": "一个深夜电话改变了她的选择。",
         "target": {
-            "target_duration_seconds": 42.0,
-            "target_aspect_ratio": "9:16",
-            "target_resolution": "1080x1920",
+            "duration_seconds": 42.0,
+            "aspect_ratio": "9:16",
+            "video_resolution": "1080x1920",
             "fps": 30,
             "shots": 8,
             "provider": "internal",
@@ -125,11 +127,12 @@ def test_concept_presentation_normalizes_only_creator_target_fields():
                 "voice_style": "清亮",
             }
         ],
-        "source_kind": "idea",
     }
 
     result = build_stage_presentation(StageName.CONCEPT, [source])
 
+    assert result["mode_label"] == "原创"
+    assert result["source_label"] == "创作构想"
     assert result["target"] == {
         "duration_seconds": 42.0,
         "aspect_ratio": "9:16",
@@ -142,6 +145,34 @@ def test_concept_presentation_normalizes_only_creator_target_fields():
     assert "source_kind" not in repr(result)
     assert "provider" not in repr(result)
     assert "prompt" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    ("mode", "source_kind", "mode_label", "source_label"),
+    [
+        ("novel", "novel", "小说改编", "小说原文"),
+        ("replica", "reference", "参考复刻", "参考素材"),
+    ],
+)
+def test_concept_presentation_localizes_supported_modes_and_sources(
+    mode, source_kind, mode_label, source_label
+):
+    result = build_stage_presentation(
+        "concept",
+        [
+            {
+                "schema_version": "motion-comic-factory.concept.v1",
+                "title": "方向",
+                "mode": mode,
+                "source_kind": source_kind,
+                "target": {},
+                "characters": [],
+            }
+        ],
+    )
+
+    assert result["mode_label"] == mode_label
+    assert result["source_label"] == source_label
 
 
 def test_storyboard_presentation_uses_episode_shape_and_safe_shots():
@@ -224,7 +255,7 @@ def test_assets_merge_character_manifest_and_review_without_provenance_details()
 
     assert result["production_ready"] is True
     assert result["characters"] == [
-        {"name": "阿眠", "ready": True, "source_status": "confirmed"}
+        {"name": "阿眠", "ready": True}
     ]
     assert result["review_items"] == ["角色身份稳定"]
     serialized = json.dumps(result, ensure_ascii=False)
@@ -276,7 +307,7 @@ def test_audio_presentation_aggregates_timings_and_omits_dialogue_ids():
     assert "/private" not in serialized
 
 
-def test_video_edit_and_delivery_presentations_are_allow_listed():
+def test_video_edit_and_delivery_presentations_omit_unused_technical_enums():
     video = {
         "schema_version": "motion-comic-factory.video.v1",
         "generation_mode": "local_storyboard_preview",
@@ -299,7 +330,18 @@ def test_video_edit_and_delivery_presentations_are_allow_listed():
         "master": "/private/master.mp4",
         "sha256": "a" * 64,
         "publication_status": "REVIEW_REQUIRED",
-        "eval_evidence": {"status": "approved", "automatic_passed": True},
+        "eval_evidence": {
+            "schema_version": "motion-comic-factory.delivery-eval-evidence.v1",
+            "stage": "eval",
+            "policy": "manual",
+            "state": "approved",
+            "revision": 3,
+            "stage_revision": {"executor": "generic.eval"},
+            "stage_revision_sha256": "b" * 64,
+            "reports": [{"path": "stages/eval/eval_result.json", "sha256": "c" * 64}],
+            "review": {"snapshot": {"note": "通过"}, "sha256": "d" * 64},
+            "snapshot_sha256": "e" * 64,
+        },
     }
 
     video_result = build_stage_presentation("video", [video])
@@ -309,23 +351,17 @@ def test_video_edit_and_delivery_presentations_are_allow_listed():
     assert video_result == {
         "stage": "video",
         "state": "ready",
-        "generation_mode": "local_storyboard_preview",
         "clip_count": 2,
-        "cloud_generated": False,
-        "lip_sync": "local_preview",
     }
     assert edit_result == {
         "stage": "edit",
         "state": "ready",
         "duration_seconds": 12.5,
-        "transition": "cut_on_action_or_audio_motivation",
-        "assembly": "normalized_cfr_trim_pad",
         "subtitle_ready": True,
     }
     assert delivery_result == {
         "stage": "deliver",
         "state": "ready",
-        "publication_status": "REVIEW_REQUIRED",
         "quality_approved": True,
     }
     serialized = json.dumps((video_result, edit_result, delivery_result))
@@ -333,7 +369,7 @@ def test_video_edit_and_delivery_presentations_are_allow_listed():
         assert internal not in serialized
 
 
-def test_eval_presentation_supports_generic_checks_and_allow_lists_fields():
+def test_eval_presentation_maps_generic_checks_without_copying_arbitrary_strings():
     source = {
         "schema_version": "motion-comic-factory.eval.v1",
         "status": "REVIEW_REQUIRED",
@@ -343,11 +379,17 @@ def test_eval_presentation_supports_generic_checks_and_allow_lists_fields():
                 "name": "对白同步",
                 "severity": "warning",
                 "passed": True,
-                "findings": ["节奏自然", {"private": "drop"}],
+                "findings": ["/private/eval.log", "backend exploded", {"private": "drop"}],
                 "source_object": {"project_id": "secret"},
-            }
+            },
+            {
+                "name": "/private/unknown-check",
+                "severity": "error",
+                "passed": False,
+                "findings": ["secret path /private/nope"],
+            },
         ],
-        "review_dimensions": ["声音", "画面", {"private": "drop"}],
+        "review_dimensions": ["声音", "/private/review", {"private": "drop"}],
     }
 
     result = build_stage_presentation("eval", [source])
@@ -356,29 +398,69 @@ def test_eval_presentation_supports_generic_checks_and_allow_lists_fields():
         "stage": "eval",
         "state": "ready",
         "passed": True,
-        "status": "REVIEW_REQUIRED",
         "checks": [
             {
                 "name": "对白同步",
                 "severity": "warning",
                 "passed": True,
-                "findings": ["节奏自然"],
-            }
+            },
+            {
+                "name": "检查项目 2",
+                "severity": "error",
+                "passed": False,
+            },
         ],
-        "review_dimensions": ["声音", "画面"],
+        "review_dimensions": ["声音", "检查范围 2"],
     }
     assert "source_object" not in repr(result)
     assert "project_id" not in repr(result)
 
 
-def test_eval_v2_maps_failures_and_known_summaries_without_specialist_operation():
+@pytest.mark.parametrize("state", ["approved", "auto_approved"])
+def test_delivery_uses_real_eval_evidence_approval_state(state):
+    result = build_stage_presentation(
+        "deliver",
+        [
+            {
+                "schema_version": "motion-comic-factory.delivery.v1",
+                "publication_status": "REVIEW_REQUIRED",
+                "eval_evidence": {
+                    "schema_version": "motion-comic-factory.delivery-eval-evidence.v1",
+                    "stage": "eval",
+                    "policy": "automatic" if state == "auto_approved" else "manual",
+                    "state": state,
+                    "revision": 2,
+                    "stage_revision": {"executor": "generic.eval"},
+                    "stage_revision_sha256": "a" * 64,
+                    "reports": [
+                        {
+                            "path": "stages/eval/eval_result.json",
+                            "sha256": "b" * 64,
+                            "media_type": "application/json",
+                        }
+                    ],
+                    "snapshot_sha256": "c" * 64,
+                },
+            }
+        ],
+    )
+
+    assert result == {
+        "stage": "deliver",
+        "state": "ready",
+        "quality_approved": True,
+    }
+
+
+def test_eval_v2_maps_failure_codes_and_only_safe_numeric_evidence():
     source = {
         "schema_version": "motion-comic-factory.eval.v2",
         "status": "AUTOMATIC_FAILURE",
         "automatic_passed": False,
         "hard_failures": [
             {
-                "message": "对白重叠",
+                "code": "dialogue_overlap",
+                "message": "backend failed at /private/eval.log",
                 "evidence": {
                     "overlap_count": 2,
                     "actual_seconds": 8.0,
@@ -387,7 +469,12 @@ def test_eval_v2_maps_failures_and_known_summaries_without_specialist_operation(
                     "unknown_key": "drop",
                     "path": "/private/nope",
                 },
-            }
+            },
+            {
+                "code": "unknown_backend_code",
+                "message": "/private/unknown.log",
+                "evidence": {"actual_seconds": "not numeric", "expected": True},
+            },
         ],
         "timing": {"cue_count": 3, "overlap_count": 2, "private": "drop"},
         "shots": {"expected_count": 4, "rendered_count": 3, "ids": ["s1"]},
@@ -399,12 +486,17 @@ def test_eval_v2_maps_failures_and_known_summaries_without_specialist_operation(
 
     assert result["passed"] is False
     assert result["checks"][0] == {
-        "name": "对白重叠",
+        "name": "对白时间有重叠",
         "severity": "error",
         "passed": False,
-        "findings": ["重叠对白：2 条", "实际时长：8 秒", "检查状态码：OVERLAP_CHECK"],
+        "findings": ["重叠对白：2 条", "实际时长：8 秒"],
     }
-    assert {item["name"] for item in result["checks"][1:]} == {"时间安排", "镜头完成情况"}
+    assert result["checks"][1] == {
+        "name": "检查项目未通过",
+        "severity": "error",
+        "passed": False,
+    }
+    assert {item["name"] for item in result["checks"][2:]} == {"时间安排", "镜头完成情况"}
     serialized = repr(result)
     for technical_key in (
         "operation_code",
@@ -418,6 +510,43 @@ def test_eval_v2_maps_failures_and_known_summaries_without_specialist_operation(
         assert technical_key not in serialized
     assert "/private" not in repr(result)
     assert "s1" not in repr(result)
+    assert "OVERLAP_CHECK" not in repr(result)
+    assert "backend failed" not in repr(result)
+
+
+def test_dialogue_projection_localizes_known_emotions_and_drops_unsafe_rows():
+    source = {
+        "schema_version": "motion-comic-factory.script.v1",
+        "episode_draft": {
+            "title": "情绪",
+            "characters": [{"id": "c1", "name": "阿眠"}],
+            "shots": [
+                {
+                    "index": 1,
+                    "dialogue": [
+                        {"speaker_id": "narrator", "emotion": "narrating", "text": "雨停了。"},
+                        {"speaker_id": "c1", "emotion": "focused", "text": "继续。"},
+                        {"speaker_id": "c1", "emotion": "neutral", "text": "好。"},
+                        {"speaker": "system_enum", "emotion": "backend_error", "text": "不应出现"},
+                        {"speaker_id": "c1", "emotion": "focused"},
+                        {"speaker_id": "c1", "emotion": "focused", "text": "   "},
+                        {"speaker_id": "c1", "emotion": "focused", "text": {"bad": True}},
+                    ],
+                }
+            ],
+        },
+    }
+
+    result = build_stage_presentation("script", [source])
+
+    assert result["shots"][0]["dialogue"] == [
+        {"speaker": "旁白", "emotion": "叙述", "text": "雨停了。"},
+        {"speaker": "阿眠", "emotion": "专注", "text": "继续。"},
+        {"speaker": "阿眠", "emotion": "平静", "text": "好。"},
+    ]
+    serialized = json.dumps(result, ensure_ascii=False)
+    for leaked in ("narrating", "focused", "neutral", "system_enum", "backend_error"):
+        assert leaked not in serialized
 
 
 def test_malformed_optional_sections_and_nonfinite_numbers_keep_valid_sections():

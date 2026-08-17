@@ -352,4 +352,19 @@ describe("JobProgress recovery", () => {
     expect(await screen.findByText("生成失败")).toBeVisible();
     expect(screen.queryByRole("button", { name: "恢复生成" })).not.toBeInTheDocument();
   });
+
+  it("never renders a job ID or raw backend failure", async () => {
+    const failed = job("failed", {
+      error: "Provider failed at /private/jobs/11111111.json",
+    });
+
+    render(<JobProgress api={api(failed)} jobId={failed.job_id} connect={idleStream} />);
+
+    expect(await screen.findByText("生成失败")).toBeVisible();
+    expect(screen.getByText("生成过程中遇到问题，请恢复后重试。")).toBeVisible();
+    expect(document.body).not.toHaveTextContent("11111111");
+    expect(document.body).not.toHaveTextContent("Provider failed");
+    expect(document.body).not.toHaveTextContent("/private/jobs");
+    expect(document.querySelector("code")).toBeNull();
+  });
 });

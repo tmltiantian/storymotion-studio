@@ -38,6 +38,29 @@ export function authorizedArtifactUrl(artifact: Artifact): string | null {
   }
 }
 
+export function authorizedArtifactDownloadUrl(artifact: Artifact): string | null {
+  const downloadUrl = artifact.download_url;
+  if (!downloadUrl) return null;
+  try {
+    const base = typeof window === "undefined" ? "http://localhost" : window.location.origin;
+    const parsed = new URL(downloadUrl, base);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const downloadIndex = parts.lastIndexOf("download");
+    if (
+      downloadIndex < 1 ||
+      parts[downloadIndex - 1] !== "api" ||
+      downloadIndex !== parts.length - 2 ||
+      decodeURIComponent(parts[downloadIndex + 1] ?? "") !== artifact.artifact_id
+    ) {
+      return null;
+    }
+    if (parsed.origin !== base && !downloadUrl.startsWith("/")) return null;
+    return downloadUrl;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchArtifactText(
   url: string,
   signal: AbortSignal,

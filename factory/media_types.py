@@ -11,6 +11,7 @@ _SAFE_MEDIA_TYPES = frozenset(
         DEFAULT_MEDIA_TYPE,
         "application/json",
         "application/pdf",
+        "application/zip",
         "application/x-subrip",
         "audio/aac",
         "audio/flac",

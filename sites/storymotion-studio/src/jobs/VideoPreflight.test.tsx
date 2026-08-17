@@ -68,8 +68,11 @@ describe("VideoPreflight paid gate", () => {
     const client = api();
     render(<VideoPreflight api={client} projectId="episode_01" shotIds={["shot_02", "shot_03"]} />);
 
-    expect(await screen.findByText("shot_02、shot_03")).toBeVisible();
+    expect(await screen.findByText("已选择 2 个镜头")).toBeVisible();
     expect(screen.getByText("¥18.60")).toBeVisible();
+    expect(document.body).not.toHaveTextContent("shot_02");
+    expect(document.body).not.toHaveTextContent("cccccccccc");
+    expect(document.querySelector("code")).toBeNull();
     const batch = screen.getByRole("button", { name: "批量生成所选镜头" });
     expect(batch).toBeDisabled();
 
@@ -129,7 +132,7 @@ describe("VideoPreflight paid gate", () => {
     vi.mocked(client.confirmVideo).mockResolvedValue(confirmed(canonical));
     render(<VideoPreflight api={client} projectId="episode_01" shotIds={canonical.shot_ids} />);
 
-    await screen.findByText("shot_01、shot_02、shot_03、shot_04");
+    await screen.findByText("已选择 4 个镜头");
     await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
 
     expect(screen.getByRole("button", { name: "试生成所选镜头" })).toBeDisabled();
@@ -181,7 +184,7 @@ describe("VideoPreflight paid gate", () => {
     rerender(<VideoPreflight api={client} projectId="episode_01" shotIds={["shot_03"]} />);
     await act(async () => resolveConfirm(confirmed()));
 
-    await screen.findByText("shot_03");
+    await screen.findByText("已选择 1 个镜头");
     expect(screen.getByRole("button", { name: "批量生成所选镜头" })).toBeDisabled();
   });
 
@@ -199,7 +202,8 @@ describe("VideoPreflight paid gate", () => {
     await screen.findByText("¥18.60");
     await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
 
-    expect(await screen.findByText("分镜修订已变化")).toBeVisible();
+    expect(await screen.findByText("生成条件尚未满足，请重新检查当前阶段。")).toBeVisible();
+    expect(screen.queryByText("分镜修订已变化")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "确认费用与输入" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "批量生成所选镜头" })).toBeDisabled();
     await waitFor(() => expect(client.preflightVideo).toHaveBeenCalledTimes(2));

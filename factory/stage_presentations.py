@@ -25,7 +25,7 @@ SUPPORTED_SCHEMAS = {
 
 _TARGET_STRING_FIELDS = {
     "aspect_ratio": ("aspect_ratio", "target_aspect_ratio"),
-    "resolution": ("resolution", "target_resolution"),
+    "resolution": ("resolution", "target_resolution", "video_resolution"),
 }
 _TARGET_NUMBER_FIELDS = {
     "duration_seconds": ("duration_seconds", "target_duration_seconds"),
@@ -39,7 +39,6 @@ _EVIDENCE_LABELS = {
     "tolerance_seconds": ("允许偏差", "秒"),
     "expected": ("目标数量", ""),
     "actual": ("实际数量", ""),
-    "operation_code": ("检查状态码", ""),
 }
 _SUMMARY_FINDING_LABELS = {
     "cue_count": ("台词段数", "段"),
@@ -47,7 +46,55 @@ _SUMMARY_FINDING_LABELS = {
     "expected_count": ("目标镜头数", ""),
     "rendered_count": ("已生成镜头数", ""),
 }
-_PASS_STATUSES = {"approved", "auto_approved", "pass", "passed", "success"}
+_PASS_STATUSES = {"approved", "auto_approved"}
+_MODE_LABELS = {
+    "original": "原创",
+    "novel": "小说改编",
+    "replica": "参考复刻",
+}
+_SOURCE_LABELS = {
+    "idea": "创作构想",
+    "novel": "小说原文",
+    "reference": "参考素材",
+}
+_EMOTION_LABELS = {
+    "narrating": "叙述",
+    "focused": "专注",
+    "neutral": "平静",
+}
+_FAILURE_LABELS = {
+    "invalid_video": "成片文件检查未通过",
+    "missing_audio_stream": "成片缺少声音",
+    "duration_drift": "成片时长与剪辑不一致",
+    "dialogue_overlap": "对白时间有重叠",
+    "shot_count_mismatch": "镜头数量与分镜不一致",
+    "generation_failed": "视频生成未完成",
+    "specialist_review_failed": "候选视频检查未完成",
+    "no_reviewed_candidates": "尚未完成候选视频检查",
+    "no_video_candidates": "没有可供检查的视频候选",
+}
+_GENERIC_CHECK_LABELS = {
+    "对白同步": "对白同步",
+    "dialogue_sync": "对白同步",
+    "角色一致性": "角色一致性",
+    "character_consistency": "角色一致性",
+    "画面连续性": "画面连续性",
+    "visual_continuity": "画面连续性",
+    "声音质量": "声音质量",
+    "audio_quality": "声音质量",
+    "字幕同步": "字幕同步",
+    "subtitle_sync": "字幕同步",
+}
+_REVIEW_DIMENSION_LABELS = {
+    "声音": "声音",
+    "画面": "画面",
+    "连续性": "连续性",
+    "角色与场景一致性": "角色与场景一致性",
+    "动作物理合理性、肢体结构和道具接触连续性": "动作与道具连续性",
+    "口型、对白和字幕同步": "口型、对白和字幕同步",
+    "声音角色匹配、停顿、噪声和情绪自然度": "配音与声音自然度",
+    "转场动机、空间方向、节奏和观看舒适度": "转场、节奏和观看舒适度",
+}
 _KNOWN_CAMERA_LABELS = {
     "medium shot, slow push-in": "中景，缓慢推进",
     "close-up, slight handheld tension": "近景，轻微手持",
@@ -167,19 +214,21 @@ def _dialogue_projection(
         line = _mapping(raw_line)
         if line is None:
             continue
+        text = _public_string(line.get("text"))
+        if not text:
+            continue
         speaker_id = _public_string(line.get("speaker_id"))
         speaker = "旁白" if speaker_id == "narrator" else character_names.get(speaker_id, "")
         if not speaker:
-            speaker = _public_string(line.get("speaker"))
+            raw_speaker = _public_string(line.get("speaker"))
+            speaker = "旁白" if raw_speaker == "narrator" else _creator_chinese_string(raw_speaker)
         if not speaker:
             continue
-        item: dict[str, Any] = {"speaker": speaker}
-        emotion = _public_string(line.get("emotion"))
-        text = _public_string(line.get("text"))
+        item: dict[str, Any] = {"speaker": speaker, "text": text}
+        raw_emotion = _public_string(line.get("emotion"))
+        emotion = _EMOTION_LABELS.get(raw_emotion) or _creator_chinese_string(raw_emotion)
         if emotion:
             item["emotion"] = emotion
-        if text:
-            item["text"] = text
         result.append(item)
     return result
 
@@ -282,6 +331,12 @@ def _concept(documents: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
         value = _public_string(source.get(name))
         if value:
             fields[name] = value
+    mode_label = _MODE_LABELS.get(_public_string(source.get("mode")))
+    if mode_label:
+        fields["mode_label"] = mode_label
+    source_label = _SOURCE_LABELS.get(_public_string(source.get("source_kind")))
+    if source_label:
+        fields["source_label"] = source_label
     target = _target_projection(source)
     if target:
         fields["target"] = target
@@ -354,9 +409,6 @@ def _assets(documents: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
             if name:
                 item["name"] = name
             item["ready"] = character.get("production_ready") is True
-            source_status = _public_string(character.get("provenance_status"))
-            if source_status:
-                item["source_status"] = source_status
             if item:
                 characters.append(item)
         if characters:
@@ -428,19 +480,11 @@ def _video(documents: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
         return None
     source = supported[0]
     fields: dict[str, Any] = {}
-    generation_mode = _public_string(source.get("generation_mode"))
-    if generation_mode:
-        fields["generation_mode"] = generation_mode
     clips = source.get("clips")
     if isinstance(clips, (list, tuple)):
         fields["clip_count"] = len(clips)
     elif isinstance(source.get("clip_by_shot"), Mapping):
         fields["clip_count"] = len(source["clip_by_shot"])
-    if isinstance(source.get("cloud_generation_requested"), bool):
-        fields["cloud_generated"] = source["cloud_generation_requested"]
-    lip_sync = _public_string(source.get("lip_sync_policy"))
-    if lip_sync:
-        fields["lip_sync"] = lip_sync
     return _ready(StageName.VIDEO, fields)
 
 
@@ -453,22 +497,11 @@ def _edit(documents: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
     duration = _finite_float(source.get("duration_seconds"))
     if duration is not None:
         fields["duration_seconds"] = duration
-    for public_name, source_name in (
-        ("transition", "transition_policy"),
-        ("assembly", "assembly_policy"),
-    ):
-        value = _public_string(source.get(source_name))
-        if value:
-            fields[public_name] = value
     fields["subtitle_ready"] = bool(source.get("subtitles"))
     return _ready(StageName.EDIT, fields)
 
 
 def _human_scalar(value: Any) -> str:
-    if isinstance(value, bool):
-        return "是" if value else "否"
-    if isinstance(value, str):
-        return _public_string(value, maximum=200)
     number = _finite_number(value)
     if number is not None:
         return str(int(number)) if float(number).is_integer() else _public_string(str(number), maximum=200)
@@ -489,10 +522,14 @@ def _evidence_findings(evidence: Any) -> list[str]:
     return findings
 
 
-def _check_projection(source: Mapping[str, Any], *, default_severity: str = "info") -> dict[str, Any] | None:
-    name = _public_string(source.get("name")) or _public_string(source.get("message"))
-    if not name:
-        return None
+def _check_projection(
+    source: Mapping[str, Any],
+    *,
+    ordinal: int,
+    default_severity: str = "info",
+) -> dict[str, Any]:
+    raw_name = _public_string(source.get("name"))
+    name = _GENERIC_CHECK_LABELS.get(raw_name, f"检查项目 {ordinal}")
     severity = _public_string(source.get("severity"))
     if severity not in {"error", "warning", "info"}:
         severity = default_severity
@@ -501,13 +538,6 @@ def _check_projection(source: Mapping[str, Any], *, default_severity: str = "inf
         "severity": severity,
         "passed": source.get("passed") is True,
     }
-    findings = [
-        item
-        for raw_item in _items(source.get("findings"))
-        if (item := _public_string(raw_item))
-    ]
-    if findings:
-        result["findings"] = findings
     return result
 
 
@@ -547,19 +577,14 @@ def _eval(documents: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
         fields["passed"] = source["passed"]
     else:
         fields["passed"] = False
-    status = _public_string(source.get("status"))
-    if status:
-        fields["status"] = status
-
     checks: list[dict[str, Any]] = []
     if _schema(source) == "motion-comic-factory.eval.v2":
         for raw_failure in _items(source.get("hard_failures")):
             failure = _mapping(raw_failure)
             if failure is None:
                 continue
-            name = _public_string(failure.get("message"))
-            if not name:
-                continue
+            code = _public_string(failure.get("code"))
+            name = _FAILURE_LABELS.get(code, "检查项目未通过")
             check: dict[str, Any] = {
                 "name": name,
                 "severity": "error",
@@ -591,19 +616,22 @@ def _eval(documents: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
                 rendered = _finite_number(shots.get("rendered_count"))
                 checks.append(_summary_check("镜头完成情况", values, expected in (None, rendered)))
     else:
-        for raw_check in _items(source.get("checks")):
+        for ordinal, raw_check in enumerate(_items(source.get("checks")), start=1):
             check = _mapping(raw_check)
             if check is None:
                 continue
-            projected = _check_projection(check)
-            if projected:
-                checks.append(projected)
+            checks.append(_check_projection(check, ordinal=ordinal))
     if checks:
         fields["checks"] = checks
     review_dimensions = [
-        item
-        for raw_item in _items(source.get("review_dimensions"))
-        if (item := _public_string(raw_item))
+        _REVIEW_DIMENSION_LABELS.get(
+            _public_string(raw_item),
+            f"检查范围 {ordinal}",
+        )
+        for ordinal, raw_item in enumerate(
+            _items(source.get("review_dimensions")), start=1
+        )
+        if isinstance(raw_item, str) and _public_string(raw_item)
     ]
     if review_dimensions:
         fields["review_dimensions"] = review_dimensions
@@ -616,18 +644,11 @@ def _delivery(documents: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
         return None
     source = supported[0]
     fields: dict[str, Any] = {}
-    publication_status = _public_string(source.get("publication_status"))
-    if publication_status:
-        fields["publication_status"] = publication_status
     quality_approved = False
     evidence = _mapping(source.get("eval_evidence"))
     if evidence is not None:
-        automatic_passed = evidence.get("automatic_passed")
-        if isinstance(automatic_passed, bool):
-            quality_approved = automatic_passed
-        else:
-            status = _public_string(evidence.get("status")).lower()
-            quality_approved = status in _PASS_STATUSES
+        state = _public_string(evidence.get("state")).lower()
+        quality_approved = state in _PASS_STATUSES
     fields["quality_approved"] = quality_approved
     return _ready(StageName.DELIVER, fields)
 

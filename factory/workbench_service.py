@@ -102,6 +102,7 @@ _MEDIA_TYPES = {
     ".wav": "audio/wav",
     ".webm": "video/webm",
     ".webp": "image/webp",
+    ".zip": "application/zip",
     ".json": "application/json",
 }
 _ACTIVE_WORKERS: set[tuple[str, str]] = set()
@@ -741,9 +742,9 @@ class WorkbenchService:
     @staticmethod
     def _is_public_stage_artifact(ref: _ArtifactRef) -> bool:
         media_type = ref.media_type.split(";", 1)[0].lower()
-        return not (
-            media_type.startswith("text/")
-            or media_type in {"application/json", "application/x-subrip"}
+        return (
+            media_type.startswith(("image/", "audio/", "video/"))
+            or media_type in {"application/pdf", "application/zip"}
         )
 
     def _stage_documents(
@@ -979,6 +980,8 @@ class WorkbenchService:
             return "audio"
         if media_type.startswith("video/"):
             return "video"
+        if media_type in {"application/pdf", "application/zip"}:
+            return "export"
         if stage == "eval" and media_type == "application/json":
             return "eval"
         if media_type.startswith("text/") or media_type in {

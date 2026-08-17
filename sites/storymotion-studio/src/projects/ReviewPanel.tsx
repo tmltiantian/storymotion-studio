@@ -39,11 +39,11 @@ const issueCategories: ReadonlyArray<{
 const scopedCategories: Record<ScopedCategory, {
   stage: ImpactRequest["stage"];
   scope: ImpactRequest["scope"];
-  itemLabel?: string;
+  requiresItemSelection?: boolean;
 }> = {
-  dialogue: { stage: "script", scope: "dialogue", itemLabel: "对白 ID" },
-  character: { stage: "assets", scope: "character", itemLabel: "角色 ID" },
-  action: { stage: "storyboard", scope: "shot", itemLabel: "镜头 ID" },
+  dialogue: { stage: "script", scope: "dialogue", requiresItemSelection: true },
+  character: { stage: "assets", scope: "character", requiresItemSelection: true },
+  action: { stage: "storyboard", scope: "shot", requiresItemSelection: true },
   subtitle: { stage: "edit", scope: "subtitle_style" },
 };
 
@@ -110,10 +110,12 @@ export function ReviewPanel({
       if (!active) return;
       setChangesOpen(true);
       setCategory("overall");
+      const parsedShotNumber = issueDraft.shotId.match(/\d+/)?.[0];
+      const shotLabel = parsedShotNumber ? `第 ${Number(parsedShotNumber)} 镜` : "当前镜头";
       const marker = [
         "--- 视频时间标记 ---",
-        `镜头 ${issueDraft.shotId}`,
-        `候选成果 ${issueDraft.artifactId}`,
+        shotLabel,
+        "当前候选视频",
         `时间码 ${String(issueDraft.timeSeconds)} 秒`,
         "--- 标记结束 ---",
       ].join("\n");
@@ -143,7 +145,7 @@ export function ReviewPanel({
     reviewable &&
     Boolean(category) &&
     description.trim().length > 0 &&
-    !scoped?.itemLabel &&
+    !scoped?.requiresItemSelection &&
     (!scoped || scoped.stage === stage.stage) &&
     !pending;
   const selectedLabel = issueCategories.find((item) => item.id === category)?.label ?? "";
@@ -245,7 +247,7 @@ export function ReviewPanel({
                 {issueCategories.map((item) => (
                   <label key={item.id} className={
                     item.id !== "overall" && (
-                      scopedCategories[item.id].itemLabel ||
+                      scopedCategories[item.id].requiresItemSelection ||
                       scopedCategories[item.id].stage !== stage.stage
                     )
                       ? "issue-option-disabled"
@@ -262,15 +264,15 @@ export function ReviewPanel({
                       disabled={
                         pending ||
                         (item.id !== "overall" && (
-                          Boolean(scopedCategories[item.id].itemLabel) ||
+                          Boolean(scopedCategories[item.id].requiresItemSelection) ||
                           scopedCategories[item.id].stage !== stage.stage
                         ))
                       }
                     />
                     <span>
                       {item.label}
-                      {item.id !== "overall" && scopedCategories[item.id].itemLabel
-                        ? "（缺少可选项目 ID）"
+                      {item.id !== "overall" && scopedCategories[item.id].requiresItemSelection
+                        ? "（当前没有可选项目）"
                         : ""}
                     </span>
                   </label>

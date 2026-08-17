@@ -13,12 +13,17 @@ describe("StagePresentationView", () => {
       state: "ready",
       title: "雨夜来电",
       premise: "一个深夜电话改变了她的选择。",
-      target: { duration_seconds: 42, aspect_ratio: "9:16", shots: 8 },
+      mode_label: "原创",
+      source_label: "创作构想",
+      target: { duration_seconds: 42, aspect_ratio: "9:16", resolution: "1080x1920", shots: 8 },
       characters: [{ name: "阿眠", role: "主角", appearance: "短发", voice: "清亮" }],
     }} />);
 
     expect(screen.getByRole("heading", { name: "雨夜来电" })).toBeVisible();
     expect(screen.getByText("一个深夜电话改变了她的选择。")).toBeVisible();
+    expect(screen.getByText("原创")).toBeVisible();
+    expect(screen.getByText("创作构想")).toBeVisible();
+    expect(screen.getByText("1080x1920")).toBeVisible();
     expect(screen.getByText("短发")).toBeVisible();
   });
 
@@ -115,7 +120,7 @@ describe("StagePresentationView", () => {
     expect(screen.getByText("本阶段尚未生成可查看的成果")).toBeVisible();
   });
 
-  it("replaces malformed ready sections with the unavailable state", () => {
+  it("keeps valid root fields when an optional nested section is malformed", () => {
     render(<StagePresentationView presentation={{
       stage: "script",
       state: "ready",
@@ -123,18 +128,50 @@ describe("StagePresentationView", () => {
       characters: "bad",
     } as unknown as StagePresentation} />);
 
-    expect(screen.getByText("本阶段尚未生成可查看的成果")).toBeVisible();
-    expect(screen.queryByRole("heading", { name: "雨夜来电" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "雨夜来电" })).toBeVisible();
+    expect(screen.queryByText("本阶段尚未生成可查看的成果")).not.toBeInTheDocument();
   });
 
-  it("replaces malformed nested arrays with the unavailable state", () => {
+  it("filters malformed shots and dialogue while retaining valid nested entries", () => {
     render(<StagePresentationView presentation={{
       stage: "storyboard",
       state: "ready",
-      shots: [{ index: 1, dialogue: ["bad"] }],
+      title: "仍然可见",
+      shots: [
+        {
+          index: 1,
+          action: "继续前进。",
+          dialogue: [
+            { speaker: "旁白", text: "雨停了。" },
+            "bad",
+            { speaker: "system", text: 42 },
+          ],
+        },
+        "bad-shot",
+      ],
     } as unknown as StagePresentation} />);
 
-    expect(screen.getByText("本阶段尚未生成可查看的成果")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "仍然可见" })).toBeVisible();
+    expect(screen.getByText("继续前进。")).toBeVisible();
+    expect(screen.getByText("雨停了。")).toBeVisible();
+    expect(screen.queryByText("system")).not.toBeInTheDocument();
+    expect(screen.queryByText("本阶段尚未生成可查看的成果")).not.toBeInTheDocument();
+  });
+
+  it("filters malformed checks without hiding a valid EVAL result", () => {
+    render(<StagePresentationView presentation={{
+      stage: "eval",
+      state: "ready",
+      passed: false,
+      checks: [
+        { name: "对白同步", severity: "warning", passed: false, findings: ["重叠对白：2 条", 42] },
+        { name: 42, severity: "error", passed: false },
+      ],
+    } as unknown as StagePresentation} />);
+
+    expect(screen.getByText("对白同步")).toBeVisible();
+    expect(screen.getByText("重叠对白：2 条")).toBeVisible();
+    expect(screen.queryByText("本阶段尚未生成可查看的成果")).not.toBeInTheDocument();
   });
 
   it("replaces an unknown presentation variant with the unavailable state", () => {

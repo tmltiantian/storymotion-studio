@@ -146,6 +146,8 @@ test("runs the real offline production, review, repair, and recovery flow", asyn
   for (const stage of ["storyboard", "assets", "audio"] as const) {
     await runStage(page, projectId, stage);
     if (stage === "storyboard") {
+      await expect(page.locator("pre, code")).toHaveCount(0);
+      await expect(page.getByText(/narrating|focused|neutral|generation_mode|lip_sync/)).toHaveCount(0);
       await captureStageScreenshot(page, testInfo, "storyboard-stage-result");
     }
     await approveStage(page, stage);
@@ -153,6 +155,8 @@ test("runs the real offline production, review, repair, and recovery flow", asyn
 
   await page.goto(`/projects/${projectId}/stages/video`);
   await expect(page.getByText("MiniMax-H3")).toBeVisible();
+  await expect(page.locator("pre, code")).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText(/shot_[0-9]+|[a-f0-9]{32,64}/);
   const shots = page.getByRole("group", { name: "生成镜头" }).getByRole("checkbox");
   await expect(shots).toHaveCount(6);
   for (let index = 3; index < 6; index += 1) await shots.nth(index).uncheck();
@@ -199,9 +203,14 @@ test("runs the real offline production, review, repair, and recovery flow", asyn
   await runStage(page, projectId, "edit");
   await approveStage(page, "edit");
   await runStage(page, projectId, "eval");
+  await expect(page.locator("pre, code")).toHaveCount(0);
+  await expect(page.getByText(/AUTOMATIC_FAILURE|REVIEW_REQUIRED|generic\.eval|\/private\//)).toHaveCount(0);
   await captureStageScreenshot(page, testInfo, "eval-stage-result");
   await approveStage(page, "eval");
   await runStage(page, projectId, "deliver");
+  await expect(page.getByText("质量检查已通过", { exact: true })).toBeVisible();
+  await expect(page.getByText("质量检查待处理", { exact: true })).toHaveCount(0);
+  await expect(page.locator("pre, code")).toHaveCount(0);
   await captureStageScreenshot(page, testInfo, "delivery-stage-result");
   await approveStage(page, "deliver");
 

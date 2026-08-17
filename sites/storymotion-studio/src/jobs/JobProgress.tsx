@@ -250,13 +250,12 @@ export function JobProgress({
   const value = progress(state.job);
   const complete = state.job.status === "completed";
   return (
-    <section className={`job-progress job-${state.job.status}`} aria-labelledby={`job-${state.job.job_id}`}>
+    <section className={`job-progress job-${state.job.status}`} aria-label="作业进度">
       <div className="job-progress-heading">
-        <div>{complete ? <CheckCircle2 aria-hidden="true" size={17} /> : <LoaderCircle className={isTerminal(state.job) ? "" : "loading-icon"} aria-hidden="true" size={17} />}<strong id={`job-${state.job.job_id}`}>{statusLabel(state.job)}</strong></div>
-        <code>{state.job.job_id.slice(0, 8)}</code>
+        <div>{complete ? <CheckCircle2 aria-hidden="true" size={17} /> : <LoaderCircle className={isTerminal(state.job) ? "" : "loading-icon"} aria-hidden="true" size={17} />}<strong>{statusLabel(state.job)}</strong></div>
       </div>
       {value.total ? <div className="job-progress-meter"><span>已完成 {value.completed} / {value.total} 镜</span><progress max={value.total} value={value.completed}>{value.completed} / {value.total}</progress></div> : null}
-      {state.job.error ? <p className="job-error-text">{state.job.error}</p> : null}
+      {state.job.error ? <p className="job-error-text">{state.job.operation === "run_stage" ? "阶段运行遇到问题，请恢复后重试。" : "生成过程中遇到问题，请恢复后重试。"}</p> : null}
       {resumeRecovering ? <p className="job-resume-message" role="status">正在恢复作业状态</p> : null}
       {resumeMessage ? <p className="job-resume-message" role="alert">{resumeMessage}</p> : null}
       {state.job.status === "failed" && allowResume ? <button className="text-button" type="button" disabled={resumePending || resumeRecovering} onClick={() => void resume()}><RotateCcw aria-hidden="true" size={15} />{resumePending || resumeRecovering ? "正在恢复" : "恢复生成"}</button> : null}
