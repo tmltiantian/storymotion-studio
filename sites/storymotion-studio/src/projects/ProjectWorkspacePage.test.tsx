@@ -515,6 +515,20 @@ describe("project review workspace", () => {
     expect(screen.getByText("修订 4")).toBeVisible();
   });
 
+  it("keeps workspace identity and blocked reasons creator-safe", async () => {
+    const selected = stageFixture({
+      stage: "script",
+      blocked_reasons: ["Review is required after generic.script."],
+    });
+    renderWorkspace(workspaceApi(selected, projectFixture(selected)), "/projects/episode_01/stages/script");
+
+    await screen.findByText("请确认当前阶段成果后继续制作。");
+    expect(document.querySelector(".workspace-navigation-column")).not.toHaveTextContent("episode_01");
+    expect(screen.queryByText("Review is required after generic.script.")).not.toBeInTheDocument();
+    expect(screen.queryByText("REVIEW", { exact: true })).not.toBeInTheDocument();
+    expect(screen.getByText("阶段审核", { exact: true })).toBeVisible();
+  });
+
   it("renders stage artifacts through the inspectable viewer before review", async () => {
     renderWorkspace();
 

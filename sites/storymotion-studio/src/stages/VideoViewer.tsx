@@ -7,9 +7,11 @@ import { authorizedArtifactUrl } from "./viewerUtils";
 export function VideoViewer({
   artifacts,
   onIssueAtTime,
+  creatorLabel,
 }: {
   artifacts: Artifact[];
   onIssueAtTime?: (time: number, artifact: Artifact) => void;
+  creatorLabel?: (artifact: Artifact) => string;
 }) {
   const [selectedId, setSelectedId] = useState(artifacts[0]?.artifact_id ?? "");
   const [playing, setPlaying] = useState(false);
@@ -138,6 +140,7 @@ export function VideoViewer({
           ><Flag aria-hidden="true" size={15} />在当前时间标记问题</button>
         ) : null}
       </div>
+      <div className="video-viewer-caption" data-testid="active-video-caption"><strong>{creatorLabel?.(selected) ?? "视频片段"}</strong></div>
     </div>
   );
 }

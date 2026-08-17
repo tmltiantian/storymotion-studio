@@ -68,6 +68,20 @@ describe("StagePresentationView", () => {
     expect(rows[1]).toHaveTextContent("第 3 镜");
   });
 
+  it("avoids duplicate character roles and generated shot titles", () => {
+    render(<StagePresentationView presentation={{
+      stage: "script",
+      state: "ready",
+      characters: [{ name: "主角A", role: "主角A" }],
+      shots: [{ index: 1, title: "第 1 镜" }],
+    }} />);
+
+    expect(screen.getByRole("heading", { name: "主角A" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "主角A（主角A）" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "第 1 镜" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "第 1 镜 · 第 1 镜" })).not.toBeInTheDocument();
+  });
+
   it("renders media, quality, and delivery results as review information", () => {
     const { rerender } = render(<StagePresentationView presentation={{
       stage: "audio",

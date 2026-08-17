@@ -129,6 +129,14 @@ test("runs the real offline production, review, repair, and recovery flow", asyn
   await runStage(page, projectId, "script");
   await expect(page.getByRole("heading", { name: /剧本成果/ })).toBeVisible();
   await expect(page.getByText("主角A").first()).toBeVisible();
+  await expect(page.getByText("e2e-desktop", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Review is required after generic.script.", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("REVIEW", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("阶段审核", { exact: true })).toBeVisible();
+  await expect(page.getByText("请确认当前阶段成果后继续制作。", { exact: true })).toBeVisible();
+  await expect(page.getByText(/anime motion comic|medium shot, slow push-in/)).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "主角A（主角A）" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "第 1 镜 · 第 1 镜" })).toHaveCount(0);
   await expect(page.locator("pre, code")).toHaveCount(0);
   await expect(page.getByText(/schema_version|application\/json|manifest\.json/)).toHaveCount(0);
   await expect(page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).resolves.toBe(true);
