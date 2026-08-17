@@ -518,7 +518,7 @@ describe("project review workspace", () => {
   it("renders stage artifacts through the inspectable viewer before review", async () => {
     renderWorkspace();
 
-    const image = await screen.findByRole("img", { name: "storyboard-preview.png" });
+    const image = await screen.findByRole("img", { name: "角色或场景参考" });
     const open = screen.getByRole("link", { name: "查看原图" });
     const review = screen.getByRole("heading", { name: "审核检查" });
 
@@ -538,7 +538,7 @@ describe("project review workspace", () => {
     renderWorkspace(workspaceApi(selected, projectFixture(selected)));
 
     const title = await screen.findByRole("heading", { name: "门外" });
-    const image = screen.getByRole("img", { name: "storyboard-preview.png" });
+    const image = screen.getByRole("img", { name: "角色或场景参考" });
 
     expect(title.compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
