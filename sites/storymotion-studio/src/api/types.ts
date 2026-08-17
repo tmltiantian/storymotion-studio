@@ -58,6 +58,120 @@ export interface ReviewEvidence {
   label: string;
 }
 
+export interface CreatorCharacter {
+  name?: string;
+  role?: string;
+  description?: string;
+  appearance?: string;
+  voice?: string;
+}
+
+export interface CreatorDialogue {
+  speaker: string;
+  emotion?: string;
+  text: string;
+}
+
+export interface CreatorShot {
+  index?: number;
+  title?: string;
+  action?: string;
+  camera?: string;
+  duration_seconds?: number;
+  dialogue?: CreatorDialogue[];
+}
+
+export interface CreatorCheck {
+  name: string;
+  severity: "error" | "warning" | "info";
+  passed: boolean;
+  findings?: string[];
+}
+
+export interface CreatorTarget {
+  duration_seconds?: number;
+  aspect_ratio?: string;
+  resolution?: string;
+  fps?: number;
+  shots?: number;
+}
+
+interface ReadyPresentation {
+  state: "ready";
+}
+
+export interface ConceptPresentation extends ReadyPresentation {
+  stage: "concept";
+  title?: string;
+  premise?: string;
+  target?: CreatorTarget;
+  characters?: CreatorCharacter[];
+}
+
+export interface ScriptPresentation extends ReadyPresentation {
+  stage: "script";
+  title?: string;
+  total_duration_seconds?: number;
+  characters?: CreatorCharacter[];
+  shots?: CreatorShot[];
+}
+
+export interface StoryboardPresentation extends ReadyPresentation {
+  stage: "storyboard";
+  title?: string;
+  total_duration_seconds?: number;
+  characters?: CreatorCharacter[];
+  shots?: CreatorShot[];
+}
+
+export interface MediaStagePresentation extends ReadyPresentation {
+  stage: "assets" | "audio" | "video" | "edit";
+  production_ready?: boolean;
+  characters?: Array<{
+    name?: string;
+    ready?: boolean;
+  }>;
+  review_items?: string[];
+  dialogue_count?: number;
+  total_duration_seconds?: number;
+  speakers?: Array<{ name: string; line_count: number }>;
+  timings?: Array<{
+    speaker?: string;
+    text?: string;
+    start_seconds?: number;
+    end_seconds?: number;
+  }>;
+  clip_count?: number;
+  duration_seconds?: number;
+  subtitle_ready?: boolean;
+}
+
+export interface EvalPresentation extends ReadyPresentation {
+  stage: "eval";
+  passed: boolean;
+  checks?: CreatorCheck[];
+  review_dimensions?: string[];
+}
+
+export interface DeliverPresentation extends ReadyPresentation {
+  stage: "deliver";
+  quality_approved: boolean;
+}
+
+export interface UnavailablePresentation {
+  stage: StageName;
+  state: "unavailable";
+}
+
+export type StagePresentation =
+  | ScriptPresentation
+  | StoryboardPresentation
+  | ConceptPresentation
+  | MediaStagePresentation
+  | EvalPresentation
+  | DeliverPresentation
+  | UnavailablePresentation;
+
 export type ArtifactKind = "text" | "image" | "audio" | "video" | "eval" | "file";
 
 export interface DialogueTiming {
@@ -87,6 +201,7 @@ export interface StageDetail {
   executor: string;
   blocked_reasons: string[];
   error: string;
+  presentation: StagePresentation | null;
   review_evidence: ReviewEvidence[];
   artifacts: Artifact[];
   active_run_job: JobDetail | null;
