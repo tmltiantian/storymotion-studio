@@ -186,6 +186,82 @@ def test_media_route_rejects_raw_paths(client: TestClient):
     assert client.get("/api/media/../../.env").status_code in {400, 404}
 
 
+def test_stage_routes_present_creator_data_without_exposing_json_artifacts(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "runs" / "episode_01"
+    script = project / "stages" / "script" / "script.json"
+    audio = project / "stages" / "audio" / "voiceover.m4a"
+    video = project / "stages" / "video" / "episode.mp4"
+    script.parent.mkdir(parents=True)
+    audio.parent.mkdir(parents=True)
+    video.parent.mkdir(parents=True)
+    script.write_text(
+        json.dumps(
+            {
+                "schema_version": "motion-comic-factory.script.v1",
+                "project_id": "episode_01",
+                "episode_draft": {
+                    "title": "雨夜来电",
+                    "characters": [{"id": "char_01", "name": "阿眠"}],
+                    "shots": [],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    audio.write_bytes(b"audio")
+    video.write_bytes(b"video")
+    package = create_project(
+        project,
+        ProjectSpec(
+            project_id="episode_01",
+            title="Episode 01",
+            mode=ProjectMode.ORIGINAL,
+            input={"kind": "idea", "text": "Creator stage API"},
+            output_dir=project / "output",
+        ),
+    )
+    stages = tuple(
+        replace(item, state=StageState.PASSED, artifacts=(str(script),))
+        if item.stage.value == "script"
+        else replace(item, state=StageState.PASSED, artifacts=(str(audio),))
+        if item.stage.value == "audio"
+        else replace(item, state=StageState.PASSED, artifacts=(str(video),))
+        if item.stage.value == "video"
+        else item
+        for item in package.stages
+    )
+    (project / "production_package.json").write_text(
+        json.dumps(package.with_stages(stages).to_dict(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    api = TestClient(
+        create_workbench_app(
+            WorkbenchService(
+                tmp_path,
+                job_manager=JobManager(tmp_path),
+                provider_profile_loader=lambda: None,
+            )
+        )
+    )
+
+    script_response = api.get("/api/projects/episode_01/stages/script")
+    audio_response = api.get("/api/projects/episode_01/stages/audio")
+    video_response = api.get("/api/projects/episode_01/stages/video")
+
+    assert script_response.status_code == 200
+    assert script_response.json()["presentation"]["characters"] == [{"name": "阿眠"}]
+    assert script_response.json()["artifacts"] == []
+    assert "media_url" not in json.dumps(script_response.json(), ensure_ascii=False)
+    for response in (audio_response, video_response):
+        artifact = response.json()["artifacts"][0]
+        assert artifact["media_url"].startswith("/api/media/art_")
+        assert api.get(artifact["media_url"]).status_code == 200
+    assert api.get("/api/media/../../.env").status_code in {400, 404}
+
+
 def test_provider_status_never_returns_secrets(client: TestClient):
     payload = client.get("/api/settings/providers").json()
 

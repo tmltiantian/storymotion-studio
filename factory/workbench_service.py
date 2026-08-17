@@ -26,6 +26,7 @@ from .pipeline_contracts import (
     ProjectMode,
     ProjectSpec,
     StageName,
+    StageRecord,
 )
 from .pipeline_impact import (
     ChangeRequest,
@@ -45,6 +46,7 @@ from .provider_profile import ProviderProfile, resolve_provider_profile
 from .schema import episode_from_dict
 from .secure_posix import AnchoredDirectory
 from .shot_audio import write_shot_audio_assets
+from .stage_presentations import build_stage_presentation
 from .video_handoff import write_video_handoff
 from .video_preflight import (
     VideoGenerationRequest,
@@ -61,6 +63,7 @@ DEFAULT_FRONTEND_ORIGINS = (
 )
 _ARTIFACT_ID = re.compile(r"art_[0-9a-f]{32}")
 _JOB_ID = re.compile(r"[0-9a-f]{32}")
+_MAX_STAGE_DOCUMENT_BYTES = 1024 * 1024
 _EMBEDDED_PATH = re.compile(r"(?<![A-Za-z0-9:])/(?:[^\s,;:'\"]+/)*[^\s,;:'\"]+")
 _WINDOWS_PATH = re.compile(
     r"(?i)(?<![A-Za-z0-9])(?:[a-z]:[\\/][^\s,;'\"]+|\\+[^\s\\/]+(?:\\+[^\s,;'\"]+)+)"
@@ -624,26 +627,11 @@ class WorkbenchService:
             ):
                 active_run_jobs[stage_name] = self._job_public(job)
         stages = [
-            {
-                "stage": record.stage.value,
-                "execution_state": record.state.value,
-                "review_state": record.review_state.value,
-                "review_policy": record.review_policy.value,
-                "review_blocks_progress": record.review_blocks_progress,
-                "revision": record.revision,
-                "executor": record.executor,
-                "blocked_reasons": [
-                    self._public_text(item) for item in record.blocked_reasons
-                ],
-                "error": self._public_text(record.error),
-                "artifacts": [
-                    self._artifact_public(ref, stage=record.stage.value)
-                    for raw_path in record.artifacts
-                    if (ref := self._register_artifact(project_id, raw_path))
-                    is not None
-                ],
-                "active_run_job": active_run_jobs.get(record.stage.value),
-            }
+            self._stage_public(
+                project_id,
+                record,
+                active_run_job=active_run_jobs.get(record.stage.value),
+            )
             for record in package.stages
         ]
         next_record = next(
@@ -701,6 +689,114 @@ class WorkbenchService:
         target = StageName(stage)
         project = self.project_detail(project_id)
         return next(item for item in project["stages"] if item["stage"] == target.value)
+
+    def _stage_public(
+        self,
+        project_id: str,
+        record: StageRecord,
+        *,
+        active_run_job: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        return {
+            "stage": record.stage.value,
+            "execution_state": record.state.value,
+            "review_state": record.review_state.value,
+            "review_policy": record.review_policy.value,
+            "review_blocks_progress": record.review_blocks_progress,
+            "revision": record.revision,
+            "executor": record.executor,
+            "blocked_reasons": [
+                self._public_text(item) for item in record.blocked_reasons
+            ],
+            "error": self._public_text(record.error),
+            "presentation": self._stage_presentation(project_id, record),
+            "artifacts": [
+                self._artifact_public(ref, stage=record.stage.value)
+                for raw_path in record.artifacts
+                if (ref := self._register_artifact(project_id, raw_path)) is not None
+                and self._is_public_stage_artifact(ref)
+            ],
+            "active_run_job": active_run_job,
+        }
+
+    @staticmethod
+    def _is_public_stage_artifact(ref: _ArtifactRef) -> bool:
+        media_type = ref.media_type.split(";", 1)[0].lower()
+        return not (
+            media_type.startswith("text/")
+            or media_type in {"application/json", "application/x-subrip"}
+        )
+
+    def _stage_documents(
+        self,
+        project_id: str,
+        record: StageRecord,
+    ) -> tuple[dict[str, Any], ...]:
+        documents: list[dict[str, Any]] = []
+        for raw_path in record.artifacts:
+            ref = self._register_artifact(project_id, raw_path)
+            if (
+                ref is None
+                or ref.media_type.split(";", 1)[0].lower() != "application/json"
+            ):
+                continue
+            encoded = self._bounded_registered_read(ref, _MAX_STAGE_DOCUMENT_BYTES)
+            if encoded is None:
+                continue
+            try:
+                document = json.loads(encoded)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(document, Mapping):
+                documents.append(dict(document))
+        return tuple(documents)
+
+    def _stage_presentation(
+        self,
+        project_id: str,
+        record: StageRecord,
+    ) -> dict[str, Any] | None:
+        return build_stage_presentation(
+            record.stage,
+            self._stage_documents(project_id, record),
+        )
+
+    def _bounded_registered_read(
+        self,
+        ref: _ArtifactRef,
+        maximum: int,
+    ) -> bytes | None:
+        descriptor = -1
+        try:
+            with AnchoredDirectory.open(
+                ref.root, label="Registered stage artifact root"
+            ) as anchor:
+                parent = self._open_artifact_parent(anchor, ref.relative_path)
+                try:
+                    descriptor = os.open(
+                        ref.relative_path.name,
+                        os.O_RDONLY | os.O_NOFOLLOW,
+                        dir_fd=parent,
+                    )
+                    if (
+                        not stat.S_ISREG(os.fstat(descriptor).st_mode)
+                        or os.fstat(descriptor).st_size > maximum
+                    ):
+                        return None
+                    chunks: list[bytes] = []
+                    total = 0
+                    while chunk := os.read(descriptor, min(64 * 1024, maximum + 1)):
+                        total += len(chunk)
+                        if total > maximum:
+                            return None
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+                finally:
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                    os.close(parent)
+        except (FileNotFoundError, OSError, ValueError):
+            return None
 
     def video_workspace(self, project_id: str) -> dict[str, Any]:
         project = self._project_dir(project_id)

@@ -296,7 +296,16 @@ def service(project_workspace: tuple[Path, Path]) -> WorkbenchService:
         workspace,
         job_manager=manager,
         provider_profile_loader=_provider_profile,
+        dispatch=lambda callback: callback(),
     )
+
+
+def run_through(service: WorkbenchService, stage: str) -> None:
+    project = service._project_dir("episode_01")
+    update_stage(project, StageName.CONCEPT, StageState.PENDING)
+    submitted = service.submit_stage_run("episode_01", stage)
+
+    assert service.job_detail(submitted["job_id"])["status"] == "completed"
 
 
 def test_project_detail_contains_execution_review_and_opaque_artifacts(
@@ -309,6 +318,21 @@ def test_project_detail_contains_execution_review_and_opaque_artifacts(
     artifact_id = payload["stages"][0]["artifacts"][0]["artifact_id"]
     assert artifact_id.startswith("art_")
     assert "/" not in artifact_id
+
+
+def test_stage_detail_returns_presentation_without_internal_text_artifacts(
+    service: WorkbenchService,
+) -> None:
+    run_through(service, "script")
+    detail = service.stage_detail("episode_01", "script")
+
+    assert detail["presentation"]["stage"] == "script"
+    assert detail["presentation"]["characters"]
+    assert detail["artifacts"] == []
+    serialized = json.dumps(detail, ensure_ascii=False)
+    assert "schema_version" not in serialized
+    assert "manifest.json" not in serialized
+    assert "application/json" not in serialized
 
 
 def test_stage_contract_exposes_only_its_authoritative_active_run_job(
@@ -1199,13 +1223,24 @@ def test_generated_project_video_preflight_preserves_canonical_artifact_keys(
     for stage_name in ("concept", "script", "storyboard", "assets", "audio"):
         service.submit_stage_run("canonical_preflight", stage_name)
         detail = service.stage_detail("canonical_preflight", stage_name)
+        _spec, package = service._load_project_records(
+            service._project_dir("canonical_preflight")
+        )
+        record = next(item for item in package.stages if item.stage.value == stage_name)
         service.approve_stage(
             "canonical_preflight",
             stage_name,
             revision=detail["revision"],
             note="Approved by the local contract test.",
             evidence_artifact_ids=[
-                artifact["artifact_id"] for artifact in detail["artifacts"]
+                ref.artifact_id
+                for artifact in record.artifacts
+                if (
+                    ref := service._register_artifact(
+                        "canonical_preflight", artifact
+                    )
+                )
+                is not None
             ],
         )
 
