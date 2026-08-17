@@ -61,6 +61,7 @@ function stageFixture(
     executor: "pipeline.storyboard",
     blocked_reasons: [],
     error: "",
+    review_evidence: [{ artifact_id: evidence.artifact_id, label: "阶段成果 1" }],
     artifacts: [evidence],
     active_run_job: null,
     ...overrides,
@@ -80,6 +81,7 @@ function projectFixture(
       review_policy: index < 2 ? "automatic" : "manual",
       review_blocks_progress: false,
       revision: index < 2 ? 1 : 0,
+      review_evidence: [],
       artifacts: [],
     });
   });
@@ -739,6 +741,35 @@ describe("project review workspace", () => {
     expect(api.getProject).toHaveBeenCalledTimes(2);
     expect(api.getStage).toHaveBeenCalledTimes(2);
     expect(await screen.findByText("已确认")).toBeVisible();
+  });
+
+  it("approves a JSON-only stage from opaque review evidence", async () => {
+    const selected = {
+      ...stageFixture({ stage: "script", artifacts: [] }),
+      review_evidence: [
+        { artifact_id: "art_script_internal", label: "阶段成果 1" },
+      ],
+    } as StageDetail;
+    const api = workspaceApi(selected, projectFixture(selected));
+    const user = userEvent.setup();
+    renderWorkspace(api, "/projects/episode_01/stages/script");
+
+    await user.type(await screen.findByRole("textbox", { name: "确认说明" }), "剧本已核对。");
+    expect(screen.getByRole("checkbox", { name: "阶段成果 1" })).toBeChecked();
+    expect(screen.queryByText("art_script_internal")).not.toBeInTheDocument();
+    expect(screen.queryByText("script.json")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认通过" }));
+
+    expect(api.approveStage).toHaveBeenCalledWith(
+      "episode_01",
+      "script",
+      {
+        revision: 4,
+        note: "剧本已核对。",
+        evidence_artifact_ids: ["art_script_internal"],
+      },
+      expect.any(AbortSignal),
+    );
   });
 
   it("rejects a stale approval result and reloads the changed revision", async () => {

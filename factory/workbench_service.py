@@ -710,6 +710,7 @@ class WorkbenchService:
             ],
             "error": self._public_text(record.error),
             "presentation": self._stage_presentation(project_id, record),
+            "review_evidence": self._review_evidence(project_id, record),
             "artifacts": [
                 self._artifact_public(ref, stage=record.stage.value)
                 for raw_path in record.artifacts
@@ -718,6 +719,24 @@ class WorkbenchService:
             ],
             "active_run_job": active_run_job,
         }
+
+    def _review_evidence(
+        self,
+        project_id: str,
+        record: StageRecord,
+    ) -> list[dict[str, str]]:
+        evidence: list[dict[str, str]] = []
+        for raw_path in record.artifacts:
+            ref = self._register_artifact(project_id, raw_path)
+            if ref is None:
+                continue
+            evidence.append(
+                {
+                    "artifact_id": ref.artifact_id,
+                    "label": f"阶段成果 {len(evidence) + 1}",
+                }
+            )
+        return evidence
 
     @staticmethod
     def _is_public_stage_artifact(ref: _ArtifactRef) -> bool:

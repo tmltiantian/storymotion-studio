@@ -83,7 +83,7 @@ export function ReviewPanel({
 }) {
   const [approvalNote, setApprovalNote] = useState("");
   const [selectedEvidence, setSelectedEvidence] = useState<string[]>(
-    () => stage.artifacts.map((artifact) => artifact.artifact_id),
+    () => stage.review_evidence.map((evidence) => evidence.artifact_id),
   );
   const [changesOpen, setChangesOpen] = useState(false);
   const [category, setCategory] = useState<IssueCategory | "">("");
@@ -184,14 +184,14 @@ export function ReviewPanel({
         </label>
         <fieldset disabled={pending || !reviewable}>
           <legend>确认依据</legend>
-          {stage.artifacts.length > 0 ? stage.artifacts.map((artifact) => (
-            <label key={artifact.artifact_id} className="evidence-option">
+          {stage.review_evidence.length > 0 ? stage.review_evidence.map((evidence) => (
+            <label key={evidence.artifact_id} className="evidence-option">
               <input
                 type="checkbox"
-                checked={selectedEvidence.includes(artifact.artifact_id)}
-                onChange={() => toggleEvidence(artifact.artifact_id)}
+                checked={selectedEvidence.includes(evidence.artifact_id)}
+                onChange={() => toggleEvidence(evidence.artifact_id)}
               />
-              <span>{artifact.name}</span>
+              <span>{evidence.label}</span>
             </label>
           )) : <span className="review-unavailable">当前修订没有可绑定的确认依据</span>}
         </fieldset>

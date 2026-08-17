@@ -53,6 +53,11 @@ export interface Artifact {
   rights?: Record<string, string>;
 }
 
+export interface ReviewEvidence {
+  artifact_id: string;
+  label: string;
+}
+
 export type ArtifactKind = "text" | "image" | "audio" | "video" | "eval" | "file";
 
 export interface DialogueTiming {
@@ -82,6 +87,7 @@ export interface StageDetail {
   executor: string;
   blocked_reasons: string[];
   error: string;
+  review_evidence: ReviewEvidence[];
   artifacts: Artifact[];
   active_run_job: JobDetail | null;
 }

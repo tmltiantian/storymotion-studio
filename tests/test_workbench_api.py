@@ -37,6 +37,7 @@ class FakeWorkbenchService:
                     "stage": "storyboard",
                     "execution_state": "passed",
                     "review_state": "awaiting_review",
+                    "review_evidence": [],
                     "artifacts": [],
                 }
             ],
@@ -254,6 +255,12 @@ def test_stage_routes_present_creator_data_without_exposing_json_artifacts(
     assert script_response.status_code == 200
     assert script_response.json()["presentation"]["characters"] == [{"name": "阿眠"}]
     assert script_response.json()["artifacts"] == []
+    assert script_response.json()["review_evidence"] == [
+        {
+            "artifact_id": script_response.json()["review_evidence"][0]["artifact_id"],
+            "label": "阶段成果 1",
+        }
+    ]
     assert "media_url" not in json.dumps(script_response.json(), ensure_ascii=False)
     for response in (audio_response, video_response):
         artifact = response.json()["artifacts"][0]

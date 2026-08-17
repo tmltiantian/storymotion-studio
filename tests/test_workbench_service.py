@@ -329,6 +329,14 @@ def test_stage_detail_returns_presentation_without_internal_text_artifacts(
     assert detail["presentation"]["stage"] == "script"
     assert detail["presentation"]["characters"]
     assert detail["artifacts"] == []
+    assert [item["label"] for item in detail["review_evidence"]] == [
+        "阶段成果 1",
+        "阶段成果 2",
+    ]
+    assert all(
+        item["artifact_id"].startswith("art_")
+        for item in detail["review_evidence"]
+    )
     serialized = json.dumps(detail, ensure_ascii=False)
     assert "schema_version" not in serialized
     assert "manifest.json" not in serialized
@@ -1223,24 +1231,13 @@ def test_generated_project_video_preflight_preserves_canonical_artifact_keys(
     for stage_name in ("concept", "script", "storyboard", "assets", "audio"):
         service.submit_stage_run("canonical_preflight", stage_name)
         detail = service.stage_detail("canonical_preflight", stage_name)
-        _spec, package = service._load_project_records(
-            service._project_dir("canonical_preflight")
-        )
-        record = next(item for item in package.stages if item.stage.value == stage_name)
         service.approve_stage(
             "canonical_preflight",
             stage_name,
             revision=detail["revision"],
             note="Approved by the local contract test.",
             evidence_artifact_ids=[
-                ref.artifact_id
-                for artifact in record.artifacts
-                if (
-                    ref := service._register_artifact(
-                        "canonical_preflight", artifact
-                    )
-                )
-                is not None
+                evidence["artifact_id"] for evidence in detail["review_evidence"]
             ],
         )
 
