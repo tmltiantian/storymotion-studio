@@ -590,7 +590,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
       </div>
 
       <ReviewPanel
-        key={`${stage.stage}-${stage.revision}-${stage.artifacts.map((item) => item.artifact_id).join("-")}`}
+        key={`${stage.stage}-${stage.revision}-${stage.review_evidence.map((item) => item.artifact_id).join("-")}`}
         stage={stage}
         pending={mutationPending}
         issueDraft={reviewIssue}

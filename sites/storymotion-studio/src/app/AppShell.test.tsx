@@ -38,6 +38,7 @@ const stages: ProjectDetail["stages"] = [
   executor: "pipeline",
   blocked_reasons: [],
   error: "",
+  review_evidence: [],
   artifacts: [],
   active_run_job: null,
 })) as ProjectDetail["stages"];
