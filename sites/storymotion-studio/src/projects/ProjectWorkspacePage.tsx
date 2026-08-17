@@ -115,8 +115,8 @@ function ArtifactWorkspace({
   stage: StageDetail;
   onIssueAtTime: (time: number, artifact: Artifact) => void;
 }) {
-  const viewableMedia = stage.artifacts.filter(
-    (artifact) => artifact.kind === "image" || artifact.kind === "audio" || artifact.kind === "video",
+  const viewableArtifacts = stage.artifacts.filter(
+    (artifact) => ["image", "audio", "video", "export"].includes(artifact.kind ?? ""),
   );
   return (
     <section className="artifact-workspace" aria-labelledby="artifact-workspace-title">
@@ -136,12 +136,12 @@ function ArtifactWorkspace({
 
       {stage.presentation ? <StagePresentationView presentation={stage.presentation} /> : null}
 
-      {!stage.presentation && viewableMedia.length === 0 ? <StagePresentationView presentation={null} /> : null}
+      {!stage.presentation && viewableArtifacts.length === 0 ? <StagePresentationView presentation={null} /> : null}
 
-      {viewableMedia.length > 0 ? (
+      {viewableArtifacts.length > 0 ? (
         <StageViewer
           stage={stage.stage}
-          artifacts={viewableMedia}
+          artifacts={viewableArtifacts}
           onIssueAtTime={onIssueAtTime}
         />
       ) : null}
@@ -220,13 +220,13 @@ function VideoGenerationWorkspace({
     <section className="video-generation-workspace" aria-labelledby="video-generation-title">
       <div className="video-generation-heading">
         <div>
-          <p className="eyebrow">GENERATION</p>
+          <p className="eyebrow">生成设置</p>
           <h2 id="video-generation-title">视频生成</h2>
         </div>
       </div>
       <fieldset className="video-shot-selection" disabled={generationLocked}>
         <legend>生成镜头</legend>
-        {workspace.shots.map((shot) => (
+        {workspace.shots.map((shot, index) => (
           <label key={shot.shot_id}>
             <input
               type="checkbox"
@@ -239,7 +239,7 @@ function VideoGenerationWorkspace({
                     .map((item) => item.shot_id)
               ))}
             />
-            <span>{shot.shot_id}</span>
+            <span>第 {index + 1} 镜</span>
             <time>{shot.duration_seconds.toFixed(2)} 秒</time>
           </label>
         ))}

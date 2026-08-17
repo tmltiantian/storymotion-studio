@@ -104,6 +104,8 @@ export interface ConceptPresentation extends ReadyPresentation {
   stage: "concept";
   title?: string;
   premise?: string;
+  mode_label?: string;
+  source_label?: string;
   target?: CreatorTarget;
   characters?: CreatorCharacter[];
 }
@@ -172,7 +174,7 @@ export type StagePresentation =
   | DeliverPresentation
   | UnavailablePresentation;
 
-export type ArtifactKind = "text" | "image" | "audio" | "video" | "eval" | "file";
+export type ArtifactKind = "text" | "image" | "audio" | "video" | "eval" | "export" | "file";
 
 export interface DialogueTiming {
   dialogue_id: string;

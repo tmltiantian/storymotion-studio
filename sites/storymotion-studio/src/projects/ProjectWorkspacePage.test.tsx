@@ -557,20 +557,37 @@ describe("project review workspace", () => {
     expect(title.compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("does not pass generic binary artifacts to the stage viewer", async () => {
+  it("passes only approved exports to the stage viewer", async () => {
     const selected = stageFixture({
-      artifacts: [{
-        artifact_id: "art_delivery_package",
-        name: "delivery-package.zip",
-        media_type: "application/octet-stream",
-        media_url: "/api/media/art_delivery_package",
-        kind: "file",
-      }],
+      stage: "deliver",
+      artifacts: [
+        {
+          artifact_id: "art_delivery_package",
+          name: "technical-delivery-package.zip",
+          media_type: "application/zip",
+          media_url: "/api/media/art_delivery_package",
+          download_url: "/api/download/art_delivery_package",
+          kind: "export",
+        },
+        {
+          artifact_id: "art_internal_cache",
+          name: "internal-cache.bin",
+          media_type: "application/octet-stream",
+          media_url: "/api/media/art_internal_cache",
+          kind: "file",
+        },
+      ],
     });
-    renderWorkspace(workspaceApi(selected, projectFixture(selected)));
+    renderWorkspace(workspaceApi(selected, projectFixture(selected)), "/projects/episode_01/stages/deliver");
 
-    expect(await screen.findByText("本阶段尚未生成可查看的成果")).toBeVisible();
-    expect(screen.queryByText("delivery-package.zip")).not.toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: "打开或下载成果" })).toHaveAttribute(
+      "href",
+      "/api/download/art_delivery_package",
+    );
+    expect(screen.getAllByRole("link", { name: "打开或下载成果" })).toHaveLength(1);
+    expect(screen.queryByText("technical-delivery-package.zip")).not.toBeInTheDocument();
+    expect(screen.queryByText("internal-cache.bin")).not.toBeInTheDocument();
+    expect(screen.queryByText("application/zip")).not.toBeInTheDocument();
     expect(screen.queryByText("application/octet-stream")).not.toBeInTheDocument();
   });
 
@@ -590,8 +607,11 @@ describe("project review workspace", () => {
 
     expect(await screen.findByText("视频生成预检")).toBeVisible();
     const shots = screen.getByRole("group", { name: "生成镜头" });
-    expect(within(shots).getByRole("checkbox", { name: /shot_03/ })).toBeChecked();
-    expect(within(shots).getByRole("checkbox", { name: /shot_04/ })).toBeChecked();
+    expect(within(shots).getByRole("checkbox", { name: /第 1 镜/ })).toBeChecked();
+    expect(within(shots).getByRole("checkbox", { name: /第 2 镜/ })).toBeChecked();
+    expect(document.body).not.toHaveTextContent("shot_03");
+    expect(document.body).not.toHaveTextContent("cccccccccc");
+    expect(document.querySelector("code")).toBeNull();
     await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
     await user.click(await screen.findByRole("button", { name: "批量生成所选镜头" }));
 
@@ -725,8 +745,9 @@ describe("project review workspace", () => {
 
     await user.click(screen.getByRole("button", { name: "在当前时间标记问题" }));
     expect(description).toHaveValue(
-      "角色动作断裂。\n\n--- 视频时间标记 ---\n镜头 shot_03\n候选成果 art_candidate_03\n时间码 2.375 秒\n--- 标记结束 ---",
+      "角色动作断裂。\n\n--- 视频时间标记 ---\n第 3 镜\n当前候选视频\n时间码 2.375 秒\n--- 标记结束 ---",
     );
+    expect(document.body).not.toHaveTextContent("art_candidate_03");
     await user.click(screen.getByRole("button", { name: "在当前时间标记问题" }));
     expect((description as HTMLTextAreaElement).value.match(/--- 视频时间标记 ---/g)).toHaveLength(1);
     expect(api.requestStageChanges).not.toHaveBeenCalled();
@@ -739,7 +760,7 @@ describe("project review workspace", () => {
       "video",
       {
         revision: 4,
-        reason: "[整体成果需调整] 角色动作断裂。\n\n--- 视频时间标记 ---\n镜头 shot_03\n候选成果 art_candidate_03\n时间码 2.375 秒\n--- 标记结束 ---",
+        reason: "[整体成果需调整] 角色动作断裂。\n\n--- 视频时间标记 ---\n第 3 镜\n当前候选视频\n时间码 2.375 秒\n--- 标记结束 ---",
       },
       expect.any(AbortSignal),
     );
@@ -872,8 +893,8 @@ describe("project review workspace", () => {
     renderWorkspace(api);
 
     await user.click(await screen.findByRole("button", { name: "退回修改" }));
-    expect(screen.getByLabelText("动作不连贯（缺少可选项目 ID）")).toBeDisabled();
-    expect(screen.getByLabelText("对白内容有误（缺少可选项目 ID）")).toBeDisabled();
+    expect(screen.getByLabelText("动作不连贯（当前没有可选项目）")).toBeDisabled();
+    expect(screen.getByLabelText("对白内容有误（当前没有可选项目）")).toBeDisabled();
     expect(api.applyImpact).not.toHaveBeenCalled();
     expect(api.previewImpact).not.toHaveBeenCalled();
     expect(api.requestStageChanges).not.toHaveBeenCalled();

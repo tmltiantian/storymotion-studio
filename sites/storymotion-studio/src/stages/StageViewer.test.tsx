@@ -182,30 +182,42 @@ describe("StageViewer registry", () => {
     expect(screen.queryByRole("option", { name: "候选 3" })).not.toBeInTheDocument();
   });
 
-  it("uses creator-facing states for generic files without technical metadata", () => {
-    const unsupported = {
-      artifact_id: "art_archive",
-      name: "source.bin",
-      media_type: "application/octet-stream",
-      media_url: "/api/media/art_archive",
+  it("renders approved exports and hides internal or unapproved binaries", () => {
+    const approved = {
+      artifact_id: "art_export",
+      name: "internal-release-name.zip",
+      media_type: "application/zip",
+      media_url: "/api/media/art_export",
+      download_url: "/api/download/art_export",
+      kind: "export",
     } as Artifact;
-    const unsafe = {
+    const internal = {
+      artifact_id: "art_internal",
+      name: "internal-cache.bin",
+      media_type: "application/octet-stream",
+      media_url: "/api/media/art_internal",
+      kind: "file",
+    } as Artifact;
+    const unapproved = {
       artifact_id: "art_private",
       name: "private.bin",
       media_type: "application/octet-stream",
       media_url: "/Users/person/private.bin",
     } as Artifact;
 
-    render(<StageViewer stage="assets" artifacts={[unsupported, unsafe]} />);
+    render(<StageViewer stage="deliver" artifacts={[approved, internal, unapproved]} />);
 
-    expect(screen.getByRole("link", { name: "打开或下载成果" })).toHaveAttribute("href", "/api/media/art_archive");
-    expect(screen.getByText("本成果暂无法打开")).toBeVisible();
-    expect(screen.queryByText("source.bin")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "打开或下载成果" })).toHaveAttribute("href", "/api/download/art_export");
+    expect(screen.getAllByRole("link")).toHaveLength(1);
+    expect(screen.queryByText("internal-release-name.zip")).not.toBeInTheDocument();
+    expect(screen.queryByText("internal-cache.bin")).not.toBeInTheDocument();
     expect(screen.queryByText("private.bin")).not.toBeInTheDocument();
+    expect(screen.queryByText("application/zip")).not.toBeInTheDocument();
     expect(screen.queryByText("application/octet-stream")).not.toBeInTheDocument();
+    expect(document.querySelector("code")).toBeNull();
   });
 
-  it("keeps text and evaluation artifacts in the stage summary without fetching their bodies", () => {
+  it("does not render internal text or evaluation artifacts", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
     const artifacts = [
       {
@@ -226,7 +238,7 @@ describe("StageViewer registry", () => {
 
     render(<StageViewer stage="eval" artifacts={artifacts} />);
 
-    expect(screen.getAllByText("本成果已整理到阶段摘要")).toHaveLength(2);
+    expect(screen.queryByText("本成果已整理到阶段摘要")).not.toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(document.querySelector("pre")).toBeNull();
     expect(document.querySelector("code")).toBeNull();

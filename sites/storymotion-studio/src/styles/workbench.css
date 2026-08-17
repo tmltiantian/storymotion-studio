@@ -2050,18 +2050,13 @@
 }
 
 .preflight-blockers {
-  margin: 10px 0 0;
-  padding: 0;
-  color: var(--failed);
-  list-style: none;
-  font-size: 10px;
-}
-
-.preflight-blockers li {
   display: flex;
   align-items: center;
   gap: 7px;
+  margin: 10px 0 0;
   padding: 6px 0;
+  color: var(--failed);
+  font-size: 10px;
 }
 
 .preflight-message,
@@ -2090,11 +2085,6 @@
   display: flex;
   align-items: center;
   gap: 7px;
-}
-
-.job-progress-heading code {
-  color: var(--steel);
-  font-size: 9px;
 }
 
 .job-progress-meter {

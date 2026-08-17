@@ -197,21 +197,21 @@ export function VideoPreflight({
   return (
     <section className="video-preflight" aria-labelledby="video-preflight-title">
       <div className="preflight-heading">
-        <div><p className="eyebrow">PAID GENERATION</p><h2 id="video-preflight-title">视频生成预检</h2></div>
+        <div><p className="eyebrow">付费生成</p><h2 id="video-preflight-title">视频生成预检</h2></div>
         <button className="icon-button" type="button" title="重新检查" aria-label="重新检查视频生成预检" disabled={Boolean(submitting || confirming)} onClick={() => setReload((item) => item + 1)}><RefreshCw aria-hidden="true" size={15} /></button>
       </div>
       <dl className="preflight-facts">
-        <div><dt>所选镜头</dt><dd>{value.shot_ids.join("、")}</dd></div>
-        <div><dt>Provider</dt><dd>{value.provider}</dd></div>
+        <div><dt>所选镜头</dt><dd>已选择 {value.shot_ids.length} 个镜头</dd></div>
+        <div><dt>服务商</dt><dd>{value.provider}</dd></div>
         <div><dt>模型</dt><dd>{value.model}</dd></div>
         <div><dt>分辨率</dt><dd>{value.resolution}</dd></div>
         <div><dt>输出时长</dt><dd>{value.output_seconds.toFixed(2)} 秒</dd></div>
         <div><dt>费用预估</dt><dd>¥{value.estimated_cost_yuan.toFixed(2)}</dd></div>
       </dl>
       <div className="preflight-revisions" aria-label="输入修订">
-        {Object.entries(value.revision_hashes).map(([name, revision]) => <span key={name}><strong>{name}</strong><code>{revision.slice(0, 10)}</code></span>)}
+        <span><strong>输入状态</strong>已核对 {Object.keys(value.revision_hashes).length} 项</span>
       </div>
-      {value.blockers.length ? <ul className="preflight-blockers">{value.blockers.map((blocker) => <li key={blocker}><AlertCircle aria-hidden="true" size={15} />{blocker}</li>)}</ul> : null}
+      {value.blockers.length ? <div className="preflight-blockers" role="status"><AlertCircle aria-hidden="true" size={15} />生成条件尚未满足，请重新检查当前阶段。</div> : null}
       {message ? <div className="preflight-message" role="status">{message}</div> : null}
       <div className="preflight-actions">
         <button className="text-button" type="button" disabled={!canConfirm} onClick={() => void confirm()}><Check aria-hidden="true" size={15} />{confirming ? "正在确认" : "确认费用与输入"}</button>

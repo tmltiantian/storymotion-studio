@@ -1,5 +1,6 @@
 import type {
   CreatorCharacter,
+  CreatorCheck,
   CreatorDialogue,
   CreatorShot,
   StagePresentation,
@@ -30,104 +31,124 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function hasOptionalString(value: Record<string, unknown>, key: string): boolean {
-  return !(key in value) || typeof value[key] === "string";
+function stringField(value: Record<string, unknown>, key: string): string | undefined {
+  const field = value[key];
+  if (typeof field !== "string" || !field.trim()) return undefined;
+  return field;
 }
 
-function hasOptionalNumber(value: Record<string, unknown>, key: string): boolean {
-  return !(key in value) || isFiniteNumber(value[key]);
+function numberField(value: Record<string, unknown>, key: string): number | undefined {
+  return isFiniteNumber(value[key]) ? value[key] : undefined;
 }
 
-function hasOptionalBoolean(value: Record<string, unknown>, key: string): boolean {
-  return !(key in value) || typeof value[key] === "boolean";
+function booleanField(value: Record<string, unknown>, key: string): boolean | undefined {
+  return typeof value[key] === "boolean" ? value[key] : undefined;
 }
 
-function hasOptionalArray(
+function normalizedArray<T>(
   value: Record<string, unknown>,
   key: string,
-  itemIsValid: (item: unknown) => boolean,
-): boolean {
-  return !(key in value) || (Array.isArray(value[key]) && value[key].every(itemIsValid));
+  normalize: (item: unknown) => T | null,
+): T[] | undefined {
+  const source = value[key];
+  if (!Array.isArray(source)) return undefined;
+  return source.flatMap((item) => {
+    const normalized = normalize(item);
+    return normalized === null ? [] : [normalized];
+  });
 }
 
-function isCreatorCharacter(value: unknown): boolean {
-  return isRecord(value) && ["name", "role", "description", "appearance", "voice"]
-    .every((key) => hasOptionalString(value, key));
+function stringArray(value: Record<string, unknown>, key: string): string[] | undefined {
+  return normalizedArray(value, key, (item) => (
+    typeof item === "string" && item.trim() ? item : null
+  ));
 }
 
-function isCreatorDialogue(value: unknown): boolean {
-  return isRecord(value)
-    && typeof value.speaker === "string"
-    && typeof value.text === "string"
-    && hasOptionalString(value, "emotion");
+function normalizeCreatorCharacter(value: unknown): CreatorCharacter | null {
+  if (!isRecord(value)) return null;
+  const result: CreatorCharacter = {
+    name: stringField(value, "name"),
+    role: stringField(value, "role"),
+    description: stringField(value, "description"),
+    appearance: stringField(value, "appearance"),
+    voice: stringField(value, "voice"),
+  };
+  return Object.values(result).some((field) => field !== undefined) ? result : null;
 }
 
-function isCreatorShot(value: unknown): boolean {
-  return isRecord(value)
-    && hasOptionalNumber(value, "index")
-    && ["title", "action", "camera"].every((key) => hasOptionalString(value, key))
-    && hasOptionalNumber(value, "duration_seconds")
-    && hasOptionalArray(value, "dialogue", isCreatorDialogue);
+function normalizeCreatorDialogue(value: unknown): CreatorDialogue | null {
+  if (!isRecord(value)) return null;
+  const speaker = stringField(value, "speaker");
+  const text = stringField(value, "text");
+  if (!speaker || !text) return null;
+  return { speaker, text, emotion: stringField(value, "emotion") };
 }
 
-function isCreatorTarget(value: unknown): boolean {
-  return isRecord(value)
-    && ["aspect_ratio", "resolution"].every((key) => hasOptionalString(value, key))
-    && ["duration_seconds", "fps", "shots"].every((key) => hasOptionalNumber(value, key));
+function normalizeCreatorShot(value: unknown): CreatorShot | null {
+  if (!isRecord(value)) return null;
+  const result: CreatorShot = {
+    index: numberField(value, "index"),
+    title: stringField(value, "title"),
+    action: stringField(value, "action"),
+    camera: stringField(value, "camera"),
+    duration_seconds: numberField(value, "duration_seconds"),
+    dialogue: normalizedArray(value, "dialogue", normalizeCreatorDialogue),
+  };
+  return Object.values(result).some((field) => field !== undefined) ? result : null;
 }
 
-function isMediaCharacter(value: unknown): boolean {
-  return isRecord(value)
-    && hasOptionalString(value, "name")
-    && hasOptionalBoolean(value, "ready");
+function normalizeCreatorTarget(value: unknown) {
+  if (!isRecord(value)) return undefined;
+  const result = {
+    aspect_ratio: stringField(value, "aspect_ratio"),
+    resolution: stringField(value, "resolution"),
+    duration_seconds: numberField(value, "duration_seconds"),
+    fps: numberField(value, "fps"),
+    shots: numberField(value, "shots"),
+  };
+  return Object.values(result).some((field) => field !== undefined) ? result : undefined;
 }
 
-function isSpeaker(value: unknown): boolean {
-  return isRecord(value) && typeof value.name === "string" && isFiniteNumber(value.line_count);
+function normalizeMediaCharacter(value: unknown) {
+  if (!isRecord(value)) return null;
+  const name = stringField(value, "name");
+  const ready = booleanField(value, "ready");
+  if (name === undefined && ready === undefined) return null;
+  return { name, ready };
 }
 
-function isTiming(value: unknown): boolean {
-  return isRecord(value)
-    && ["speaker", "text"].every((key) => hasOptionalString(value, key))
-    && ["start_seconds", "end_seconds"].every((key) => hasOptionalNumber(value, key));
+function normalizeSpeaker(value: unknown) {
+  if (!isRecord(value)) return null;
+  const name = stringField(value, "name");
+  const lineCount = numberField(value, "line_count");
+  return name && lineCount !== undefined ? { name, line_count: lineCount } : null;
 }
 
-function isCreatorCheck(value: unknown): boolean {
-  return isRecord(value)
-    && typeof value.name === "string"
-    && typeof value.passed === "boolean"
-    && ["error", "warning", "info"].includes(value.severity as string)
-    && hasOptionalArray(value, "findings", (item) => typeof item === "string");
+function normalizeTiming(value: unknown) {
+  if (!isRecord(value)) return null;
+  const result = {
+    speaker: stringField(value, "speaker"),
+    text: stringField(value, "text"),
+    start_seconds: numberField(value, "start_seconds"),
+    end_seconds: numberField(value, "end_seconds"),
+  };
+  return Object.values(result).some((field) => field !== undefined) ? result : null;
 }
 
-function hasOptionalObject(
-  value: Record<string, unknown>,
-  key: string,
-  objectIsValid: (item: unknown) => boolean,
-): boolean {
-  return !(key in value) || objectIsValid(value[key]);
-}
-
-function isNarrativePresentation(value: Record<string, unknown>): boolean {
-  return hasOptionalString(value, "title")
-    && hasOptionalArray(value, "characters", isCreatorCharacter)
-    && hasOptionalArray(value, "shots", isCreatorShot)
-    && hasOptionalNumber(value, "total_duration_seconds")
-    && hasOptionalObject(value, "target", isCreatorTarget)
-    && hasOptionalString(value, "premise");
-}
-
-function isMediaPresentation(value: Record<string, unknown>): boolean {
-  return hasOptionalBoolean(value, "production_ready")
-    && hasOptionalArray(value, "characters", isMediaCharacter)
-    && hasOptionalArray(value, "review_items", (item) => typeof item === "string")
-    && hasOptionalNumber(value, "dialogue_count")
-    && hasOptionalNumber(value, "total_duration_seconds")
-    && hasOptionalArray(value, "speakers", isSpeaker)
-    && hasOptionalArray(value, "timings", isTiming)
-    && hasOptionalNumber(value, "clip_count")
-    && hasOptionalNumber(value, "duration_seconds")
-    && hasOptionalBoolean(value, "subtitle_ready");
+function normalizeCreatorCheck(value: unknown): CreatorCheck | null {
+  if (!isRecord(value)) return null;
+  const name = stringField(value, "name");
+  const passed = booleanField(value, "passed");
+  const severity = value.severity;
+  if (!name || passed === undefined || !["error", "warning", "info"].includes(severity as string)) {
+    return null;
+  }
+  return {
+    name,
+    passed,
+    severity: severity as CreatorCheck["severity"],
+    findings: stringArray(value, "findings"),
+  };
 }
 
 function normalizePresentation(value: unknown): StagePresentation | null {
@@ -138,19 +159,61 @@ function normalizePresentation(value: unknown): StagePresentation | null {
     return { stage: value.stage as StagePresentation["stage"], state: "unavailable" };
   }
   if (value.state !== "ready") return null;
-  if (["concept", "script", "storyboard"].includes(value.stage) && !isNarrativePresentation(value)) {
-    return null;
+  if (value.stage === "concept") {
+    return {
+      stage: "concept",
+      state: "ready",
+      title: stringField(value, "title"),
+      premise: stringField(value, "premise"),
+      mode_label: stringField(value, "mode_label"),
+      source_label: stringField(value, "source_label"),
+      target: normalizeCreatorTarget(value.target),
+      characters: normalizedArray(value, "characters", normalizeCreatorCharacter),
+    };
   }
-  if (["assets", "audio", "video", "edit"].includes(value.stage) && !isMediaPresentation(value)) {
-    return null;
+  if (value.stage === "script" || value.stage === "storyboard") {
+    return {
+      stage: value.stage,
+      state: "ready",
+      title: stringField(value, "title"),
+      total_duration_seconds: numberField(value, "total_duration_seconds"),
+      characters: normalizedArray(value, "characters", normalizeCreatorCharacter),
+      shots: normalizedArray(value, "shots", normalizeCreatorShot),
+    };
   }
-  if (value.stage === "eval" && (
-    typeof value.passed !== "boolean"
-    || !hasOptionalArray(value, "checks", isCreatorCheck)
-    || !hasOptionalArray(value, "review_dimensions", (item) => typeof item === "string")
-  )) return null;
-  if (value.stage === "deliver" && typeof value.quality_approved !== "boolean") return null;
-  return value as unknown as StagePresentation;
+  if (["assets", "audio", "video", "edit"].includes(value.stage)) {
+    return {
+      stage: value.stage as "assets" | "audio" | "video" | "edit",
+      state: "ready",
+      production_ready: booleanField(value, "production_ready"),
+      characters: normalizedArray(value, "characters", normalizeMediaCharacter),
+      review_items: stringArray(value, "review_items"),
+      dialogue_count: numberField(value, "dialogue_count"),
+      total_duration_seconds: numberField(value, "total_duration_seconds"),
+      speakers: normalizedArray(value, "speakers", normalizeSpeaker),
+      timings: normalizedArray(value, "timings", normalizeTiming),
+      clip_count: numberField(value, "clip_count"),
+      duration_seconds: numberField(value, "duration_seconds"),
+      subtitle_ready: booleanField(value, "subtitle_ready"),
+    };
+  }
+  if (value.stage === "eval") {
+    const passed = booleanField(value, "passed");
+    if (passed === undefined) return null;
+    return {
+      stage: "eval",
+      state: "ready",
+      passed,
+      checks: normalizedArray(value, "checks", normalizeCreatorCheck),
+      review_dimensions: stringArray(value, "review_dimensions"),
+    };
+  }
+  if (value.stage === "deliver") {
+    const qualityApproved = booleanField(value, "quality_approved");
+    if (qualityApproved === undefined) return null;
+    return { stage: "deliver", state: "ready", quality_approved: qualityApproved };
+  }
+  return null;
 }
 
 function formatDuration(seconds: number | undefined): string | undefined {
@@ -254,6 +317,8 @@ function NarrativePresentation({ presentation }: { presentation: Extract<StagePr
       {presentation.title ? <h2>{presentation.title}</h2> : null}
       {presentation.stage === "concept" && presentation.premise ? <p>{presentation.premise}</p> : null}
       <Summary items={presentation.stage === "concept" ? [
+        { label: "创作模式", value: presentation.mode_label },
+        { label: "内容来源", value: presentation.source_label },
         { label: "预计时长", value: formatDuration(presentation.target?.duration_seconds) },
         { label: "画幅", value: presentation.target?.aspect_ratio },
         { label: "画面规格", value: presentation.target?.resolution },

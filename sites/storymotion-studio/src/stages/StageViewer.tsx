@@ -1,11 +1,11 @@
-import { FileDown, FileWarning } from "lucide-react";
+import { FileDown } from "lucide-react";
 import { useCallback, useRef } from "react";
 
 import type { Artifact, ArtifactKind, StageName } from "../api/types";
 import { AudioViewer } from "./AudioViewer";
 import { ImageViewer } from "./ImageViewer";
 import { VideoViewer } from "./VideoViewer";
-import { authorizedArtifactUrl } from "./viewerUtils";
+import { authorizedArtifactDownloadUrl } from "./viewerUtils";
 
 const MIME_REGISTRY: ReadonlyArray<[RegExp, ArtifactKind]> = [
   [/^image\//, "image"],
@@ -22,7 +22,7 @@ const NAME_REGISTRY: ReadonlyArray<[RegExp, ArtifactKind]> = [
 ];
 
 function viewerKind(stage: StageName, artifact: Artifact): ArtifactKind {
-  if (artifact.kind && ["text", "image", "audio", "video", "eval", "file"].includes(artifact.kind)) {
+  if (artifact.kind && ["text", "image", "audio", "video", "eval", "file", "export"].includes(artifact.kind)) {
     return artifact.kind;
   }
   if (stage === "eval" && /json/i.test(artifact.media_type)) return "eval";
@@ -78,13 +78,9 @@ function ArtifactFrame({ label, children }: { label?: string; children: React.Re
   );
 }
 
-function SummaryOnlyViewer() {
-  return <div className="viewer-state">本成果已整理到阶段摘要</div>;
-}
-
 function FileViewer({ artifact }: { artifact: Artifact }) {
-  const url = authorizedArtifactUrl(artifact);
-  if (!url) return <div className="artifact-file artifact-file-disabled"><FileWarning aria-hidden="true" size={22} /><span>本成果暂无法打开</span></div>;
+  const url = authorizedArtifactDownloadUrl(artifact);
+  if (!url) return null;
   return <a className="artifact-file" href={url} target="_blank" rel="noreferrer" aria-label="打开或下载成果"><FileDown aria-hidden="true" size={22} /><span>打开或下载成果</span></a>;
 }
 
@@ -152,8 +148,8 @@ export function StageViewer({
             <AudioViewer artifact={displayArtifact} onActivate={activateAudio} onRelease={releaseAudio} />
           </ArtifactFrame>
         );
-        if (kind === "eval" || kind === "text") return <ArtifactFrame label={label} key={artifact.artifact_id}><SummaryOnlyViewer /></ArtifactFrame>;
-        return <ArtifactFrame label={label} key={artifact.artifact_id}><FileViewer artifact={artifact} /></ArtifactFrame>;
+        if (kind === "export") return <ArtifactFrame key={artifact.artifact_id}><FileViewer artifact={artifact} /></ArtifactFrame>;
+        return null;
       })}
     </div>
   );

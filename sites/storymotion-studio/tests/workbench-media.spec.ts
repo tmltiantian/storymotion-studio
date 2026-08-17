@@ -195,6 +195,8 @@ test("video inspection controls remain usable and unobstructed", async ({ page }
   await expect(video).toBeVisible();
   await expect(toolbar).toBeVisible();
   await expect(page.getByText("episode_01", { exact: true })).toHaveCount(0);
+  await expect(page.locator("pre, code")).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText(/shot_03|art_video_[ab]|[a-f0-9]{32,64}/);
   await expect(page.getByRole("combobox", { name: "候选视频" })).toHaveValue("art_video_a");
 
   const videoBox = await video.boundingBox();
@@ -235,6 +237,8 @@ test("video inspection controls remain usable and unobstructed", async ({ page }
   await expect(page.getByText("生成完成")).toBeVisible();
   expect(intercepted.generationCalls()).toBe(1);
   await expect(page.locator("body")).not.toContainText("browser-memory-token");
+  await expect(page.locator("body")).not.toContainText(/11111111|shot_03|art_video_[ab]/);
+  await expect(page.locator("pre, code")).toHaveCount(0);
 
   await page.reload();
   await expect(page.getByText("生成完成")).toBeVisible();
@@ -245,7 +249,7 @@ test("video inspection controls remain usable and unobstructed", async ({ page }
   await page.getByRole("textbox", { name: "问题说明" }).fill("动作衔接错误。");
   await page.getByRole("button", { name: "在当前时间标记问题" }).click();
   await expect(page.getByRole("textbox", { name: "问题说明" })).toHaveValue(
-    "动作衔接错误。\n\n--- 视频时间标记 ---\n镜头 shot_03\n候选成果 art_video_a\n时间码 3.125 秒\n--- 标记结束 ---",
+    "动作衔接错误。\n\n--- 视频时间标记 ---\n第 3 镜\n当前候选视频\n时间码 3.125 秒\n--- 标记结束 ---",
   );
   await page.getByRole("button", { name: "退回整阶段" }).click();
   await expect(page.getByText("问题已提交到当前修订。")).toBeVisible();

@@ -343,6 +343,39 @@ def test_stage_detail_returns_presentation_without_internal_text_artifacts(
     assert "application/json" not in serialized
 
 
+def test_stage_detail_publishes_only_allow_listed_binary_exports(
+    service: WorkbenchService,
+) -> None:
+    project = service._project_dir("episode_01")
+    stage_dir = project / "stages" / "concept"
+    pdf = stage_dir / "creator-package.pdf"
+    archive = stage_dir / "creator-package.zip"
+    internal = stage_dir / "internal-cache.bin"
+    markdown = stage_dir / "notes.md"
+    pdf.write_bytes(b"%PDF-fixture")
+    archive.write_bytes(b"PK-fixture")
+    internal.write_bytes(b"internal")
+    markdown.write_text("internal notes", encoding="utf-8")
+    update_stage(
+        project,
+        StageName.CONCEPT,
+        StageState.PASSED,
+        artifacts=(pdf, archive, internal, markdown),
+    )
+
+    detail = service.stage_detail("episode_01", "concept")
+
+    assert [artifact["kind"] for artifact in detail["artifacts"]] == ["export", "export"]
+    assert {artifact["media_type"] for artifact in detail["artifacts"]} == {
+        "application/pdf",
+        "application/zip",
+    }
+    serialized = json.dumps(detail["artifacts"], ensure_ascii=False)
+    assert "internal-cache.bin" not in serialized
+    assert "notes.md" not in serialized
+    assert "application/octet-stream" not in serialized
+
+
 def test_stage_contract_exposes_only_its_authoritative_active_run_job(
     service: WorkbenchService,
 ) -> None:
