@@ -1,7 +1,7 @@
-import { mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { expect, test, type Page } from "playwright/test";
+import { expect, test, type Page, type TestInfo } from "playwright/test";
 
 const E2E_ROOT = "/tmp/storymotion-studio-playwright-e2e";
 const stageLabels = {
@@ -55,6 +55,11 @@ async function expectNoHorizontalOverflow(page: Page) {
   expect(layout.body).toBeLessThanOrEqual(1);
   expect(layout.document).toBeLessThanOrEqual(1);
   expect(layout.clipped).toEqual([]);
+}
+
+async function captureStageScreenshot(page: Page, testInfo: TestInfo, name: string) {
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: testInfo.outputPath(`${name}.png`) });
 }
 
 async function waitForJob(page: Page, jobId: string, status = "completed") {
@@ -118,10 +123,23 @@ test("runs the real offline production, review, repair, and recovery flow", asyn
   await page.reload();
   await expect(conceptReview.getByText("已退回修改", { exact: true })).toBeVisible();
   await runStage(page, projectId, "concept");
+  await captureStageScreenshot(page, testInfo, "concept-stage-result");
   await approveStage(page, "concept");
 
-  for (const stage of ["script", "storyboard", "assets", "audio"] as const) {
+  await runStage(page, projectId, "script");
+  await expect(page.getByRole("heading", { name: /剧本成果/ })).toBeVisible();
+  await expect(page.getByText("主角A").first()).toBeVisible();
+  await expect(page.locator("pre, code")).toHaveCount(0);
+  await expect(page.getByText(/schema_version|application\/json|manifest\.json/)).toHaveCount(0);
+  await expect(page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).resolves.toBe(true);
+  await captureStageScreenshot(page, testInfo, "script-stage-result");
+  await approveStage(page, "script");
+
+  for (const stage of ["storyboard", "assets", "audio"] as const) {
     await runStage(page, projectId, stage);
+    if (stage === "storyboard") {
+      await captureStageScreenshot(page, testInfo, "storyboard-stage-result");
+    }
     await approveStage(page, stage);
   }
 
@@ -172,10 +190,12 @@ test("runs the real offline production, review, repair, and recovery flow", asyn
   expect((await readdir(path.join(projectDir, "impact_plans"))).some((name) => name.endsWith(".json"))).toBe(true);
   await runStage(page, projectId, "edit");
   await approveStage(page, "edit");
-  for (const stage of ["eval", "deliver"] as const) {
-    await runStage(page, projectId, stage);
-    await approveStage(page, stage);
-  }
+  await runStage(page, projectId, "eval");
+  await captureStageScreenshot(page, testInfo, "eval-stage-result");
+  await approveStage(page, "eval");
+  await runStage(page, projectId, "deliver");
+  await captureStageScreenshot(page, testInfo, "delivery-stage-result");
+  await approveStage(page, "deliver");
 
   await stat(path.join(projectDir, "production_package.json"));
   expect(await readdir(path.join(projectDir, "reviews"))).toEqual(expect.arrayContaining([
@@ -192,15 +212,12 @@ test("runs the real offline production, review, repair, and recovery flow", asyn
   expect(projectJobs.some((job) => job.operation === "video_test")).toBe(true);
   await expect(page.getByText(/正在读取/)).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
-  await mkdir("/tmp/storymotion-studio-qa", { recursive: true });
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await page.screenshot({ path: `/tmp/storymotion-studio-qa/${testInfo.project.name}-production.png` });
   expect(externalRequests).toEqual([]);
   expect(browser.consoleErrors).toEqual([]);
   expect(browser.failedRequests).toEqual([]);
 });
 
-test("reads real archive media with rights warnings, ranges, and downloads", async ({ page }, testInfo) => {
+test("reads real archive media with rights warnings, ranges, and downloads", async ({ page }) => {
   const externalRequests = await installNetworkGuard(page);
   const browser = monitorBrowser(page);
   await page.goto("/works");
@@ -237,9 +254,6 @@ test("reads real archive media with rights warnings, ranges, and downloads", asy
   await page.getByRole("link", { name: "下载 window.svg" }).click();
   expect((await browserDownload).suggestedFilename()).toBe("window.svg");
   await expectNoHorizontalOverflow(page);
-  await mkdir("/tmp/storymotion-studio-qa", { recursive: true });
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await page.screenshot({ path: `/tmp/storymotion-studio-qa/${testInfo.project.name}-archive.png` });
   expect(externalRequests).toEqual([]);
   expect(browser.consoleErrors).toEqual([]);
   expect(browser.failedRequests).toEqual([]);
