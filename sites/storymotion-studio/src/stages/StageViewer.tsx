@@ -1,11 +1,11 @@
+import { FileDown, FileWarning } from "lucide-react";
 import { useCallback, useRef } from "react";
 
 import type { Artifact, ArtifactKind, StageName } from "../api/types";
 import { AudioViewer } from "./AudioViewer";
-import { EvalViewer } from "./EvalViewer";
 import { ImageViewer } from "./ImageViewer";
-import { TextViewer } from "./TextViewer";
 import { VideoViewer } from "./VideoViewer";
+import { authorizedArtifactUrl } from "./viewerUtils";
 
 const MIME_REGISTRY: ReadonlyArray<[RegExp, ArtifactKind]> = [
   [/^image\//, "image"],
@@ -78,6 +78,16 @@ function ArtifactFrame({ label, children }: { label: string; children: React.Rea
   );
 }
 
+function SummaryOnlyViewer() {
+  return <div className="viewer-state">本成果已整理到阶段摘要</div>;
+}
+
+function FileViewer({ artifact }: { artifact: Artifact }) {
+  const url = authorizedArtifactUrl(artifact);
+  if (!url) return <div className="artifact-file artifact-file-disabled"><FileWarning aria-hidden="true" size={22} /><span>本成果暂无法打开</span></div>;
+  return <a className="artifact-file" href={url} target="_blank" rel="noreferrer" aria-label="打开或下载成果"><FileDown aria-hidden="true" size={22} /><span>打开或下载成果</span></a>;
+}
+
 export function StageViewer({
   stage,
   artifacts,
@@ -138,9 +148,8 @@ export function StageViewer({
             <AudioViewer artifact={displayArtifact} onActivate={activateAudio} onRelease={releaseAudio} />
           </ArtifactFrame>
         );
-        if (kind === "eval") return <ArtifactFrame label={label} key={artifact.artifact_id}><EvalViewer artifact={displayArtifact} /></ArtifactFrame>;
-        if (kind === "text") return <ArtifactFrame label={label} key={artifact.artifact_id}><TextViewer artifact={displayArtifact} /></ArtifactFrame>;
-        return null;
+        if (kind === "eval" || kind === "text") return <ArtifactFrame label={label} key={artifact.artifact_id}><SummaryOnlyViewer /></ArtifactFrame>;
+        return <ArtifactFrame label={label} key={artifact.artifact_id}><FileViewer artifact={artifact} /></ArtifactFrame>;
       })}
     </div>
   );

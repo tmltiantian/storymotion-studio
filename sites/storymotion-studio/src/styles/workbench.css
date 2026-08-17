@@ -1822,22 +1822,6 @@
   font-size: 11px;
 }
 
-.text-viewer {
-  max-height: min(68vh, 720px);
-  overflow: auto;
-  margin: 0;
-  padding: 18px;
-  border-top: 1px solid var(--rule);
-  border-bottom: 1px solid var(--rule);
-  color: var(--ink);
-  background: var(--surface);
-  font-family: var(--utility-font);
-  font-size: 11px;
-  line-height: 1.65;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
 .audio-viewer audio {
   display: block;
   width: 100%;
@@ -1960,48 +1944,6 @@
 
 .issue-time-button {
   margin-left: auto;
-}
-
-.eval-viewer {
-  border-top: 1px solid var(--rule-strong);
-}
-
-.eval-check {
-  padding: 12px 0;
-  border-bottom: 1px solid var(--rule);
-}
-
-.eval-check > div {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 7px;
-}
-
-.eval-check > div > span {
-  color: var(--steel);
-  font-family: var(--utility-font);
-  font-size: 9px;
-}
-
-.eval-check ul {
-  margin: 8px 0 0 25px;
-  padding-left: 15px;
-  color: var(--steel);
-  font-size: 10px;
-}
-
-.eval-check.severity-warning svg {
-  color: var(--review);
-}
-
-.eval-check.severity-error svg,
-.eval-check.severity-critical svg {
-  color: var(--failed);
-}
-
-.eval-check svg {
-  color: var(--passed);
 }
 
 .video-preflight,

@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -180,7 +180,7 @@ describe("StageViewer registry", () => {
     expect(screen.queryByRole("option", { name: "候选 3" })).not.toBeInTheDocument();
   });
 
-  it("does not render unsupported internal files", () => {
+  it("uses creator-facing states for generic files without technical metadata", () => {
     const unsupported = {
       artifact_id: "art_archive",
       name: "source.bin",
@@ -196,53 +196,42 @@ describe("StageViewer registry", () => {
 
     render(<StageViewer stage="assets" artifacts={[unsupported, unsafe]} />);
 
-    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "打开或下载成果" })).toHaveAttribute("href", "/api/media/art_archive");
+    expect(screen.getByText("本成果暂无法打开")).toBeVisible();
     expect(screen.queryByText("source.bin")).not.toBeInTheDocument();
     expect(screen.queryByText("private.bin")).not.toBeInTheDocument();
+    expect(screen.queryByText("application/octet-stream")).not.toBeInTheDocument();
   });
 
-  it("fetches text with an abort signal and renders markup as text", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response('<img src=x onerror="alert(1)">', {
-        headers: { "Content-Type": "text/plain", "Content-Length": "30" },
-      }),
-    );
-    const artifact = {
-      artifact_id: "art_script",
-      name: "script.txt",
-      media_type: "text/plain; charset=utf-8",
-      media_url: "/api/media/art_script",
-      kind: "text",
-      viewer: { size_bytes: 30 },
-    } as Artifact;
+  it("keeps text and evaluation artifacts in the stage summary without fetching their bodies", () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const artifacts = [
+      {
+        artifact_id: "art_script",
+        name: "script.txt",
+        media_type: "text/plain",
+        media_url: "/api/media/art_script",
+        kind: "text",
+      },
+      {
+        artifact_id: "art_eval",
+        name: "eval-report.json",
+        media_type: "application/json",
+        media_url: "/api/media/art_eval",
+        kind: "eval",
+      },
+    ] as Artifact[];
 
-    const { unmount } = render(<StageViewer stage="script" artifacts={[artifact]} />);
+    render(<StageViewer stage="eval" artifacts={artifacts} />);
 
-    expect(await screen.findByText(/<img src=x/)).toBeVisible();
-    expect(document.querySelector("img")).toBeNull();
-    expect(fetchMock.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
-    unmount();
-    expect((fetchMock.mock.calls[0]?.[1]?.signal as AbortSignal).aborted).toBe(true);
-  });
-
-  it("rejects HTML text responses and bounds bodies when content length is missing or malformed", async () => {
-    const artifact = {
-      artifact_id: "art_script",
-      name: "script.txt",
-      media_type: "text/plain",
-      media_url: "/api/media/art_script",
-      kind: "text",
-    } as Artifact;
-    const fetchMock = vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(new Response("<b>unsafe</b>", { headers: { "Content-Type": "text/html" } }))
-      .mockResolvedValueOnce(new Response("plain", { headers: { "Content-Type": "text/plain", "Content-Length": "not-a-number" } }));
-
-    const first = render(<StageViewer stage="script" artifacts={[artifact]} />);
-    expect(await screen.findByRole("alert")).toHaveTextContent("无法读取成果文件");
-    first.unmount();
-    render(<StageViewer stage="script" artifacts={[artifact]} />);
-    expect(await screen.findByText("plain")).toBeVisible();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(screen.getAllByText("本成果已整理到阶段摘要")).toHaveLength(2);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(document.querySelector("pre")).toBeNull();
+    expect(document.querySelector("code")).toBeNull();
+    expect(screen.queryByText("script.txt")).not.toBeInTheDocument();
+    expect(screen.queryByText("eval-report.json")).not.toBeInTheDocument();
+    expect(screen.queryByText("text/plain")).not.toBeInTheDocument();
+    expect(screen.queryByText("application/json")).not.toBeInTheDocument();
   });
 
   it("clears audio state on rejection, ended, error, and unmount", async () => {
@@ -263,52 +252,4 @@ describe("StageViewer registry", () => {
     expect(audio.pause).toHaveBeenCalled();
   });
 
-  it("renders structured evaluation checks and safely falls back for unknown JSON", async () => {
-    vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            schema_version: "motion-comic-factory.eval.v1",
-            checks: [
-              {
-                name: "字幕安全区",
-                severity: "warning",
-                passed: false,
-                findings: ["第 3 镜字幕接近底边"],
-              },
-            ],
-          }),
-          { headers: { "Content-Type": "application/json" } },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ arbitrary: "safe fallback" }), {
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    const artifacts = [
-      {
-        artifact_id: "art_eval",
-        name: "eval-report.json",
-        media_type: "application/json",
-        media_url: "/api/media/art_eval",
-        kind: "eval",
-      },
-      {
-        artifact_id: "art_unknown_eval",
-        name: "quality-eval.json",
-        media_type: "application/json",
-        media_url: "/api/media/art_unknown_eval",
-        kind: "eval",
-      },
-    ] as Artifact[];
-
-    render(<StageViewer stage="eval" artifacts={artifacts} />);
-
-    expect(await screen.findByText("字幕安全区")).toBeVisible();
-    expect(screen.getByText("第 3 镜字幕接近底边")).toBeVisible();
-    const fallbacks = await screen.findAllByText(/safe fallback/);
-    expect(fallbacks).toHaveLength(1);
-    expect(within(fallbacks[0].closest("pre") as HTMLElement).getByText(/safe fallback/)).toBeVisible();
-  });
 });
