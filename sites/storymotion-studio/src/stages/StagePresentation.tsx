@@ -10,6 +10,149 @@ type SummaryItem = {
   value: string | number | undefined;
 };
 
+const stageNames = new Set([
+  "concept",
+  "script",
+  "storyboard",
+  "assets",
+  "audio",
+  "video",
+  "edit",
+  "eval",
+  "deliver",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function hasOptionalString(value: Record<string, unknown>, key: string): boolean {
+  return !(key in value) || typeof value[key] === "string";
+}
+
+function hasOptionalNumber(value: Record<string, unknown>, key: string): boolean {
+  return !(key in value) || isFiniteNumber(value[key]);
+}
+
+function hasOptionalBoolean(value: Record<string, unknown>, key: string): boolean {
+  return !(key in value) || typeof value[key] === "boolean";
+}
+
+function hasOptionalArray(
+  value: Record<string, unknown>,
+  key: string,
+  itemIsValid: (item: unknown) => boolean,
+): boolean {
+  return !(key in value) || (Array.isArray(value[key]) && value[key].every(itemIsValid));
+}
+
+function isCreatorCharacter(value: unknown): boolean {
+  return isRecord(value) && ["name", "role", "description", "appearance", "voice"]
+    .every((key) => hasOptionalString(value, key));
+}
+
+function isCreatorDialogue(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value.speaker === "string"
+    && typeof value.text === "string"
+    && hasOptionalString(value, "emotion");
+}
+
+function isCreatorShot(value: unknown): boolean {
+  return isRecord(value)
+    && hasOptionalNumber(value, "index")
+    && ["title", "action", "camera"].every((key) => hasOptionalString(value, key))
+    && hasOptionalNumber(value, "duration_seconds")
+    && hasOptionalArray(value, "dialogue", isCreatorDialogue);
+}
+
+function isCreatorTarget(value: unknown): boolean {
+  return isRecord(value)
+    && ["aspect_ratio", "resolution"].every((key) => hasOptionalString(value, key))
+    && ["duration_seconds", "fps", "shots"].every((key) => hasOptionalNumber(value, key));
+}
+
+function isMediaCharacter(value: unknown): boolean {
+  return isRecord(value)
+    && hasOptionalString(value, "name")
+    && hasOptionalBoolean(value, "ready");
+}
+
+function isSpeaker(value: unknown): boolean {
+  return isRecord(value) && typeof value.name === "string" && isFiniteNumber(value.line_count);
+}
+
+function isTiming(value: unknown): boolean {
+  return isRecord(value)
+    && ["speaker", "text"].every((key) => hasOptionalString(value, key))
+    && ["start_seconds", "end_seconds"].every((key) => hasOptionalNumber(value, key));
+}
+
+function isCreatorCheck(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value.name === "string"
+    && typeof value.passed === "boolean"
+    && ["error", "warning", "info"].includes(value.severity as string)
+    && hasOptionalArray(value, "findings", (item) => typeof item === "string");
+}
+
+function hasOptionalObject(
+  value: Record<string, unknown>,
+  key: string,
+  objectIsValid: (item: unknown) => boolean,
+): boolean {
+  return !(key in value) || objectIsValid(value[key]);
+}
+
+function isNarrativePresentation(value: Record<string, unknown>): boolean {
+  return hasOptionalString(value, "title")
+    && hasOptionalArray(value, "characters", isCreatorCharacter)
+    && hasOptionalArray(value, "shots", isCreatorShot)
+    && hasOptionalNumber(value, "total_duration_seconds")
+    && hasOptionalObject(value, "target", isCreatorTarget)
+    && hasOptionalString(value, "premise");
+}
+
+function isMediaPresentation(value: Record<string, unknown>): boolean {
+  return hasOptionalBoolean(value, "production_ready")
+    && hasOptionalArray(value, "characters", isMediaCharacter)
+    && hasOptionalArray(value, "review_items", (item) => typeof item === "string")
+    && hasOptionalNumber(value, "dialogue_count")
+    && hasOptionalNumber(value, "total_duration_seconds")
+    && hasOptionalArray(value, "speakers", isSpeaker)
+    && hasOptionalArray(value, "timings", isTiming)
+    && hasOptionalNumber(value, "clip_count")
+    && hasOptionalNumber(value, "duration_seconds")
+    && hasOptionalBoolean(value, "subtitle_ready");
+}
+
+function normalizePresentation(value: unknown): StagePresentation | null {
+  if (!isRecord(value) || typeof value.stage !== "string" || !stageNames.has(value.stage)) {
+    return null;
+  }
+  if (value.state === "unavailable") {
+    return { stage: value.stage as StagePresentation["stage"], state: "unavailable" };
+  }
+  if (value.state !== "ready") return null;
+  if (["concept", "script", "storyboard"].includes(value.stage) && !isNarrativePresentation(value)) {
+    return null;
+  }
+  if (["assets", "audio", "video", "edit"].includes(value.stage) && !isMediaPresentation(value)) {
+    return null;
+  }
+  if (value.stage === "eval" && (
+    typeof value.passed !== "boolean"
+    || !hasOptionalArray(value, "checks", isCreatorCheck)
+    || !hasOptionalArray(value, "review_dimensions", (item) => typeof item === "string")
+  )) return null;
+  if (value.stage === "deliver" && typeof value.quality_approved !== "boolean") return null;
+  return value as unknown as StagePresentation;
+}
+
 function formatDuration(seconds: number | undefined): string | undefined {
   if (seconds === undefined || !Number.isFinite(seconds)) return undefined;
   return `${seconds} 秒`;
@@ -204,20 +347,21 @@ function EvalPresentationView({ presentation }: { presentation: Extract<StagePre
 }
 
 export function StagePresentationView({ presentation }: { presentation: StagePresentation | null }) {
-  if (!presentation || presentation.state === "unavailable") {
+  const normalized = normalizePresentation(presentation);
+  if (!normalized || normalized.state === "unavailable") {
     return <div className="stage-presentation-empty"><strong>本阶段尚未生成可查看的成果</strong></div>;
   }
 
   return (
     <section className="stage-presentation" aria-label="阶段成果内容">
-      {presentation.stage === "concept" || presentation.stage === "script" || presentation.stage === "storyboard" ? (
-        <NarrativePresentation presentation={presentation} />
+      {normalized.stage === "concept" || normalized.stage === "script" || normalized.stage === "storyboard" ? (
+        <NarrativePresentation presentation={normalized} />
       ) : null}
-      {presentation.stage === "assets" || presentation.stage === "audio" || presentation.stage === "video" || presentation.stage === "edit" ? (
-        <MediaPresentation presentation={presentation} />
+      {normalized.stage === "assets" || normalized.stage === "audio" || normalized.stage === "video" || normalized.stage === "edit" ? (
+        <MediaPresentation presentation={normalized} />
       ) : null}
-      {presentation.stage === "eval" ? <EvalPresentationView presentation={presentation} /> : null}
-      {presentation.stage === "deliver" ? <Summary items={[{ label: "质量检查", value: presentation.quality_approved ? "质量检查已通过" : "质量检查待处理" }]} /> : null}
+      {normalized.stage === "eval" ? <EvalPresentationView presentation={normalized} /> : null}
+      {normalized.stage === "deliver" ? <Summary items={[{ label: "质量检查", value: normalized.quality_approved ? "质量检查已通过" : "质量检查待处理" }]} /> : null}
     </section>
   );
 }

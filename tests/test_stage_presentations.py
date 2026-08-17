@@ -352,6 +352,8 @@ def test_eval_v2_maps_failures_and_known_summaries_without_specialist_operation(
                     "overlap_count": 2,
                     "actual_seconds": 8.0,
                     "tolerance_seconds": math.inf,
+                    "operation_code": "OVERLAP_CHECK",
+                    "unknown_key": "drop",
                     "path": "/private/nope",
                 },
             }
@@ -369,10 +371,20 @@ def test_eval_v2_maps_failures_and_known_summaries_without_specialist_operation(
         "name": "对白重叠",
         "severity": "error",
         "passed": False,
-        "findings": ["overlap_count: 2", "actual_seconds: 8.0"],
+        "findings": ["重叠对白：2 条", "实际时长：8 秒", "检查状态码：OVERLAP_CHECK"],
     }
-    assert {item["name"] for item in result["checks"][1:]} == {"timing", "shots"}
-    assert "operation" not in repr(result)
+    assert {item["name"] for item in result["checks"][1:]} == {"时间安排", "镜头完成情况"}
+    serialized = repr(result)
+    for technical_key in (
+        "operation_code",
+        "overlap_count",
+        "actual_seconds",
+        "cue_count",
+        "expected_count",
+        "rendered_count",
+        "unknown_key",
+    ):
+        assert technical_key not in serialized
     assert "/private" not in repr(result)
     assert "s1" not in repr(result)
 

@@ -115,6 +115,9 @@ function ArtifactWorkspace({
   stage: StageDetail;
   onIssueAtTime: (time: number, artifact: Artifact) => void;
 }) {
+  const viewableMedia = stage.artifacts.filter(
+    (artifact) => artifact.kind === "image" || artifact.kind === "audio" || artifact.kind === "video",
+  );
   return (
     <section className="artifact-workspace" aria-labelledby="artifact-workspace-title">
       <div className="artifact-heading">
@@ -131,12 +134,14 @@ function ArtifactWorkspace({
         </div>
       ) : null}
 
-      <StagePresentationView presentation={stage.presentation} />
+      {stage.presentation ? <StagePresentationView presentation={stage.presentation} /> : null}
 
-      {stage.artifacts.length > 0 ? (
+      {!stage.presentation && viewableMedia.length === 0 ? <StagePresentationView presentation={null} /> : null}
+
+      {viewableMedia.length > 0 ? (
         <StageViewer
           stage={stage.stage}
-          artifacts={stage.artifacts}
+          artifacts={viewableMedia}
           onIssueAtTime={onIssueAtTime}
         />
       ) : null}
