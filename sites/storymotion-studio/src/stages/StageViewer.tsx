@@ -69,11 +69,11 @@ function creatorLabel(stage: StageName, artifact: Artifact, candidatePosition = 
   return STAGE_LABELS[stage];
 }
 
-function ArtifactFrame({ label, children }: { label: string; children: React.ReactNode }) {
+function ArtifactFrame({ label, children }: { label?: string; children: React.ReactNode }) {
   return (
     <figure className="stage-viewer-item">
       {children}
-      <figcaption><strong>{label}</strong></figcaption>
+      {label ? <figcaption><strong>{label}</strong></figcaption> : null}
     </figure>
   );
 }
@@ -127,11 +127,15 @@ export function StageViewer({
             ...candidate,
             name: `候选 ${index + 1}`,
           }));
-          const label = creatorLabel(stage, artifact);
+          const candidateLabels = new Map(candidates.map((candidate, index) => [
+            candidate.artifact_id,
+            creatorLabel(stage, candidate, index + 1),
+          ]));
           return (
-            <ArtifactFrame label={label} key={`stage-video-${shotId || artifact.artifact_id}`}>
+            <ArtifactFrame key={`stage-video-${shotId || artifact.artifact_id}`}>
               <VideoViewer
                 artifacts={displayCandidates}
+                creatorLabel={(selected) => candidateLabels.get(selected.artifact_id) ?? "视频片段"}
                 onIssueAtTime={onIssueAtTime ? (time, selected) => {
                   const original = candidates.find((candidate) => candidate.artifact_id === selected.artifact_id) ?? selected;
                   onIssueAtTime(time, original);

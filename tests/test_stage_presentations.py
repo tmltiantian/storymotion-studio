@@ -54,7 +54,6 @@ def test_script_presentation_keeps_creator_fields_and_drops_internal_fields():
             "name": "阿眠",
             "role": "主角",
             "description": "谨慎但好奇",
-            "appearance": "short black hair",
             "voice": "清亮、克制",
         }
     ]
@@ -67,6 +66,38 @@ def test_script_presentation_keeps_creator_fields_and_drops_internal_fields():
     assert "char_01" not in repr(result)
     assert "shot_001" not in repr(result)
     assert "id" not in result["characters"][0]
+
+
+def test_narrative_presentation_suppresses_prompt_fragments_and_translates_known_cameras():
+    source = {
+        "schema_version": "motion-comic-factory.script.v1",
+        "episode_draft": {
+            "characters": [
+                {"name": "阿眠", "visual_anchor": "anime motion comic, short black hair"},
+                {"name": "小舟", "visual_anchor": "短黑发，神情警觉"},
+            ],
+            "shots": [
+                {"index": 1, "camera": "medium shot, slow push-in"},
+                {"index": 2, "camera": "close-up, slight handheld tension"},
+                {"index": 3, "camera": "wide dynamic orbit"},
+            ],
+        },
+    }
+
+    result = build_stage_presentation("script", [source])
+
+    assert "appearance" not in result["characters"][0]
+    assert result["characters"][1]["appearance"] == "短黑发，神情警觉"
+    assert [shot.get("camera") for shot in result["shots"]] == [
+        "中景，缓慢推进",
+        "近景，轻微手持",
+        None,
+    ]
+    serialized = json.dumps(result, ensure_ascii=False)
+    assert "anime motion comic" not in serialized
+    assert "medium shot, slow push-in" not in serialized
+    assert "close-up, slight handheld tension" not in serialized
+    assert "wide dynamic orbit" not in serialized
 
 
 def test_concept_presentation_normalizes_only_creator_target_fields():

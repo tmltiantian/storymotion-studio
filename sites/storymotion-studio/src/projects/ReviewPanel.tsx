@@ -47,6 +47,19 @@ const scopedCategories: Record<ScopedCategory, {
   subtitle: { stage: "edit", scope: "subtitle_style" },
 };
 
+function creatorBlockedMessage(stage: StageDetail): string {
+  if (stage.execution_state === "passed" && stage.review_state === "awaiting_review") {
+    return "请确认当前阶段成果后继续制作。";
+  }
+  if (stage.review_state === "changes_requested") {
+    return "请根据反馈调整当前阶段成果后继续制作。";
+  }
+  if (stage.execution_state === "failed") {
+    return "请处理当前阶段问题后继续制作。";
+  }
+  return "请完成当前阶段操作后继续制作。";
+}
+
 function impactRequest(category: ScopedCategory): ImpactRequest {
   const config = scopedCategories[category];
   return {
@@ -147,7 +160,7 @@ export function ReviewPanel({
     <aside className="review-panel" aria-labelledby="review-panel-title">
       <div className="review-heading">
         <div>
-          <p className="eyebrow">REVIEW</p>
+          <p className="eyebrow">阶段审核</p>
           <h2 id="review-panel-title">审核检查</h2>
         </div>
         <span className="review-revision">修订 {stage.revision || "-"}</span>
@@ -166,8 +179,8 @@ export function ReviewPanel({
 
       {stage.blocked_reasons.length > 0 ? (
         <div className="review-reasons">
-          <strong>当前阻塞</strong>
-          <ul>{stage.blocked_reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+          <strong>下一步</strong>
+          <p>{creatorBlockedMessage(stage)}</p>
         </div>
       ) : null}
 

@@ -9,6 +9,8 @@ This record verifies the creator-facing stage-result presentation introduced for
 ## Automated Coverage
 
 - Completed script stage: confirms the `剧本成果` heading and `主角A` creator label are visible; confirms no `pre` or `code` elements, schema/MIME/manifest text, or horizontal overflow.
+- Review-remediation coverage: confirms workspace project IDs, raw backend blocked reasons, the English `REVIEW` eyebrow, raw English appearance/camera prompt fragments, duplicate role/shot labels, and stale active-candidate captions are absent.
+- Safe review guidance: renders a single Chinese next-step message rather than backend executor or blocker text.
 - Completed concept, script, storyboard, EVAL, and delivery stages: exercised in the offline end-to-end production, approval, repair, recovery, and delivery flow.
 - Video media inspection: exercises the media-only video viewer, candidate selection, frame controls, speed, mute, video-generation confirmation, reload, and time-coded review feedback with deterministic intercepted responses.
 - Existing flow coverage also retains workbench, pipeline, provider recovery, authorization, approval, repair, EVAL, and delivery checks.
@@ -24,7 +26,7 @@ The following viewport screenshots are emitted by the Playwright run under `site
 - `workbench-flow-runs-the-re-3bfa0-ew-repair-and-recovery-flow-desktop/delivery-stage-result.png`
 - `workbench-media-video-insp-9fb2a-ain-usable-and-unobstructed-desktop/video-media-inspection.png`
 
-At 1440x900, the inspected creator-result panels show readable Chinese labels, no clipping or overlapping controls, no horizontal overflow, and no exposed JSON, MIME types, or artifact filenames. The media check covers video because that is the fixture-backed media viewer available in the desktop suite; no unsupported project state was invented.
+At 1440x900, the inspected creator-result panels show readable Chinese labels, no clipping or overlapping controls, no horizontal overflow, and no exposed project IDs, backend blocker text, JSON, MIME types, artifact filenames, ASCII prompt fragments, or duplicate creator labels. The video screenshot shows `候选 2` in both the selector and the active caption after selection. The media check covers video because that is the fixture-backed media viewer available in the desktop suite; no unsupported project state was invented.
 
 ## Commands
 
@@ -47,6 +49,8 @@ npx playwright test tests/workbench-flow.spec.ts tests/workbench-media.spec.ts -
 ```
 
 Results: Vitest `11` files / `111` tests passed; typecheck, lint, and production build passed; Playwright `5` desktop tests passed in `35.2s`.
+
+Review-remediation rerun results: focused backend presentation tests `20` passed; focused frontend component tests `53` passed; full Vitest `11` files / `113` tests passed; typecheck, lint, and production build passed; Playwright `5` desktop tests passed in `30.2s`.
 
 The Playwright configuration starts its own fixture API on port 18788 and Vite server on port 4175. It does not use or alter a live service on ports 5174 or 8799.
 

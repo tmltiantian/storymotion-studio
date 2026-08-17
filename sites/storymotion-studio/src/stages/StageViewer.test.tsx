@@ -167,6 +167,8 @@ describe("StageViewer registry", () => {
     expect(controls.compareDocumentPosition(video) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
     await user.selectOptions(screen.getByRole("combobox", { name: "候选视频" }), "art_video_b");
     expect(video).toHaveAttribute("src", "/api/media/art_video_b");
+    expect(screen.getByTestId("active-video-caption")).toHaveTextContent("第 3 镜 · 候选 2");
+    expect(screen.getByTestId("active-video-caption")).not.toHaveTextContent("候选 1");
     expect(screen.queryByRole("checkbox", { name: "仅播放台词时段" })).not.toBeInTheDocument();
   });
 

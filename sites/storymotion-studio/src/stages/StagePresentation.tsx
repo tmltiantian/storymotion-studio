@@ -181,7 +181,7 @@ function CharacterCards({ characters }: { characters: CreatorCharacter[] | undef
       <div className="creator-character-list">
         {characters.map((character, index) => (
           <article className="creator-character-card" key={`${character.name ?? "character"}-${index}`}>
-            {character.name ? <h4>{character.name}{character.role ? `（${character.role}）` : ""}</h4> : null}
+            {character.name ? <h4>{character.name}{character.role && character.role !== character.name ? `（${character.role}）` : ""}</h4> : null}
             <Summary items={[
               { label: "人物特点", value: character.description },
               { label: "外观方向", value: character.appearance },
@@ -215,9 +215,13 @@ function ShotRows({ shots }: { shots: CreatorShot[] | undefined }) {
     <section className="stage-presentation-shots" aria-labelledby="creator-shots-title">
       <h3 id="creator-shots-title">镜头</h3>
       <ol className="creator-shot-list">
-        {shots.map((shot, index) => (
+        {shots.map((shot, index) => {
+          const shotNumber = shot.index ?? index + 1;
+          const generatedTitle = `第 ${shotNumber} 镜`;
+          const title = shot.title?.replace(/\s/g, "") === generatedTitle.replace(/\s/g, "") ? "" : shot.title;
+          return (
           <li key={`${shot.index ?? index}-${shot.title ?? "shot"}`}>
-            <h4>第 {shot.index ?? index + 1} 镜{shot.title ? ` · ${shot.title}` : ""}</h4>
+            <h4>{generatedTitle}{title ? ` · ${title}` : ""}</h4>
             <Summary items={[
               { label: "画面动作", value: shot.action },
               { label: "景别", value: shot.camera },
@@ -225,7 +229,8 @@ function ShotRows({ shots }: { shots: CreatorShot[] | undefined }) {
             ]} />
             <DialogueRows dialogue={shot.dialogue} />
           </li>
-        ))}
+          );
+        })}
       </ol>
     </section>
   );

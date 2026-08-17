@@ -1339,14 +1339,6 @@
   line-height: 1.4;
 }
 
-.workspace-project-identity span {
-  overflow: hidden;
-  color: var(--steel);
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .workspace-stage-nav ol {
   display: grid;
   gap: 0;
@@ -1484,7 +1476,8 @@
 }
 
 .artifact-item figcaption,
-.stage-viewer-item figcaption {
+.stage-viewer-item figcaption,
+.video-viewer-caption {
   display: flex;
   min-height: 36px;
   align-items: center;
@@ -1496,7 +1489,8 @@
 }
 
 .artifact-item figcaption strong,
-.stage-viewer-item figcaption strong {
+.stage-viewer-item figcaption strong,
+.video-viewer-caption strong {
   min-width: 0;
   overflow: hidden;
   color: var(--ink);
@@ -2272,9 +2266,8 @@
   font-size: 10px;
 }
 
-.review-reasons ul {
+.review-reasons p {
   margin: 6px 0 0;
-  padding-left: 17px;
   color: var(--steel);
 }
 

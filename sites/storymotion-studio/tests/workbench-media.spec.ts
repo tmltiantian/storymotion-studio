@@ -194,6 +194,7 @@ test("video inspection controls remain usable and unobstructed", async ({ page }
   const toolbar = page.getByRole("toolbar", { name: "视频检查控制" });
   await expect(video).toBeVisible();
   await expect(toolbar).toBeVisible();
+  await expect(page.getByText("episode_01", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("combobox", { name: "候选视频" })).toHaveValue("art_video_a");
 
   const videoBox = await video.boundingBox();
@@ -213,6 +214,8 @@ test("video inspection controls remain usable and unobstructed", async ({ page }
 
   await page.getByRole("combobox", { name: "候选视频" }).selectOption("art_video_b");
   await expect(video).toHaveAttribute("src", "/api/media/art_video_b");
+  await expect(page.getByTestId("active-video-caption")).toHaveText("第 3 镜 · 候选 2");
+  await expect(page.getByTestId("active-video-caption")).not.toHaveText(/候选 1/);
   await expect(page.getByRole("checkbox", { name: "仅播放台词时段" })).toHaveCount(0);
 
   const overlaps = await toolbar.locator("button:visible, label:visible").evaluateAll((nodes) => {

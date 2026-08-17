@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping, Sequence
 from numbers import Real
 from typing import Any
@@ -47,12 +48,32 @@ _SUMMARY_FINDING_LABELS = {
     "rendered_count": ("已生成镜头数", ""),
 }
 _PASS_STATUSES = {"approved", "auto_approved", "pass", "passed", "success"}
+_KNOWN_CAMERA_LABELS = {
+    "medium shot, slow push-in": "中景，缓慢推进",
+    "close-up, slight handheld tension": "近景，轻微手持",
+}
+_CHINESE_CHARACTER = re.compile(r"[\u3400-\u9fff]")
+_ASCII_LETTER = re.compile(r"[A-Za-z]")
 
 
 def _public_string(value: Any, *, maximum: int = 1000) -> str:
     if not isinstance(value, str):
         return ""
     return value.strip()[:maximum]
+
+
+def _creator_chinese_string(value: Any) -> str:
+    text = _public_string(value)
+    if not text or not _CHINESE_CHARACTER.search(text) or _ASCII_LETTER.search(text):
+        return ""
+    return text
+
+
+def _creator_camera(value: Any) -> str:
+    text = _public_string(value)
+    if text in _KNOWN_CAMERA_LABELS:
+        return _KNOWN_CAMERA_LABELS[text]
+    return _creator_chinese_string(text)
 
 
 def _finite_number(value: Any) -> int | float | None:
@@ -114,12 +135,14 @@ def _creator_character(source: Mapping[str, Any]) -> dict[str, Any]:
         ("name", "name"),
         ("role", "role"),
         ("description", "description"),
-        ("appearance", "visual_anchor"),
         ("voice", "voice_style"),
     ):
         value = _public_string(source.get(source_name))
         if value:
             result[public_name] = value
+    appearance = _creator_chinese_string(source.get("visual_anchor"))
+    if appearance:
+        result["appearance"] = appearance
     return result
 
 
@@ -171,11 +194,13 @@ def _shot_projection(
     for public_name, source_name in (
         ("title", "scene_title"),
         ("action", "action"),
-        ("camera", "camera"),
     ):
         value = _public_string(source.get(source_name))
         if value:
             result[public_name] = value
+    camera = _creator_camera(source.get("camera"))
+    if camera:
+        result["camera"] = camera
     duration = _finite_float(source.get("duration_seconds"))
     if duration is not None:
         result["duration_seconds"] = duration
