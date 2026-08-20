@@ -120,16 +120,42 @@ def test_prepare_submission_preserves_explicit_first_and_last_frame_roles():
     assert [item["role"] for item in image_content] == ["first_frame", "last_frame"]
 
 
-def test_prepare_submission_accepts_parallel_provider_neutral_image_roles():
+def test_prepare_submission_rejects_mixed_keyframe_and_reference_scene():
+    client = _client(lambda *_args, **_kwargs: None)
+
+    with pytest.raises(
+        GatewayVideoError,
+        match="cannot mix keyframe images with reference images",
+    ):
+        client.prepare_submission(
+            "Keep the cat identity while starting from the supplied frame.",
+            images=[
+                MiniMaxH3ImageInput(
+                    "https://assets.example/first.png",
+                    "first_frame",
+                ),
+                MiniMaxH3ImageInput(
+                    "https://assets.example/cat.png",
+                    "reference_image",
+                ),
+            ],
+            duration=6,
+            ratio="9:16",
+            resolution="768P",
+            allow_network=True,
+        )
+
+
+def test_prepare_submission_accepts_parallel_keyframe_roles():
     client = _client(lambda *_args, **_kwargs: None)
 
     submission = client.prepare_submission(
         "Connect the supplied keyframes.",
         images=[
             "https://assets.example/first.png",
-            "https://assets.example/cat.png",
+            "https://assets.example/last.png",
         ],
-        image_roles=["first_frame", "reference_image"],
+        image_roles=["first_frame", "last_frame"],
         duration=6,
         ratio="adaptive",
         resolution="768P",
@@ -139,7 +165,7 @@ def test_prepare_submission_accepts_parallel_provider_neutral_image_roles():
     image_content = json.loads(submission.request_body)["content"][1:]
     assert [item["role"] for item in image_content] == [
         "first_frame",
-        "reference_image",
+        "last_frame",
     ]
 
 

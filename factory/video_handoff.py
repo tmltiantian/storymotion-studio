@@ -7,23 +7,10 @@ from .character_assets import character_asset_by_id
 from .file_io import write_json_atomic
 from .h3_prompt_compiler import compile_h3_shot_prompt
 from .provider_profile import resolve_provider_profile
-from .schema import Episode, NARRATOR_ID, validate_episode
+from .schema import Episode, NARRATOR_ID, speaker_name, validate_episode
 
 
 VIDEO_HANDOFF_SCHEMA = "motion-comic-factory.video-handoff.v1"
-
-
-def _speaker_name(episode: Episode, speaker_id: str) -> str:
-    if speaker_id == NARRATOR_ID:
-        return "旁白"
-    return next(
-        (
-            character.name
-            for character in episode.characters
-            if character.id == speaker_id
-        ),
-        speaker_id,
-    )
 
 
 def _primary_dialogue(
@@ -36,7 +23,7 @@ def _primary_dialogue(
     )
     if line is None:
         return None, None
-    return _speaker_name(episode, line.speaker_id), line.text
+    return speaker_name(episode, line.speaker_id), line.text
 
 
 def build_video_handoff(

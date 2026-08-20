@@ -113,10 +113,13 @@ ENABLE_MINIMAX_VIDEO=1
   --ratio 9:16 \
   --resolution 768P \
   --output output/h3_probe.mp4 \
+  --project-dir runs/approved-project \
+  --shot-id H3-01 \
+  --confirm-paid \
   --enable-live
 ```
 
-任务 ID、轮询次数、MiniMax 返回的用量和预估人民币费用会写入生成报告。省略 `--enable-live` 只生成计划，不会发起云端请求。
+`--confirm-paid` 会从已通过构思、剧本、分镜、素材和音频审批的项目中签发一次性确认令牌，且 `--shot-id` 的时长与分辨率必须和实际提交一致。任务 ID、轮询次数、MiniMax 返回的用量和预估人民币费用会写入生成报告。省略 `--enable-live` 只生成计划，不会发起云端请求。
 
 MiniMax H3 使用官方结构化提示词，而不是把通用视频提示词原样发送：
 

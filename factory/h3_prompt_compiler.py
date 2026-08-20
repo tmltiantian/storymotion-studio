@@ -123,6 +123,7 @@ def _shot_description(
         f"The scene remains in {shot.scene_title}",
         f"The visible subjects are {subject_text}",
         f"The physical action unfolds in this order: {shot.action.strip()}",
+        _motion_rhythm_instruction(),
         camera,
         "All paws, hands, limbs, props, contact points, weight shifts, and object "
         "trajectories remain anatomically correct and physically continuous",
@@ -130,6 +131,19 @@ def _shot_description(
     if dialogue:
         parts.append(dialogue)
     return ". ".join(part.strip(" .") for part in parts if part.strip()) + "."
+
+
+def _motion_rhythm_instruction() -> str:
+    return (
+        "The action uses readable causal beats instead of one blended movement: "
+        "establish the starting pose and trigger, use a brief reaction hold when "
+        "the character changes intention, establish a support or contact point "
+        "before applying force, show the resulting weight transfer or prop "
+        "trajectory, and ensure the result settles before the next major action begins. "
+        "Motion remains continuous but not uniformly smooth: use natural "
+        "acceleration, deceleration, and short holds; never use constant-speed "
+        "tweening, floating, gliding, teleporting, or over-smoothed interpolation"
+    )
 
 
 def _camera_instruction(camera: str) -> str:

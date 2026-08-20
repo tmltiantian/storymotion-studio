@@ -433,6 +433,12 @@ class MiniMaxH3Client(GatewayVideoClient):
             raise GatewayVideoError(
                 f"MiniMax H3 image role is unsupported: {unknown_roles[0]}."
             )
+        if "reference_image" in image_roles and any(
+            role in {"first_frame", "last_frame"} for role in image_roles
+        ):
+            raise GatewayVideoError(
+                "MiniMax H3 cannot mix keyframe images with reference images."
+            )
         if image_roles.count("first_frame") > 1:
             raise GatewayVideoError("MiniMax H3 accepts at most one first_frame.")
         if image_roles.count("last_frame") > 1:

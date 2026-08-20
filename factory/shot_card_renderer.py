@@ -7,7 +7,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-from .schema import Episode, NARRATOR_ID
+from .schema import Episode, NARRATOR_ID, speaker_name
 
 
 CARD_BACKGROUND = (17, 24, 39)
@@ -67,15 +67,6 @@ def _draw_wrapped(
         _, top, _, bottom = draw.textbbox((x, y), line, font=font)
         y += bottom - top + line_gap
     return y
-
-
-def _speaker_name(episode: Episode, speaker_id: str) -> str:
-    if speaker_id == NARRATOR_ID:
-        return "旁白"
-    for character in episode.characters:
-        if character.id == speaker_id:
-            return character.name
-    return speaker_id
 
 
 def _load_character_portraits(
@@ -239,7 +230,7 @@ def render_shot_cards(
         for line in shot.dialogue[:dialogue_limit]:
             y = _draw_wrapped(
                 draw,
-                f"{_speaker_name(episode, line.speaker_id)}：{line.text}",
+                f"{speaker_name(episode, line.speaker_id)}：{line.text}",
                 (margin + 42, y),
                 content_font,
                 CARD_TEXT if line.speaker_id != NARRATOR_ID else CARD_MUTED,

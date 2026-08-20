@@ -81,10 +81,10 @@ MiniMax H3 的公开规范是仓库外参考资料，不是运行依赖。StoryM
 | 参考视频复刻 | `pet_replica*.py` |
 | 音频驱动与口型 | `pet_sitcom_audio_first.py`, `pet_replica_lipsync.py` |
 | CLI 稳定公开能力面 | `pet_sitcom_service.py` |
-| 参考源锁定复刻 | `source_locked_cat_replica.py` |
 
 这些模块是可复用能力，不再拥有另一套项目调度逻辑；九阶段执行器负责调用它们。
-`source_locked_cat_replica.py` 暂时保留，只有当其中剩余配置能力全部迁入 `pet_replica_*`、生产调用归零且回归测试覆盖等价行为后才能删除。
+旧的参考源锁定专项实现已经退役。参考时间点、镜头区间、角色替换和源文件哈希绑定统一由
+`pet_replica_*` 维护，避免两套复刻逻辑继续分叉。
 
 ## EVAL 与交付
 

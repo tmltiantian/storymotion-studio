@@ -1,5 +1,19 @@
+import factory.local_voiceover as local_voiceover
+import factory.preview_writer as preview_writer
+import factory.schema as schema
+import factory.shot_card_renderer as shot_card_renderer
+import factory.video_handoff as video_handoff
+
 from factory.novel_planner import plan_episode
 from factory.schema import DialogueLine, Shot, episode_from_dict, episode_to_dict, validate_episode
+
+
+def test_renderers_share_schema_speaker_name() -> None:
+    assert hasattr(schema, "speaker_name")
+    assert local_voiceover.speaker_name is schema.speaker_name
+    assert preview_writer.speaker_name is schema.speaker_name
+    assert shot_card_renderer.speaker_name is schema.speaker_name
+    assert video_handoff.speaker_name is schema.speaker_name
 
 
 def test_episode_from_sample_validates():

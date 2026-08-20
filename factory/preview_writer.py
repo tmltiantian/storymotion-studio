@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .schema import Episode, NARRATOR_ID, episode_to_dict
+from .schema import Episode, episode_to_dict, speaker_name
 
 
 def format_srt_time(seconds: float) -> str:
@@ -16,15 +16,6 @@ def format_srt_time(seconds: float) -> str:
     secs = milliseconds // 1000
     millis = milliseconds % 1000
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
-
-
-def _speaker_name(episode: Episode, speaker_id: str) -> str:
-    if speaker_id == NARRATOR_ID:
-        return "旁白"
-    for character in episode.characters:
-        if character.id == speaker_id:
-            return character.name
-    return speaker_id
 
 
 def write_storyboard_markdown(episode: Episode, output_path: str | Path) -> Path:
@@ -70,7 +61,7 @@ def write_storyboard_markdown(episode: Episode, output_path: str | Path) -> Path
             ]
         )
         for line in shot.dialogue:
-            lines.append(f"- **{_speaker_name(episode, line.speaker_id)}** ({line.emotion}): {line.text}")
+            lines.append(f"- **{speaker_name(episode, line.speaker_id)}** ({line.emotion}): {line.text}")
         lines.append("")
 
     output.write_text("\n".join(lines), encoding="utf-8")
@@ -90,7 +81,7 @@ def write_subtitles(episode: Episode, output_path: str | Path) -> Path:
         for line in lines:
             start = cursor
             end = cursor + per_line
-            speaker = _speaker_name(episode, line.speaker_id)
+            speaker = speaker_name(episode, line.speaker_id)
             blocks.extend(
                 [
                     str(subtitle_index),
@@ -130,7 +121,7 @@ def write_timed_subtitles(
         end = float(timing["end_seconds"])
         if start < 0 or end <= start:
             raise ValueError("Voiceover subtitle timing must have a positive duration.")
-        speaker = _speaker_name(episode, line.speaker_id)
+        speaker = speaker_name(episode, line.speaker_id)
         blocks.extend(
             [
                 str(subtitle_index),

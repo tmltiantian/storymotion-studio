@@ -44,6 +44,12 @@ from factory.openmontage_adapter import load_config
 from factory.preview_refresh import PreviewRefreshError, refresh_project_preview
 from factory.provider_profile import resolve_provider_profile
 from factory.video_provider import build_video_client, default_video_resolution
+from factory.video_preflight import (
+    GenerationTokenError,
+    VideoGenerationRequest,
+    build_video_preflight,
+    issue_generation_token,
+)
 from factory.quality_bakeoff_runner import (
     QualityBakeoffRunnerError,
     run_quality_bakeoff_candidates,
@@ -719,6 +725,21 @@ def gateway_video_generate_command(args: argparse.Namespace) -> int:
     else:
         video_client = _gateway_video_client(profile, args)
         try:
+            project_dir = None
+            generation_token = ""
+            generation_request = None
+            if args.enable_live and args.confirm_paid:
+                if not args.project_dir.strip() or not args.shot_id.strip():
+                    raise ValueError(
+                        "--confirm-paid requires --project-dir and --shot-id."
+                    )
+                project_dir = Path(args.project_dir).expanduser().resolve()
+                preflight = build_video_preflight(
+                    project_dir,
+                    (args.shot_id.strip(),),
+                )
+                generation_request = VideoGenerationRequest.from_preflight(preflight)
+                generation_token = issue_generation_token(project_dir, preflight)
             report = render_gateway_video_single(
                 args.prompt,
                 output_path,
@@ -732,11 +753,14 @@ def gateway_video_generate_command(args: argparse.Namespace) -> int:
                 generate_audio=args.generate_audio,
                 allow_network=args.enable_live,
                 overwrite=args.overwrite,
+                project_dir=project_dir,
+                generation_token=generation_token,
+                generation_request=generation_request,
             )
             report["provider"] = profile.video.provider
             report["reference_audio_provided"] = bool(args.audio)
             write_json(report_path, report)
-        except (GatewayVideoBatchError, ValueError) as exc:
+        except (GatewayVideoBatchError, GenerationTokenError, OSError, ValueError) as exc:
             report = fallback_report
             error = str(exc)
             if profile.video.api_key:
@@ -4292,6 +4316,13 @@ def build_parser() -> argparse.ArgumentParser:
     gateway_video_generate_parser.add_argument("--download-timeout", type=float, default=120.0)
     gateway_video_generate_parser.add_argument("--poll-interval", type=float, default=3.0)
     gateway_video_generate_parser.add_argument("--max-wait", type=float, default=900.0)
+    gateway_video_generate_parser.add_argument("--project-dir", default="")
+    gateway_video_generate_parser.add_argument("--shot-id", default="")
+    gateway_video_generate_parser.add_argument(
+        "--confirm-paid",
+        action="store_true",
+        help="Issue and consume a one-shot token from an approved project preflight",
+    )
     gateway_video_generate_parser.add_argument("--enable-live", action="store_true")
     gateway_video_generate_parser.set_defaults(func=gateway_video_generate_command)
 
