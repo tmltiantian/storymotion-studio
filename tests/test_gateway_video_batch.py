@@ -9,6 +9,9 @@ from pathlib import Path
 import pytest
 
 import factory.gateway_video_batch as gateway_batch
+from factory.gateway_endpoint import (
+    gateway_endpoint_fingerprint as canonical_gateway_endpoint_fingerprint,
+)
 from factory.gateway_video import (
     GatewayVideoClient,
     GatewayVideoConfig,
@@ -30,6 +33,13 @@ from tests.media_fixtures import VALID_VIDEO_MP4
 
 
 MINIMAL_MP4 = VALID_VIDEO_MP4
+
+
+def test_gateway_batch_reuses_canonical_endpoint_fingerprint() -> None:
+    assert (
+        gateway_batch.gateway_endpoint_fingerprint
+        is canonical_gateway_endpoint_fingerprint
+    )
 
 
 def _write_wav(path: Path, *, duration: float = 1.0) -> None:

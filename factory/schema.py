@@ -50,6 +50,19 @@ class Episode:
     shots: list[Shot]
 
 
+def speaker_name(episode: Episode, speaker_id: str) -> str:
+    if speaker_id == NARRATOR_ID:
+        return "旁白"
+    return next(
+        (
+            character.name
+            for character in episode.characters
+            if character.id == speaker_id
+        ),
+        speaker_id,
+    )
+
+
 def episode_to_dict(episode: Episode) -> dict[str, Any]:
     return asdict(episode)
 

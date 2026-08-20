@@ -293,6 +293,45 @@ def test_cli_video_generate_uses_minimax_h3_defaults_without_network(tmp_path):
     assert "minimax-do-not-leak" not in json.dumps(report)
 
 
+def test_cli_video_generate_accepts_explicit_confirmed_project_scope_without_network(
+    tmp_path,
+):
+    config = _config(tmp_path)
+    output = tmp_path / "h3.mp4"
+
+    result = subprocess.run(
+        [
+            PYTHON,
+            "factory_cli.py",
+            "--config",
+            str(config),
+            "video-generate",
+            "--prompt",
+            "a cat raises one paw naturally",
+            "--output",
+            str(output),
+            "--duration",
+            "4",
+            "--project-dir",
+            str(tmp_path / "approved-project"),
+            "--shot-id",
+            "H3-A",
+            "--confirm-paid",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=_minimax_env(),
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    report = json.loads(Path(payload["gateway_video_report"]).read_text("utf-8"))
+    assert report["executed"] is False
+    assert report["blocked_reasons"] == ["Live gateway video generation is disabled."]
+    assert output.exists() is False
+
+
 def test_cli_video_generate_reports_unsupported_provider_without_crashing(tmp_path):
     config = _config(tmp_path)
     env = os.environ.copy()

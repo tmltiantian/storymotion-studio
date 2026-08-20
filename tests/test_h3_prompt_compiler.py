@@ -157,3 +157,23 @@ def test_speaker_ids_remain_stable_across_episode_shots():
     )
 
     assert "<Subject 1> (S2)" in prompt
+
+
+def test_motion_prompt_requires_causal_beats_without_uniform_smoothing():
+    episode = _episode()
+
+    prompt = compile_h3_shot_prompt(
+        episode,
+        episode.shots[0],
+        character_ids=("doubao", "mitao"),
+        reference_character_ids=("doubao", "mitao"),
+    )
+
+    assert "readable causal beats" in prompt
+    assert "brief reaction hold" in prompt
+    assert "support or contact point" in prompt
+    assert "weight transfer" in prompt
+    assert "result settles before the next major action begins" in prompt
+    assert "not uniformly smooth" in prompt
+    assert "constant-speed tweening" in prompt
+    assert "floating, gliding, teleporting" in prompt

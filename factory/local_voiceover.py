@@ -18,7 +18,7 @@ from .doubao_tts import (
 from .dotenv import parse_dotenv
 from .media_validation import probe_media, temporary_media_path
 from .placeholder_renderer import episode_duration_seconds
-from .schema import Episode, NARRATOR_ID
+from .schema import Episode, NARRATOR_ID, speaker_name
 
 
 NARRATOR_VOICE = "Reed (中文（中国大陆）)"
@@ -51,15 +51,6 @@ class VoiceoverCue:
     start_seconds: float
 
 
-def _speaker_name(episode: Episode, speaker_id: str) -> str:
-    if speaker_id == NARRATOR_ID:
-        return "旁白"
-    for character in episode.characters:
-        if character.id == speaker_id:
-            return character.name
-    return speaker_id
-
-
 def _voice_for_speaker(episode: Episode, speaker_id: str) -> str:
     if speaker_id == NARRATOR_ID:
         return NARRATOR_VOICE
@@ -75,12 +66,12 @@ def build_voiceover_cues(episode: Episode) -> list[VoiceoverCue]:
     for shot in episode.shots:
         cursor = shot_start + VOICEOVER_LEAD_SECONDS
         for line in shot.dialogue:
-            speaker_name = _speaker_name(episode, line.speaker_id)
+            resolved_speaker_name = speaker_name(episode, line.speaker_id)
             cues.append(
                 VoiceoverCue(
                     shot_id=shot.id,
                     speaker_id=line.speaker_id,
-                    speaker_name=speaker_name,
+                    speaker_name=resolved_speaker_name,
                     text=line.text,
                     voice=_voice_for_speaker(episode, line.speaker_id),
                     start_seconds=round(cursor, 3),

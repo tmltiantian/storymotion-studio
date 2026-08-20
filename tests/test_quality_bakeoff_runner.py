@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import factory_cli
+import factory.quality_bakeoff_runner as bakeoff_runner
+import factory.quality_production_runner as production_runner
 
 from factory.quality_bakeoff_runner import run_quality_bakeoff_candidates
 from factory.schema import Character, Episode, Shot, episode_to_dict
@@ -14,6 +16,12 @@ from factory.visual_timeline import (
     VisualTimeline,
     visual_timeline_to_dict,
 )
+
+
+def test_quality_runners_share_common_helpers() -> None:
+    assert bakeoff_runner._count is production_runner._count
+    assert bakeoff_runner._live_blockers is production_runner._live_blockers
+    assert bakeoff_runner._write_atomic_json is production_runner._write_atomic_json
 
 
 def _shot(
