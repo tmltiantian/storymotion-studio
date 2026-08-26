@@ -21,6 +21,7 @@ _LOCAL_EVALUATION_SCOPE = "local_evaluation_only"
 _PUBLIC_RELEASE_BLOCKER = "Replace or license the source audio."
 _FULL_AUDIO_RELATIVE_PATH = Path("audio/source_audio.aac")
 _DRIVE_DIRECTORY = Path("audio/drive")
+_CONTAINER_TIMESTAMP_TOLERANCE_S = 0.001
 
 
 class PetReplicaAudioError(RuntimeError):
@@ -690,7 +691,7 @@ def _validate_source_timeline(
         raise PetReplicaAudioError(
             "Zero source AAC PTS may not retain unexplained Skip Samples."
         )
-    if not _within_sample(
+    if not _within_container_timestamp(
         timeline.last_packet_end_s, plan.duration_s, timeline.sample_rate
     ):
         raise PetReplicaAudioError(
@@ -1074,3 +1075,12 @@ def _same_source_timestamp(left: float, right: float) -> bool:
 
 def _within_sample(left: float, right: float, sample_rate: int) -> bool:
     return math.isclose(left, right, rel_tol=0.0, abs_tol=1 / sample_rate)
+
+
+def _within_container_timestamp(left: float, right: float, sample_rate: int) -> bool:
+    return math.isclose(
+        left,
+        right,
+        rel_tol=0.0,
+        abs_tol=max(1 / sample_rate, _CONTAINER_TIMESTAMP_TOLERANCE_S),
+    )
