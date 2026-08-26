@@ -322,6 +322,23 @@ def test_audio_manifest_rejects_asset_path_escape_and_symlink(tmp_path):
         validate_replica_audio_manifest(plan, manifest.path, runner=fake_audio_runner)
 
 
+def test_audio_extraction_accepts_sub_millisecond_container_timestamp_rounding(tmp_path):
+    plan = replica_plan(tmp_path)
+
+    def runner(command, **kwargs):
+        if Path(command[0]).name == "ffprobe" and "-show_packets" in command:
+            target = Path(command[-1])
+            if target.suffix == ".mp4":
+                payload = _source_packets()
+                payload["packets"][-1]["duration_time"] = "77.229002000000"
+                return SimpleNamespace(stdout=json.dumps(payload), stderr="")
+        return fake_audio_runner(command, **kwargs)
+
+    manifest = extract_replica_audio(plan, reviewed_annotations(plan), runner=runner)
+
+    assert manifest.source_timeline.last_packet_end_s == pytest.approx(77.229002)
+
+
 @pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="ffmpeg and ffprobe are required for replica audio integration",

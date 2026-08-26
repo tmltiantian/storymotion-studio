@@ -27,8 +27,9 @@ LumenX 不再是运行依赖。旧版 LumenX handoff 仍可由网关批处理只
 
 ## 安装
 
-需要 Python 3.12、Node.js、npm、FFmpeg 和 ffprobe。初始化脚本会验证 Node.js/npm，创建
-Python 虚拟环境，并根据 `package-lock.json` 运行 `npm ci` 安装锁定的前端依赖：
+需要 Python 3.12、Node.js、npm、FFmpeg、ffprobe，以及 Fontconfig 的 `fc-query`（宠物短剧
+字幕合成会用它验证中文字体）。初始化脚本会验证 Node.js/npm，创建 Python 虚拟环境，并根据
+`package-lock.json` 运行 `npm ci` 安装锁定的前端依赖：
 
 ```bash
 cd /path/to/storymotion-studio
