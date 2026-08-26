@@ -8,6 +8,7 @@ from .file_io import write_json_atomic
 from .h3_prompt_compiler import compile_h3_shot_prompt
 from .provider_profile import resolve_provider_profile
 from .schema import Episode, NARRATOR_ID, speaker_name, validate_episode
+from .seedance_prompt_compiler import compile_seedance_h3_style_prompt
 
 
 VIDEO_HANDOFF_SCHEMA = "motion-comic-factory.video-handoff.v1"
@@ -78,6 +79,13 @@ def build_video_handoff(
             and effective_model.lower() == "minimax-h3"
         ):
             video_prompt = compile_h3_shot_prompt(
+                episode,
+                shot,
+                character_ids=tuple(character_ids),
+                reference_character_ids=reference_character_ids,
+            )
+        elif effective_provider == "gateway" and "seedance" in effective_model.lower():
+            video_prompt = compile_seedance_h3_style_prompt(
                 episode,
                 shot,
                 character_ids=tuple(character_ids),
