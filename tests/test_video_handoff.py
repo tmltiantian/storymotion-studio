@@ -118,7 +118,7 @@ def test_minimax_handoff_compiles_official_h3_reference_prompt(tmp_path: Path) -
     assert "non_diegetic_music:" in prompt
 
 
-def test_gateway_handoff_keeps_existing_flat_prompt_contract() -> None:
+def test_gateway_seedance_handoff_uses_h3_style_natural_language_prompt() -> None:
     config = load_config("config/factory.config.json")
     episode = plan_episode(
         "林澈推开门。苏眠低声说，别急。",
@@ -136,13 +136,12 @@ def test_gateway_handoff_keeps_existing_flat_prompt_contract() -> None:
         },
     )
 
-    first = episode.shots[0]
-    assert handoff["shots"][0]["video_prompt"] == (
-        f"{first.visual_prompt} 运镜：{first.camera}"
-    )
-    assert "integrated_multimodal_description:" not in handoff["shots"][0][
-        "video_prompt"
-    ]
+    prompt = handoff["shots"][0]["video_prompt"]
+    assert "画面与表演：" in prompt
+    assert "声音设计：" in prompt
+    assert "readable causal beats" in prompt
+    assert "<Subject" not in prompt
+    assert "<Picture" not in prompt
 
 
 def test_handoff_uses_effective_provider_model_override() -> None:
