@@ -6,7 +6,7 @@ import json
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
@@ -56,6 +56,9 @@ class GatewayVideoJob:
     output_path: str
     image_roles: tuple[str, ...] = ()
     audio_path: str = ""
+    reference_audio_sha256: str = ""
+    entry_anchor_id: str = ""
+    capability: str = "action_only"
 
     def __post_init__(self) -> None:
         roles = self.image_roles or ("reference_image",) * len(self.images)
@@ -64,6 +67,8 @@ class GatewayVideoJob:
                 "Gateway video image roles must match reference images."
             )
         object.__setattr__(self, "image_roles", tuple(roles))
+        if self.capability not in {"action_only", "speaking"}:
+            raise GatewayVideoBatchError("Gateway video capability is invalid.")
 
     def to_report(self) -> dict[str, Any]:
         return {
@@ -78,6 +83,9 @@ class GatewayVideoJob:
             "resolution": self.resolution,
             "output_path": self.output_path,
             "reference_audio_present": bool(self.audio_path),
+            "reference_audio_sha256": self.reference_audio_sha256,
+            "entry_anchor_id": self.entry_anchor_id,
+            "capability": self.capability,
         }
 
 
@@ -710,6 +718,9 @@ def _clip_state_base(
         "duration": job.duration,
         "resolution": job.resolution,
         "reference_image_count": len(job.images),
+        "reference_audio_sha256": job.reference_audio_sha256,
+        "entry_anchor_id": job.entry_anchor_id,
+        "capability": job.capability,
     }
 
 
@@ -775,6 +786,9 @@ def _job_signature(
         "prompt": job.prompt,
         "references": references,
         "reference_roles": list(job.image_roles),
+        "reference_audio_sha256": job.reference_audio_sha256,
+        "entry_anchor_id": job.entry_anchor_id,
+        "capability": job.capability,
         "duration": job.duration,
         "ratio": job.ratio,
         "resolution": job.resolution,
@@ -1511,7 +1525,11 @@ def render_gateway_video_single(
     report_path: str | Path,
     *,
     images: list[str | Path] | tuple[str | Path, ...] | None = None,
+    image_roles: list[str] | tuple[str, ...] | None = None,
     audio: str | Path | None = None,
+    reference_audio_sha256: str = "",
+    entry_anchor_id: str = "",
+    capability: str = "action_only",
     duration: int = 5,
     ratio: str = "9:16",
     resolution: str = "720p",
@@ -1544,12 +1562,21 @@ def render_gateway_video_single(
         )
 
     image_values_list: list[str] = []
-    image_roles: list[str] = []
-    for image in images or ():
+    resolved_image_roles: list[str] = []
+    supplied_roles = tuple(image_roles) if image_roles is not None else ()
+    if supplied_roles and len(supplied_roles) != len(images or ()):
+        raise GatewayVideoBatchError(
+            "Gateway video image roles must match reference images."
+        )
+    for position, image in enumerate(images or ()):
         source = getattr(image, "source", image)
-        role = getattr(image, "role", "reference_image")
+        role = (
+            supplied_roles[position]
+            if supplied_roles
+            else getattr(image, "role", "reference_image")
+        )
         image_values_list.append(str(source))
-        image_roles.append(str(role))
+        resolved_image_roles.append(str(role))
     image_values = tuple(image_values_list)
     single_shot_id = (
         generation_request.shot_ids[0]
@@ -1565,7 +1592,11 @@ def render_gateway_video_single(
         ratio=normalized_ratio,
         resolution=normalized_resolution,
         output_path=normalized_output,
-        image_roles=tuple(image_roles),
+        image_roles=tuple(resolved_image_roles),
+        audio_path=str(audio or ""),
+        reference_audio_sha256=reference_audio_sha256,
+        entry_anchor_id=entry_anchor_id,
+        capability=capability,
     )
     destination = Path(report_path)
     _validate_report_destination(destination, [job])
@@ -1577,7 +1608,12 @@ def render_gateway_video_single(
     except GatewayVideoError as exc:
         raise GatewayVideoBatchError(str(exc)) from exc
     reference_audio = _reference_audio_evidence(audio)
-
+    actual_audio_sha256 = str(reference_audio.get("reference_audio_sha256") or "")
+    if reference_audio_sha256 and reference_audio_sha256 != actual_audio_sha256:
+        raise GatewayVideoBatchError(
+            "Gateway video reference audio SHA-256 does not match the local audio."
+        )
+    job = replace(job, reference_audio_sha256=actual_audio_sha256)
     report: dict[str, Any] = {
         "schema_version": "motion-comic-factory.gateway-video.v2",
         "provider": getattr(client, "provider", "gateway"),
