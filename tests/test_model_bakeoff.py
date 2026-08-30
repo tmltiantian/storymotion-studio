@@ -1,4 +1,5 @@
 import json
+import hashlib
 from copy import deepcopy
 from dataclasses import replace
 from io import BytesIO
@@ -17,11 +18,15 @@ from factory.model_bakeoff import (
     ModelBakeoffError,
     build_model_bakeoff_plan,
     finalize_bakeoff,
+    model_route_capability,
+    require_speaking_capability,
     require_selected_production_model,
     require_selected_still_model,
     weighted_score,
 )
-from factory.schema import Character, Episode, Shot
+from factory.dialogue_assets import DialogueAudioAsset, DialogueAudioManifest
+from factory.performance_card import PerformanceCard, PerformanceSheet
+from factory.schema import Character, DialogueLine, Episode, Shot
 from factory.visual_timeline import MicroShot, VisualTimeline
 from tests.media_fixtures import VALID_VIDEO_MP4
 
@@ -68,14 +73,15 @@ def _micro_shot(
 
 def _timeline(*, with_still: bool = True) -> VisualTimeline:
     shots = [
-        _micro_shot("micro_001", 1),
-        _micro_shot("micro_002", 2, character_ids=("char_b",)),
+        _micro_shot("micro_wukong", 1, character_ids=("wukong",)),
+        _micro_shot("micro_yangjian", 2, character_ids=("yangjian",)),
+        _micro_shot("micro_nezha", 3, character_ids=("nezha",)),
     ]
     if with_still:
         shots.append(
             _micro_shot(
-                "micro_003",
-                3,
+                "micro_still",
+                4,
                 character_ids=(),
                 purpose="object",
                 camera_mode="object_insert",
@@ -91,11 +97,16 @@ def _episode(*, with_still: bool = True) -> Episode:
             "shot_001",
             1,
             "Shop",
-            "Lin and Su reach toward the envelope on the counter in the shop.",
+            "Wukong, Yang Jian, and Nezha deliver their short lines in the shop.",
             "Shop counter and envelope.",
             "static",
-            6.0,
+            9.0,
             "tense",
+            dialogue=[
+                DialogueLine("wukong", "I will go first."),
+                DialogueLine("yangjian", "Then I will follow."),
+                DialogueLine("nezha", "I am ready."),
+            ],
         )
     ]
     if with_still:
@@ -119,20 +130,85 @@ def _episode(*, with_still: bool = True) -> Episode:
         target_aspect_ratio="9:16",
         target_resolution="1080x1920",
         characters=[
-            Character("char_a", "Lin", "lead", "guarded", "dark coat", "low"),
-            Character("char_b", "Su", "lead", "calm", "light coat", "calm"),
+            Character("wukong", "Wukong", "lead", "guarded", "dark coat", "low"),
+            Character("yangjian", "Yang Jian", "lead", "calm", "light coat", "calm"),
+            Character("nezha", "Nezha", "lead", "focused", "red armor", "bright"),
         ],
         shots=shots,
     )
 
 
+def _sheet(timeline: VisualTimeline) -> PerformanceSheet:
+    cards = []
+    for shot in timeline.micro_shots:
+        is_visible_speech = shot.id in {
+            "micro_wukong",
+            "micro_yangjian",
+            "micro_nezha",
+        }
+        speaker_id = shot.character_ids[0] if is_visible_speech else ""
+        dialogue_id = (
+            f"shot_001.dialogue_{shot.index:02d}" if is_visible_speech else ""
+        )
+        cards.append(
+            PerformanceCard(
+                micro_shot_id=shot.id,
+                purpose=shot.purpose,
+                speaker_id=speaker_id,
+                dialogue_id=dialogue_id,
+                requires_visible_lipsync=is_visible_speech,
+                entry_anchor_id="entry",
+                scene_keyframe_id="scene",
+                actor_id=speaker_id,
+                target_id="",
+                contact_point="",
+                prop_hand="",
+                start_beat="starts still",
+                main_beat="speaks one line" if speaker_id else "holds still",
+                end_beat="ends still",
+                negative_constraints=("no_floating",),
+            )
+        )
+    return PerformanceSheet(project_id="bakeoff-project", cards=tuple(cards))
+
+
+def _manifest(tmp_path: Path, sheet: PerformanceSheet) -> DialogueAudioManifest:
+    assets = []
+    for card in sheet.cards:
+        if not card.requires_visible_lipsync:
+            continue
+        path = tmp_path / "dialogue_audio" / f"{card.dialogue_id}.wav"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(card.dialogue_id.encode())
+        assets.append(
+            DialogueAudioAsset(
+                dialogue_id=card.dialogue_id,
+                speaker_id=card.speaker_id,
+                path=str(path),
+                sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                duration_seconds=1.0,
+                voice_id=f"voice-{card.speaker_id}",
+            )
+        )
+    return DialogueAudioManifest(
+        assets=tuple(assets),
+        path=str(tmp_path / "dialogue_audio" / "dialogue_audio_manifest.json"),
+        voiceover_audio=str(tmp_path / "voiceover.wav"),
+        voiceover_sha256="0" * 64,
+    )
+
+
 def _build_plan(tmp_path: Path, *, with_still: bool = True) -> dict:
+    timeline = _timeline(with_still=with_still)
+    sheet = _sheet(timeline)
     return build_model_bakeoff_plan(
         _episode(with_still=with_still),
-        _timeline(with_still=with_still),
-        ["micro_001", "micro_002"],
+        timeline,
+        ["micro_wukong", "micro_yangjian", "micro_nezha"],
         tmp_path,
-        still_micro_shot_id="micro_003" if with_still else None,
+        performance_sheet=sheet,
+        dialogue_manifest=_manifest(tmp_path, sheet),
+        still_micro_shot_id="micro_still" if with_still else None,
         video_models=VIDEO_MODELS,
         still_models=STILL_MODELS,
     )
@@ -197,10 +273,26 @@ def _reviews(
         video_reviews[model] = [
             {
                 "micro_shot_id": shot_id,
+                "speaker_id": next(
+                    trial["speaker_id"]
+                    for trial in plan["speaking_trials"]
+                    if trial["micro_shot_id"] == shot_id
+                ),
+                "dialogue_id": next(
+                    trial["dialogue_id"]
+                    for trial in plan["speaking_trials"]
+                    if trial["micro_shot_id"] == shot_id
+                ),
+                "audio_sha256": next(
+                    trial["audio_sha256"]
+                    for trial in plan["speaking_trials"]
+                    if trial["micro_shot_id"] == shot_id
+                ),
                 "candidate_path": str(_video_path(run_dir, shot_id, model)),
                 "scores": _scores(video_scores[model]),
                 "hard_failures": list(video_failures.get(model, [])),
                 "notes": "local representative review",
+                "passed": _scores(video_scores[model])["lipsync"] >= 3.5,
             }
             for shot_id in plan["representative_character_micro_shot_ids"]
         ]
@@ -230,19 +322,37 @@ def _reviews(
     }
 
 
+def test_bakeoff_requires_one_visible_trial_for_each_required_speaker(tmp_path):
+    timeline = _timeline()
+    sheet = _sheet(timeline)
+    with pytest.raises(ModelBakeoffError, match="exactly three visible-speaking trials"):
+        build_model_bakeoff_plan(
+            _episode(),
+            timeline,
+            ["micro_wukong", "micro_yangjian"],
+            tmp_path,
+            performance_sheet=sheet,
+            dialogue_manifest=_manifest(tmp_path, sheet),
+            still_micro_shot_id="micro_still",
+            video_models=VIDEO_MODELS,
+            still_models=STILL_MODELS,
+        )
+
+
 def test_model_whitelists_are_reused_and_failure_sets_are_complete():
     from factory import model_bakeoff
 
     assert model_bakeoff.PRODUCTION_VIDEO_MODELS is PRODUCTION_VIDEO_MODELS
     assert model_bakeoff.PRODUCTION_STILL_MODELS is PRODUCTION_STILL_MODELS
     assert SCORE_WEIGHTS == {
-        "identity": 25,
-        "expression": 20,
+        "identity": 20,
+        "expression": 15,
         "anatomy": 15,
         "continuity": 15,
         "semantics": 10,
         "motion": 10,
         "clean_frame": 5,
+        "lipsync": 10,
     }
     assert VIDEO_HARD_FAILURES >= {
         "identity_swap",
@@ -269,9 +379,10 @@ def test_weighted_score_returns_a_two_decimal_0_to_100_score():
         "semantics": 1,
         "motion": 0,
         "clean_frame": 5,
+        "lipsync": 4,
     }
 
-    assert weighted_score(scores) == 63.0
+    assert weighted_score(scores) == 62.0
     assert weighted_score({key: 4.123 for key in SCORE_WEIGHTS}) == 82.46
 
 
@@ -298,11 +409,12 @@ def test_build_plan_writes_exact_atomic_artifact(tmp_path):
 
     assert plan["project_id"] == "bakeoff-project"
     assert plan["representative_character_micro_shot_ids"] == [
-        "micro_001",
-        "micro_002",
+        "micro_wukong",
+        "micro_yangjian",
+        "micro_nezha",
     ]
     assert plan["requires_still"] is True
-    assert plan["still_micro_shot_id"] == "micro_003"
+    assert plan["still_micro_shot_id"] == "micro_still"
     assert plan["video_models"] == VIDEO_MODELS
     assert plan["still_models"] == STILL_MODELS
     assert plan["minimum_score"] == 80
@@ -314,45 +426,45 @@ def test_build_plan_writes_exact_atomic_artifact(tmp_path):
 @pytest.mark.parametrize(
     ("character_ids", "still_id", "video_models", "still_models", "message"),
     [
-        (["micro_001"], "micro_003", VIDEO_MODELS, STILL_MODELS, "exactly two"),
+        (["micro_wukong"], "micro_still", VIDEO_MODELS, STILL_MODELS, "exactly three"),
         (
-            ["micro_001", "micro_001"],
-            "micro_003",
+            ["micro_wukong", "micro_wukong", "micro_wukong"],
+            "micro_still",
             VIDEO_MODELS,
             STILL_MODELS,
-            "different",
+            "visible-speaking",
         ),
         (
-            ["micro_001", "unknown"],
-            "micro_003",
+            ["micro_wukong", "micro_yangjian", "unknown"],
+            "micro_still",
             VIDEO_MODELS,
             STILL_MODELS,
-            "Unknown",
+            "visible-speaking",
         ),
         (
-            ["micro_001", "micro_003"],
-            "micro_003",
+            ["micro_wukong", "micro_yangjian", "micro_still"],
+            "micro_still",
             VIDEO_MODELS,
             STILL_MODELS,
-            "character",
+            "visible-speaking",
         ),
         (
-            ["micro_001", "micro_002"],
-            "micro_001",
+            ["micro_wukong", "micro_yangjian", "micro_nezha"],
+            "micro_wukong",
             VIDEO_MODELS,
             STILL_MODELS,
             "still route",
         ),
         (
-            ["micro_001", "micro_002"],
-            "micro_003",
+            ["micro_wukong", "micro_yangjian", "micro_nezha"],
+            "micro_still",
             [VIDEO_MODELS[0], VIDEO_MODELS[0]],
             STILL_MODELS,
             "whitelist",
         ),
         (
-            ["micro_001", "micro_002"],
-            "micro_003",
+            ["micro_wukong", "micro_yangjian", "micro_nezha"],
+            "micro_still",
             VIDEO_MODELS + ["unknown"],
             STILL_MODELS,
             "whitelist",
@@ -362,12 +474,16 @@ def test_build_plan_writes_exact_atomic_artifact(tmp_path):
 def test_build_plan_rejects_bad_selection_or_models(
     tmp_path, character_ids, still_id, video_models, still_models, message
 ):
+    timeline = _timeline()
+    sheet = _sheet(timeline)
     with pytest.raises(ModelBakeoffError, match=message):
         build_model_bakeoff_plan(
             _episode(),
-            _timeline(),
+            timeline,
             character_ids,
             tmp_path,
+            performance_sheet=sheet,
+            dialogue_manifest=_manifest(tmp_path, sheet),
             still_micro_shot_id=still_id,
             video_models=video_models,
             still_models=still_models,
@@ -375,12 +491,16 @@ def test_build_plan_rejects_bad_selection_or_models(
 
 
 def test_build_plan_requires_one_still_id_only_when_still_route_exists(tmp_path):
+    timeline = _timeline()
+    sheet = _sheet(timeline)
     with pytest.raises(ModelBakeoffError, match="still-routed"):
         build_model_bakeoff_plan(
             _episode(),
-            _timeline(),
-            ["micro_001", "micro_002"],
+            timeline,
+            ["micro_wukong", "micro_yangjian", "micro_nezha"],
             tmp_path,
+            performance_sheet=sheet,
+            dialogue_manifest=_manifest(tmp_path, sheet),
             video_models=VIDEO_MODELS,
             still_models=STILL_MODELS,
         )
@@ -424,9 +544,11 @@ def test_build_plan_rejects_invalid_visual_timeline(tmp_path, timeline):
         build_model_bakeoff_plan(
             _episode(),
             timeline,
-            ["micro_001", "micro_002"],
+            ["micro_wukong", "micro_yangjian", "micro_nezha"],
             tmp_path,
-            still_micro_shot_id="micro_003",
+            performance_sheet=_sheet(_timeline()),
+            dialogue_manifest=_manifest(tmp_path, _sheet(_timeline())),
+            still_micro_shot_id="micro_still",
             video_models=VIDEO_MODELS,
             still_models=STILL_MODELS,
         )
@@ -448,14 +570,19 @@ def test_finalize_selects_passing_video_and_best_still_and_writes_artifacts(
     assert report["selected_still_model"] == STILL_MODELS[0]
     assert report["production_ready"] is True
     assert report["representative_character_micro_shot_ids"] == [
-        "micro_001",
-        "micro_002",
+        "micro_wukong",
+        "micro_yangjian",
+        "micro_nezha",
     ]
-    assert report["still_micro_shot_id"] == "micro_003"
+    assert report["still_micro_shot_id"] == "micro_still"
     assert report["video_results"][0]["aggregate_score"] == 88.0
     assert [
         item["weighted_score"] for item in report["video_results"][0]["shots"]
-    ] == [88.0, 88.0]
+    ] == [88.0, 88.0, 88.0]
+    assert [
+        trial["speaker_id"] for trial in report["video_results"][0]["speaking_trials"]
+    ] == ["wukong", "yangjian", "nezha"]
+    assert model_route_capability(report, VIDEO_MODELS[0]) == "speaking"
     assert require_selected_production_model(report) == VIDEO_MODELS[0]
     assert require_selected_still_model(report) == STILL_MODELS[0]
     persisted_reviews = json.loads(
@@ -475,12 +602,27 @@ def test_finalize_selects_passing_video_and_best_still_and_writes_artifacts(
     assert not list(tmp_path.glob(".model_bakeoff_*.json.*.tmp"))
 
 
+def test_failed_nezha_lipsync_makes_model_action_only(tmp_path):
+    plan = _build_plan(tmp_path)
+    reviews = _reviews(plan)
+    nezha_review = reviews["video_reviews"][VIDEO_MODELS[0]][2]
+    nezha_review["scores"]["lipsync"] = 1.0
+    nezha_review["passed"] = False
+
+    report = finalize_bakeoff(plan, reviews)
+
+    assert report["selected_model"] == VIDEO_MODELS[0]
+    assert model_route_capability(report, VIDEO_MODELS[0]) == "action_only"
+    with pytest.raises(ModelBakeoffError, match="not speaking-capable"):
+        require_speaking_capability(report, VIDEO_MODELS[0], "micro_nezha")
+
+
 def test_finalize_rejects_plan_that_differs_from_plan_artifact(tmp_path):
     plan = _build_plan(tmp_path)
     forged = deepcopy(plan)
     forged["representative_character_micro_shot_ids"].reverse()
 
-    with pytest.raises(ModelBakeoffError, match="plan artifact"):
+    with pytest.raises(ModelBakeoffError, match="speaking trials|plan artifact"):
         finalize_bakeoff(forged, _reviews(forged))
 
 
