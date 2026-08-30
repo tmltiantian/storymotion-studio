@@ -1,6 +1,11 @@
 from pathlib import Path
+import pytest
 
-from factory.dialogue_assets import DialogueAudioAsset, DialogueAudioManifest
+from factory.dialogue_assets import (
+    DialogueAudioAsset,
+    DialogueAudioError,
+    DialogueAudioManifest,
+)
 from factory.file_io import sha256_file
 from factory.novel_planner import plan_episode
 from factory.schema import Character, DialogueLine, Episode, Shot
@@ -92,3 +97,56 @@ def test_write_shot_audio_assets_uses_validated_dialogue_asset_as_legacy_alias(
     )
 
     assert aliases == {"s01": asset_path}
+
+
+def test_write_shot_audio_assets_rejects_an_alias_with_the_wrong_speaker(
+    tmp_path: Path,
+) -> None:
+    episode = Episode(
+        project_id="shot_audio_speaker",
+        title="Shot audio speaker",
+        language="en",
+        style="motion comic",
+        target_aspect_ratio="9:16",
+        target_resolution="1080x1920",
+        characters=[Character("wukong", "Wukong", "lead", "alert", "armor", "low")],
+        shots=[
+            Shot(
+                "s01",
+                1,
+                "Gate",
+                "Wukong speaks.",
+                "A gate.",
+                "static",
+                4.0,
+                "tense",
+                dialogue=[DialogueLine("wukong", "Open the gate.")],
+                character_ids=["wukong"],
+            )
+        ],
+    )
+    asset_path = tmp_path / "s01.dialogue_01.wav"
+    asset_path.write_bytes(b"final dialogue audio")
+    manifest = DialogueAudioManifest(
+        assets=(
+            DialogueAudioAsset(
+                dialogue_id="s01.dialogue_01",
+                speaker_id="yangjian",
+                path=str(asset_path),
+                sha256=sha256_file(asset_path),
+                duration_seconds=0.25,
+                voice_id="yangjian-voice",
+            ),
+        ),
+        path=str(tmp_path / "dialogue_audio_manifest.json"),
+        voiceover_audio="",
+        voiceover_sha256="",
+    )
+
+    with pytest.raises(DialogueAudioError, match="speaker does not match"):
+        write_shot_audio_assets(
+            episode,
+            tmp_path / "missing.m4a",
+            tmp_path / "unused",
+            dialogue_manifest=manifest,
+        )
