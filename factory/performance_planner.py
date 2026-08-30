@@ -310,7 +310,7 @@ def parse_performance_plan(
         payload = json.loads(content)
     except (TypeError, json.JSONDecodeError) as exc:
         raise PerformancePlanError("performance plan must be valid JSON.") from exc
-    if isinstance(payload, dict) and "performance_sheet" in payload:
+    if isinstance(payload, dict) and "visual_timeline" in payload:
         missing = _PERFORMANCE_PLAN_KEYS - payload.keys()
         unexpected = payload.keys() - _PERFORMANCE_PLAN_KEYS
         if missing:

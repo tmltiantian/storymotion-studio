@@ -143,6 +143,52 @@ def test_parse_performance_plan_rejects_extra_wrapper_keys(sample_episode):
         parse_performance_plan(json.dumps(payload), sample_episode, timeline)
 
 
+def test_parse_performance_plan_rejects_wrapper_missing_a_sheet(sample_episode):
+    payload = {"visual_timeline": performance_payload(sample_episode)}
+
+    with pytest.raises(PerformancePlanError, match="missing keys: performance_sheet"):
+        parse_performance_plan(json.dumps(payload), sample_episode)
+
+
+@pytest.mark.parametrize("purpose", ["", "improv"])
+def test_parse_performance_plan_rejects_blank_or_arbitrary_card_purpose(
+    sample_episode, purpose
+):
+    payload = performable_payload(sample_episode)
+    payload["performance_sheet"]["cards"][0]["purpose"] = purpose
+    timeline = visual_timeline_from_dict(payload["visual_timeline"])
+
+    with pytest.raises(PerformancePlanError, match="purpose must be a canonical enum"):
+        parse_performance_plan(json.dumps(payload), sample_episode, timeline)
+
+
+def test_parse_performance_plan_rejects_card_purpose_mismatched_to_microshot(
+    sample_episode,
+):
+    payload = performable_payload(sample_episode)
+    payload["performance_sheet"]["cards"][0]["purpose"] = "reaction"
+    timeline = visual_timeline_from_dict(payload["visual_timeline"])
+
+    with pytest.raises(PerformancePlanError, match="purpose does not match microshot"):
+        parse_performance_plan(json.dumps(payload), sample_episode, timeline)
+
+
+def test_parse_performance_plan_rejects_contact_action_without_evidence_or_valid_actor(
+    sample_episode,
+):
+    payload = performable_payload(sample_episode)
+    payload["visual_timeline"]["micro_shots"][0]["action_code"] = "grasp"
+    payload["performance_sheet"]["cards"][0].update(
+        {"actor_id": "improvised stranger", "contact_point": ""}
+    )
+    timeline = visual_timeline_from_dict(payload["visual_timeline"])
+
+    with pytest.raises(PerformancePlanError, match="actor_id must be an on-screen"):
+        parse_performance_plan(json.dumps(payload), sample_episode, timeline)
+    with pytest.raises(PerformancePlanError, match="contact action requires exactly one contact_point"):
+        parse_performance_plan(json.dumps(payload), sample_episode, timeline)
+
+
 def test_parse_performance_plan_accepts_structured_action(sample_episode):
     timeline = parse_performance_plan(
         json.dumps(performance_payload(sample_episode)), sample_episode

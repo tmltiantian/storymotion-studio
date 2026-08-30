@@ -39,7 +39,7 @@ def timeline() -> VisualTimeline:
             MicroShot(
                 "micro_001", 1, "scene_001", "Gate", "source-unspecified",
                 "action", ("wukong", "yangjian"), "alert", "focused", 3,
-                "at the gate", "before the gate", "at the gate", "wukong", "press",
+                "at the gate", "before the gate", "at the gate", "wukong", "grasp",
                 "gate", "locked", 4, 4.0, "hard_cut", "hard_cut", ("no_text",), 8,
             ),
         ),
