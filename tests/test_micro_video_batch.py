@@ -1,4 +1,5 @@
 import json
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 
@@ -10,18 +11,20 @@ from factory.gateway_video import (
     GatewayVideoTask,
 )
 from factory.gateway_video_batch import GatewayVideoJob, _job_signature
+from factory.dialogue_assets import DialogueAudioAsset, DialogueAudioManifest
 from factory.micro_video_batch import (
     MicroVideoBatchError,
     MicroVideoJob,
     _reference_label,
-    build_micro_video_jobs,
+    build_micro_video_jobs as _build_micro_video_jobs,
     candidate_output_path,
     candidate_report_path,
     render_micro_video_batch,
 )
 from factory.prompt_compiler import compile_video_prompt
 from factory.prompt_safety import PREVIOUS_SHOT_CONTINUITY
-from factory.schema import Character, Episode, Shot
+from factory.performance_card import PerformanceCard, PerformanceSheet
+from factory.schema import Character, DialogueLine, Episode, Shot
 from factory.visual_timeline import MicroShot, VisualTimeline
 
 
@@ -173,6 +176,212 @@ def _job(
     )
 
 
+def _speaking_evidence(tmp_path: Path) -> tuple[
+    Episode, VisualTimeline, PerformanceSheet, DialogueAudioManifest, dict[str, str], dict[str, str]
+]:
+    episode = _episode()
+    episode = replace(
+        episode,
+        shots=[
+            replace(
+                episode.shots[0],
+                duration_seconds=3.0,
+                dialogue=[DialogueLine("char_a", "Do not open it.")],
+                character_ids=["char_a"],
+            )
+        ],
+    )
+    timeline = VisualTimeline(project_id=episode.project_id, micro_shots=(_micro_shot(),))
+    card = PerformanceCard(
+        micro_shot_id="micro_001",
+        purpose="action",
+        speaker_id="char_a",
+        dialogue_id="shot_001.dialogue_01",
+        requires_visible_lipsync=True,
+        entry_anchor_id="anchor_001",
+        scene_keyframe_id="gate",
+        actor_id="char_a",
+        target_id="envelope",
+        contact_point="",
+        prop_hand="",
+        start_beat="turns toward the envelope",
+        main_beat="speaks one short line",
+        end_beat="holds the envelope in view",
+        negative_constraints=("no_rain",),
+    )
+    audio = tmp_path / "run/dialogue_audio/shot_001.dialogue_01.wav"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"final-dialogue-audio")
+    manifest = DialogueAudioManifest(
+        assets=(
+            DialogueAudioAsset(
+                dialogue_id=card.dialogue_id,
+                speaker_id=card.speaker_id,
+                path=str(audio),
+                sha256=hashlib.sha256(audio.read_bytes()).hexdigest(),
+                duration_seconds=1.0,
+                voice_id="char-a",
+            ),
+        ),
+        path=str(tmp_path / "run/dialogue_audio/dialogue_audio_manifest.json"),
+        voiceover_audio=str(audio),
+        voiceover_sha256=hashlib.sha256(audio.read_bytes()).hexdigest(),
+    )
+    scene = tmp_path / "run/scene_keyframes/gate.png"
+    scene.parent.mkdir(parents=True, exist_ok=True)
+    scene.write_bytes(b"\x89PNG\r\n\x1a\nscene")
+    anchor = tmp_path / "run/approved_anchors/anchor_001.png"
+    anchor.parent.mkdir(parents=True, exist_ok=True)
+    anchor.write_bytes(b"\x89PNG\r\n\x1a\nanchor")
+    return (
+        episode,
+        timeline,
+        PerformanceSheet(project_id=episode.project_id, cards=(card,)),
+        manifest,
+        {"gate": str(scene)},
+        {"anchor_001": str(anchor)},
+    )
+
+
+def _action_evidence(
+    run_dir: Path, episode: Episode, timeline: VisualTimeline
+) -> dict[str, object]:
+    cards = []
+    scene_keyframes = {}
+    approved_anchors = {}
+    for shot in timeline.micro_shots:
+        scene_id = f"scene_{shot.index:03d}"
+        anchor_id = f"anchor_{shot.index:03d}"
+        scene = run_dir / "scene_keyframes" / f"{scene_id}.png"
+        anchor = run_dir / "approved_anchors" / f"{anchor_id}.png"
+        scene.parent.mkdir(parents=True, exist_ok=True)
+        anchor.parent.mkdir(parents=True, exist_ok=True)
+        scene.write_bytes(b"\x89PNG\r\n\x1a\nscene")
+        anchor.write_bytes(b"\x89PNG\r\n\x1a\nanchor")
+        scene_keyframes[scene_id] = str(scene)
+        approved_anchors[anchor_id] = str(anchor)
+        cards.append(
+            PerformanceCard(
+                micro_shot_id=shot.id,
+                purpose=shot.purpose,
+                speaker_id="",
+                dialogue_id="",
+                requires_visible_lipsync=False,
+                entry_anchor_id=anchor_id,
+                scene_keyframe_id=scene_id,
+                actor_id=shot.action_actor_id,
+                target_id=shot.action_target,
+                contact_point="",
+                prop_hand="",
+                start_beat="starts still",
+                main_beat="performs one action",
+                end_beat="ends still",
+                negative_constraints=shot.negative_constraints,
+            )
+        )
+    return {
+        "performance_sheet": PerformanceSheet(
+            project_id=episode.project_id, cards=tuple(cards)
+        ),
+        "dialogue_manifest": DialogueAudioManifest(
+            assets=(),
+            path=str(run_dir / "dialogue_audio_manifest.json"),
+            voiceover_audio="",
+            voiceover_sha256="",
+        ),
+        "capability_report": {},
+        "scene_keyframes": scene_keyframes,
+        "approved_anchors": approved_anchors,
+    }
+
+
+def build_micro_video_jobs(
+    episode: Episode, timeline: VisualTimeline, character_assets: dict, **kwargs
+):
+    """Give legacy action-only tests complete local evidence by default."""
+    evidence = _action_evidence(Path(kwargs["run_dir"]), episode, timeline)
+    for key, value in evidence.items():
+        kwargs.setdefault(key, value)
+    return _build_micro_video_jobs(episode, timeline, character_assets, **kwargs)
+
+
+def test_visible_speech_job_requires_audio_scene_frame_anchor_and_speaking_capability(
+    tmp_path, monkeypatch
+):
+    """Removing the approved anchor must stop a speaking request before rendering."""
+    episode, timeline, sheet, manifest, scene_keyframes, _anchors = _speaking_evidence(tmp_path)
+    monkeypatch.setattr(
+        "factory.model_bakeoff.require_speaking_capability", lambda *args: None
+    )
+
+    with pytest.raises(MicroVideoBatchError, match="micro_001 missing approved entry anchor"):
+        build_micro_video_jobs(
+            episode,
+            timeline,
+            _assets(tmp_path),
+            model="doubao-seedance-2-0",
+            run_dir=tmp_path / "run",
+            candidate_number=1,
+            performance_sheet=sheet,
+            dialogue_manifest=manifest,
+            capability_report={},
+            scene_keyframes=scene_keyframes,
+            approved_anchors={},
+        )
+
+
+def test_visible_speech_job_passes_audio_and_image_roles_to_gateway(tmp_path, monkeypatch):
+    """Dropping speech evidence during handoff would make the request unsafe to resume."""
+    episode, timeline, sheet, manifest, scene_keyframes, anchors = _speaking_evidence(tmp_path)
+    monkeypatch.setattr(
+        "factory.model_bakeoff.require_speaking_capability", lambda *args: None
+    )
+    speaking_job = build_micro_video_jobs(
+        episode,
+        timeline,
+        _assets(tmp_path),
+        model="doubao-seedance-2-0",
+        run_dir=tmp_path / "run",
+        candidate_number=1,
+        performance_sheet=sheet,
+        dialogue_manifest=manifest,
+        capability_report={},
+        scene_keyframes=scene_keyframes,
+        approved_anchors=anchors,
+    )[0]
+    received = {}
+
+    def fake_render(*_args, **kwargs):
+        received.update(kwargs)
+        return {
+            "success": False,
+            "completed_count": 0,
+            "skipped_count": 0,
+            "resumed_count": 0,
+            "failed_count": 0,
+            "blocked_reasons": ["disabled"],
+            "results": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr("factory.micro_video_batch.render_gateway_video_single", fake_render)
+    result = render_micro_video_batch(
+        [speaking_job],
+        tmp_path / "run",
+        _config(),
+        client_factory=lambda config: type("FakeClient", (), {"config": config})(),
+    )
+
+    assert result["jobs"][0]["reference_audio_sha256"] == speaking_job.audio_sha256
+    assert result["jobs"][0]["reference_image_roles"] == [
+        "last_frame",
+        "first_frame",
+        "reference_image",
+    ]
+    assert received["audio"] == speaking_job.audio_path
+    assert received["image_roles"] == speaking_job.image_roles
+
+
 def test_build_micro_jobs_routes_only_character_shots_with_exact_ordered_references(
     tmp_path,
 ):
@@ -190,14 +399,19 @@ def test_build_micro_jobs_routes_only_character_shots_with_exact_ordered_referen
     )
 
     assert [job.micro_shot_id for job in jobs] == ["micro_001"]
-    assert jobs[0].images == (assets["characters"][0]["reference_image_path"],)
+    assert jobs[0].images[2:] == (assets["characters"][0]["reference_image_path"],)
+    assert jobs[0].image_roles == (
+        "last_frame",
+        "first_frame",
+        "reference_image",
+    )
     assert jobs[0].output_path.endswith(
         "micro_clips/micro_001/doubao-seedance-2-0/candidate_001.mp4"
     )
     assert jobs[0].report_path.endswith("candidate_001.report.json")
     assert jobs[0].duration == 4
     assert jobs[0].resolution == "1080p"
-    assert jobs[0].generate_audio is False
+    assert jobs[0].capability == "action_only"
     assert "Su Mian" not in jobs[0].prompt
 
 
@@ -249,7 +463,7 @@ def test_build_micro_jobs_preserves_multi_character_shot_reference_order(tmp_pat
         candidate_number=1,
     )
 
-    assert jobs[0].images == (
+    assert jobs[0].images[2:] == (
         assets["characters"][1]["reference_image_path"],
         assets["characters"][0]["reference_image_path"],
     )
@@ -469,10 +683,13 @@ def test_build_micro_jobs_resolves_continuity_before_compiling(tmp_path, monkeyp
     timeline = _timeline(continuity=True)
     contexts = []
 
-    def compile_spy(episode_arg, shot, *, previous_scene_context=None):
+    def compile_spy(episode_arg, shot, *, card=None, previous_scene_context=None):
         contexts.append((shot.id, previous_scene_context))
         return compile_video_prompt(
-            episode_arg, shot, previous_scene_context=previous_scene_context
+            episode_arg,
+            shot,
+            card=card,
+            previous_scene_context=previous_scene_context,
         )
 
     monkeypatch.setattr("factory.micro_video_batch.compile_video_prompt", compile_spy)
@@ -587,6 +804,11 @@ def test_render_micro_video_batch_uses_each_job_model_and_single_job_contract(
             "images": (
                 str(tmp_path / "run/assets/characters" / f"micro_{index:03d}.png"),
             ),
+            "image_roles": ("reference_image",),
+            "audio": None,
+            "reference_audio_sha256": "",
+            "entry_anchor_id": "",
+            "capability": "action_only",
             "duration": 4,
             "ratio": "9:16",
             "resolution": "1080p",
