@@ -59,6 +59,7 @@ class GatewayVideoJob:
     reference_audio_sha256: str = ""
     entry_anchor_id: str = ""
     capability: str = "action_only"
+    capability_provenance_sha256: str = ""
 
     def __post_init__(self) -> None:
         roles = self.image_roles or ("reference_image",) * len(self.images)
@@ -86,6 +87,7 @@ class GatewayVideoJob:
             "reference_audio_sha256": self.reference_audio_sha256,
             "entry_anchor_id": self.entry_anchor_id,
             "capability": self.capability,
+            "capability_provenance_sha256": self.capability_provenance_sha256,
         }
 
 
@@ -721,6 +723,7 @@ def _clip_state_base(
         "reference_audio_sha256": job.reference_audio_sha256,
         "entry_anchor_id": job.entry_anchor_id,
         "capability": job.capability,
+        "capability_provenance_sha256": job.capability_provenance_sha256,
     }
 
 
@@ -789,6 +792,7 @@ def _job_signature(
         "reference_audio_sha256": job.reference_audio_sha256,
         "entry_anchor_id": job.entry_anchor_id,
         "capability": job.capability,
+        "capability_provenance_sha256": job.capability_provenance_sha256,
         "duration": job.duration,
         "ratio": job.ratio,
         "resolution": job.resolution,
@@ -1530,6 +1534,7 @@ def render_gateway_video_single(
     reference_audio_sha256: str = "",
     entry_anchor_id: str = "",
     capability: str = "action_only",
+    capability_provenance_sha256: str = "",
     duration: int = 5,
     ratio: str = "9:16",
     resolution: str = "720p",
@@ -1597,6 +1602,7 @@ def render_gateway_video_single(
         reference_audio_sha256=reference_audio_sha256,
         entry_anchor_id=entry_anchor_id,
         capability=capability,
+        capability_provenance_sha256=capability_provenance_sha256,
     )
     destination = Path(report_path)
     _validate_report_destination(destination, [job])

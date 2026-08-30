@@ -382,6 +382,74 @@ def test_visible_speech_job_passes_audio_and_image_roles_to_gateway(tmp_path, mo
     assert received["image_roles"] == speaking_job.image_roles
 
 
+def _speaking_job(tmp_path, monkeypatch) -> MicroVideoJob:
+    episode, timeline, sheet, manifest, scene_keyframes, anchors = _speaking_evidence(
+        tmp_path
+    )
+    monkeypatch.setattr(
+        "factory.model_bakeoff.require_speaking_capability", lambda *args: None
+    )
+    return build_micro_video_jobs(
+        episode,
+        timeline,
+        _assets(tmp_path),
+        model="doubao-seedance-2-0",
+        run_dir=tmp_path / "run",
+        candidate_number=1,
+        performance_sheet=sheet,
+        dialogue_manifest=manifest,
+        capability_report={},
+        scene_keyframes=scene_keyframes,
+        approved_anchors=anchors,
+    )[0]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda job: replace(job, audio_path="", audio_sha256=""),
+            "Speaking micro-video job evidence is incomplete",
+        ),
+        (
+            lambda job: replace(job, audio_sha256="0" * 64),
+            "Speaking micro-video audio is invalid",
+        ),
+        (
+            lambda job: replace(
+                job,
+                image_roles=("last_frame", "reference_image", "reference_image"),
+            ),
+            "speaking frame evidence",
+        ),
+        (
+            lambda job: replace(
+                job,
+                image_roles=("first_frame", "reference_image", "reference_image"),
+            ),
+            "speaking frame evidence",
+        ),
+        (
+            lambda job: replace(job, capability_provenance=None),
+            "speaking capability provenance",
+        ),
+    ],
+)
+def test_render_rejects_forged_speaking_evidence_before_client_creation(
+    tmp_path, monkeypatch, mutate, message
+):
+    """A direct public render call must not turn forged speaking evidence into a request."""
+    speaking_job = _speaking_job(tmp_path, monkeypatch)
+
+    with pytest.raises(MicroVideoBatchError, match=message):
+        render_micro_video_batch(
+            [mutate(speaking_job)],
+            tmp_path / "run",
+            _config(),
+            client_factory=lambda _config: pytest.fail("client must not be created"),
+        )
+
+
 def test_build_micro_jobs_routes_only_character_shots_with_exact_ordered_references(
     tmp_path,
 ):
@@ -809,6 +877,7 @@ def test_render_micro_video_batch_uses_each_job_model_and_single_job_contract(
             "reference_audio_sha256": "",
             "entry_anchor_id": "",
             "capability": "action_only",
+            "capability_provenance_sha256": "",
             "duration": 4,
             "ratio": "9:16",
             "resolution": "1080p",
