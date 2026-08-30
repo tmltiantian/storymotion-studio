@@ -18,6 +18,8 @@ from .doubao_tts import (
 from .dotenv import parse_dotenv
 from .media_validation import probe_media, temporary_media_path
 from .placeholder_renderer import episode_duration_seconds
+from .performance_card import dialogue_id_for
+from .file_io import sha256_file
 from .schema import Episode, NARRATOR_ID, speaker_name
 
 
@@ -44,6 +46,7 @@ class VoiceoverTimingError(RuntimeError):
 @dataclass(frozen=True)
 class VoiceoverCue:
     shot_id: str
+    dialogue_id: str
     speaker_id: str
     speaker_name: str
     text: str
@@ -65,11 +68,12 @@ def build_voiceover_cues(episode: Episode) -> list[VoiceoverCue]:
     shot_start = 0.0
     for shot in episode.shots:
         cursor = shot_start + VOICEOVER_LEAD_SECONDS
-        for line in shot.dialogue:
+        for dialogue_index, line in enumerate(shot.dialogue, start=1):
             resolved_speaker_name = speaker_name(episode, line.speaker_id)
             cues.append(
                 VoiceoverCue(
                     shot_id=shot.id,
+                    dialogue_id=dialogue_id_for(shot.id, dialogue_index),
                     speaker_id=line.speaker_id,
                     speaker_name=resolved_speaker_name,
                     text=line.text,
@@ -124,6 +128,7 @@ def schedule_voiceover_cues(
             timings.append(
                 {
                     "shot_id": cue.shot_id,
+                    "dialogue_id": cue.dialogue_id,
                     "speaker_id": cue.speaker_id,
                     "speaker_name": cue.speaker_name,
                     "start_seconds": round(start, 3),
@@ -138,7 +143,9 @@ def schedule_voiceover_cues(
         shot_start = shot_end
 
     if cue_index != len(cues):
-        raise VoiceoverTimingError("Voiceover cues contain an unknown or unsorted shot ID.")
+        raise VoiceoverTimingError(
+            "Voiceover cues contain an unknown or unsorted shot ID."
+        )
     return scheduled, timings
 
 
@@ -163,7 +170,8 @@ def write_voiceover_script(cues: list[VoiceoverCue], output_path: str | Path) ->
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        f"{cue.start_seconds:05.2f}s {cue.speaker_name}：{cue.text} [voice={cue.voice}]"
+        f"{cue.start_seconds:05.2f}s {cue.speaker_name}：{cue.text} "
+        f"[dialogue_id={cue.dialogue_id}] [voice={cue.voice}]"
         for cue in cues
     ]
     output.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
@@ -200,6 +208,7 @@ def _cue_signature(
     context_text: str = "",
 ) -> str:
     payload = {
+        "dialogue_id": cue.dialogue_id,
         "speaker_id": cue.speaker_id,
         "text": cue.text,
         "voice_id": voice_id,
@@ -215,6 +224,17 @@ def _cue_signature(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _source_text_sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _cue_state_evidence(cue: VoiceoverCue) -> dict[str, str]:
+    return {
+        "dialogue_id": cue.dialogue_id,
+        "source_text_sha256": _source_text_sha256(cue.text),
+    }
 
 
 def _read_cue_state(path: Path) -> dict[str, Any]:
@@ -621,6 +641,7 @@ def render_voiceover_preview(
     reused_clip_count = 0
     resumed_clip_count = 0
     voice_assignments: dict[str, dict[str, str]] = {}
+    cue_voice_ids: list[str] = []
 
     for index, cue in enumerate(cues):
         if selected_provider == "doubao" and doubao_config is not None:
@@ -640,9 +661,7 @@ def render_voiceover_preview(
             signature = _cue_signature(
                 cue,
                 voice_id=voice_id,
-                resource_id=(
-                    f"{doubao_config.resource_id}:{doubao_config.auth_mode}"
-                ),
+                resource_id=(f"{doubao_config.resource_id}:{doubao_config.auth_mode}"),
                 speech_rate=doubao_config.speech_rate,
                 context_text=doubao_config.context_text,
             )
@@ -661,11 +680,16 @@ def render_voiceover_preview(
                         media_validator=media_validator,
                         ffmpeg_bin=ffmpeg_bin,
                     )
+                    _write_cue_state(
+                        state_path,
+                        {**_read_cue_state(state_path), **_cue_state_evidence(cue)},
+                    )
                     clip_paths.append(clip_path)
                     if metadata_path.is_file():
                         metadata_paths.append(str(metadata_path))
                     doubao_clip_count += 1
                     reused_clip_count += 1
+                    cue_voice_ids.append(voice_id)
                     continue
 
                 state_matches = (
@@ -698,10 +722,10 @@ def render_voiceover_preview(
                         clip_path,
                         metadata_path=metadata_path,
                     )
-                elif supports_async_tasks and hasattr(
-                    doubao_client, "submit"
-                ) and hasattr(
-                    doubao_client, "complete_task"
+                elif (
+                    supports_async_tasks
+                    and hasattr(doubao_client, "submit")
+                    and hasattr(doubao_client, "complete_task")
                 ):
                     request_id = str(uuid.uuid4())
                     base_state = {
@@ -713,6 +737,7 @@ def render_voiceover_preview(
                         "voice_id": voice_id,
                         "output_path": str(clip_path),
                         "metadata_path": str(metadata_path),
+                        **_cue_state_evidence(cue),
                     }
                     _write_cue_state(state_path, base_state)
                     task = doubao_client.submit(
@@ -745,6 +770,7 @@ def render_voiceover_preview(
                             "voice_id": voice_id,
                             "output_path": str(clip_path),
                             "metadata_path": str(metadata_path),
+                            **_cue_state_evidence(cue),
                         },
                     )
                     result = doubao_client.synthesize(
@@ -757,7 +783,9 @@ def render_voiceover_preview(
 
                 result_output = Path(result.output_path)
                 if not result_output.is_file() or result_output.stat().st_size <= 0:
-                    raise RuntimeError("Doubao TTS completed without a non-empty audio file.")
+                    raise RuntimeError(
+                        "Doubao TTS completed without a non-empty audio file."
+                    )
                 completed_state = {
                     "schema_version": TTS_CUE_STATE_SCHEMA,
                     "signature": signature,
@@ -773,6 +801,7 @@ def render_voiceover_preview(
                     "output_path": str(result_output),
                     "metadata_path": str(result.metadata_path),
                     "output_size_bytes": result_output.stat().st_size,
+                    **_cue_state_evidence(cue),
                 }
                 _write_cue_state(
                     state_path,
@@ -789,6 +818,7 @@ def render_voiceover_preview(
                 clip_paths.append(result_output)
                 metadata_paths.append(str(result.metadata_path))
                 doubao_clip_count += 1
+                cue_voice_ids.append(voice_id)
                 continue
             except Exception as exc:
                 if isinstance(exc, DoubaoTTSDefinitiveError):
@@ -837,6 +867,7 @@ def render_voiceover_preview(
         )
         clip_paths.append(clip_path)
         local_clip_count += 1
+        cue_voice_ids.append(cue.voice)
 
     clip_durations = _measure_clip_durations(
         clip_paths,
@@ -849,9 +880,8 @@ def render_voiceover_preview(
     assigned_voice_ids = {
         assignment["voice_id"] for assignment in voice_assignments.values()
     }
-    role_voice_distinct = (
-        len(voice_assignments) <= 1
-        or len(assigned_voice_ids) == len(voice_assignments)
+    role_voice_distinct = len(voice_assignments) <= 1 or len(assigned_voice_ids) == len(
+        voice_assignments
     )
     if selected_provider == "doubao" and not role_voice_distinct:
         warnings.append(
@@ -872,6 +902,19 @@ def render_voiceover_preview(
         command_runner=command_runner,
         media_validator=media_validator,
     )
+    final_output_sha256 = sha256_file(voiceover_audio)
+    completed_cues = [
+        {
+            "dialogue_id": cue.dialogue_id,
+            "source_text_sha256": _source_text_sha256(cue.text),
+            "speaker_id": cue.speaker_id,
+            "voice_id": voice_id,
+            "absolute_start_seconds": timing["start_seconds"],
+            "absolute_end_seconds": timing["end_seconds"],
+            "final_output_sha256": final_output_sha256,
+        }
+        for cue, timing, voice_id in zip(cues, timings, cue_voice_ids, strict=True)
+    ]
     _run_atomic_media_command(
         build_mux_voiced_preview_command(
             source_video_path=source_video_path,
@@ -917,6 +960,8 @@ def render_voiceover_preview(
                 "voice_assignments": list(voice_assignments.values()),
                 "metadata_paths": metadata_paths,
                 "timings": timings,
+                "final_output_sha256": final_output_sha256,
+                "completed_cues": completed_cues,
                 "timing_overlap_count": sum(
                     bool(item["overlaps_previous"]) for item in timings
                 ),

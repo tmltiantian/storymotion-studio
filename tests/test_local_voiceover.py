@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import factory.local_voiceover as local_voiceover
+from factory.performance_card import dialogue_id_for
 from factory.local_voiceover import (
     build_mix_voiceover_audio_command,
     build_mux_voiced_preview_command,
@@ -23,7 +24,9 @@ def _accept_nonempty_media(path: Path, required_stream: str) -> bool:
 
 
 def test_build_voiceover_cues_assigns_speakers_and_monotonic_starts():
-    episode = plan_episode("林澈推开门。苏眠低声说，别急。", "voiceover_sample", target_shots=2)
+    episode = plan_episode(
+        "林澈推开门。苏眠低声说，别急。", "voiceover_sample", target_shots=2
+    )
 
     cues = build_voiceover_cues(episode)
 
@@ -31,12 +34,19 @@ def test_build_voiceover_cues_assigns_speakers_and_monotonic_starts():
     assert cues[0].speaker_name == "旁白"
     assert cues[0].voice == "Reed (中文（中国大陆）)"
     assert any(cue.speaker_name == "苏眠" for cue in cues)
-    assert [cue.start_seconds for cue in cues] == sorted(cue.start_seconds for cue in cues)
-    assert max(cue.start_seconds for cue in cues) < sum(shot.duration_seconds for shot in episode.shots)
+    assert [cue.start_seconds for cue in cues] == sorted(
+        cue.start_seconds for cue in cues
+    )
+    assert max(cue.start_seconds for cue in cues) < sum(
+        shot.duration_seconds for shot in episode.shots
+    )
+    assert cues[0].dialogue_id == dialogue_id_for(cues[0].shot_id, 1)
 
 
 def test_write_voiceover_script_records_human_readable_cues(tmp_path: Path):
-    episode = plan_episode("林澈推开门。苏眠低声说，别急。", "voiceover_script", target_shots=1)
+    episode = plan_episode(
+        "林澈推开门。苏眠低声说，别急。", "voiceover_script", target_shots=1
+    )
     cues = build_voiceover_cues(episode)
 
     path = write_voiceover_script(cues, tmp_path / "voiceover_script.txt")
@@ -55,7 +65,16 @@ def test_build_say_command_targets_aiff_clip():
         say_bin="say",
     )
 
-    assert cmd == ["say", "-v", "Tingting", "-r", "185", "-o", "/tmp/clip.aiff", "旁白：雨停了。"]
+    assert cmd == [
+        "say",
+        "-v",
+        "Tingting",
+        "-r",
+        "185",
+        "-o",
+        "/tmp/clip.aiff",
+        "旁白：雨停了。",
+    ]
 
 
 def test_schedule_voiceover_cues_uses_measured_durations_without_overlap():
@@ -113,7 +132,9 @@ def test_build_mux_voiced_preview_command_replaces_silent_audio():
 
 
 def test_render_voiceover_uses_doubao_when_configured(tmp_path: Path):
-    episode = plan_episode("林澈推开门。苏眠低声说，别急。", "doubao_voiceover", target_shots=2)
+    episode = plan_episode(
+        "林澈推开门。苏眠低声说，别急。", "doubao_voiceover", target_shots=2
+    )
     source_video = tmp_path / "card_preview.mp4"
     source_video.write_bytes(b"video")
 
@@ -162,6 +183,12 @@ def test_render_voiceover_uses_doubao_when_configured(tmp_path: Path):
     assert result["local_clip_count"] == 0
     assert fake_client.texts == [cue.text for cue in cues]
     assert Path(result["voiceover_provider_report"]).exists()
+    report = json.loads(
+        Path(result["voiceover_provider_report"]).read_text(encoding="utf-8")
+    )
+    assert report["completed_cues"][0]["dialogue_id"] == "shot_001.dialogue_01"
+    assert len(report["completed_cues"][0]["source_text_sha256"]) == 64
+    assert report["completed_cues"][0]["final_output_sha256"]
 
 
 def test_render_voiceover_passes_distinct_role_voice_ids(tmp_path: Path):
@@ -402,8 +429,7 @@ def test_render_voiceover_trims_legacy_cached_doubao_clips_without_resubmitting(
     trim_commands = [
         command
         for command in commands
-        if "-af" in command
-        and "silenceremove" in command[command.index("-af") + 1]
+        if "-af" in command and "silenceremove" in command[command.index("-af") + 1]
     ]
     states = [
         json.loads(path.read_text(encoding="utf-8"))
@@ -411,9 +437,7 @@ def test_render_voiceover_trims_legacy_cached_doubao_clips_without_resubmitting(
     ]
     assert client.calls == calls_after_first
     assert len(trim_commands) == len(build_voiceover_cues(episode))
-    assert {state["postprocess_profile"] for state in states} == {
-        "trim-boundaries-v1"
-    }
+    assert {state["postprocess_profile"] for state in states} == {"trim-boundaries-v1"}
     assert second["reused_clip_count"] == calls_after_first
 
 
@@ -490,8 +514,7 @@ def test_render_voiceover_reads_provider_from_factory_env(tmp_path: Path):
     openmontage = tmp_path / "OpenMontage"
     openmontage.mkdir()
     (openmontage / ".env").write_text(
-        "DOUBAO_SPEECH_API_KEY=secret\n"
-        "DOUBAO_SPEECH_VOICE_TYPE=voice\n",
+        "DOUBAO_SPEECH_API_KEY=secret\nDOUBAO_SPEECH_VOICE_TYPE=voice\n",
         encoding="utf-8",
     )
 
