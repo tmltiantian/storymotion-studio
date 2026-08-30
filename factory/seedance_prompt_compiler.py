@@ -4,6 +4,7 @@ import re
 from collections.abc import Sequence
 
 from .h3_prompt_compiler import compile_h3_shot_prompt
+from .performance_card import PerformanceCard
 from .schema import Episode, Shot
 
 
@@ -25,6 +26,7 @@ def compile_seedance_h3_style_prompt(
     *,
     character_ids: Sequence[str],
     reference_character_ids: Sequence[str] = (),
+    card: PerformanceCard | None = None,
 ) -> str:
     """Render H3's shot semantics as Seedance-readable natural language."""
     prompt = compile_h3_shot_prompt(
@@ -32,6 +34,7 @@ def compile_seedance_h3_style_prompt(
         shot,
         character_ids=character_ids,
         reference_character_ids=reference_character_ids,
+        card=card,
     )
     characters = {character.id: character for character in episode.characters}
     for index, character_id in enumerate(reference_character_ids, start=1):

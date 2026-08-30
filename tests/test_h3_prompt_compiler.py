@@ -1,4 +1,5 @@
 from factory.h3_prompt_compiler import compile_h3_shot_prompt
+from factory.performance_card import PerformanceCard
 from factory.schema import Character, DialogueLine, Episode, Shot
 
 
@@ -177,3 +178,36 @@ def test_motion_prompt_requires_causal_beats_without_uniform_smoothing():
     assert "not uniformly smooth" in prompt
     assert "constant-speed tweening" in prompt
     assert "floating, gliding, teleporting" in prompt
+
+
+def test_h3_prompt_uses_shared_performance_card_clauses():
+    episode = _episode()
+    card = PerformanceCard(
+        micro_shot_id="micro_001",
+        purpose="action",
+        speaker_id="",
+        dialogue_id="",
+        requires_visible_lipsync=False,
+        entry_anchor_id="living_room_entry",
+        scene_keyframe_id="living_room_keyframe",
+        actor_id="doubao",
+        target_id="notebook",
+        contact_point="notebook cover",
+        prop_hand="front paw",
+        start_beat="paw settles beside the notebook",
+        main_beat="presses the notebook cover once",
+        end_beat="returns to a stable stance",
+        negative_constraints=("no_floating",),
+    )
+
+    prompt = compile_h3_shot_prompt(
+        episode,
+        episode.shots[0],
+        character_ids=("doubao", "mitao"),
+        reference_character_ids=("doubao", "mitao"),
+        card=card,
+    )
+
+    assert "Performance beats: start paw settles beside the notebook" in prompt
+    assert "one visible contact at notebook cover; no second contact" in prompt
+    assert "no uniform gliding" in prompt

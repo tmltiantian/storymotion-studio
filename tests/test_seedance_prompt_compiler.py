@@ -1,4 +1,5 @@
 from factory.seedance_prompt_compiler import compile_seedance_h3_style_prompt
+from factory.performance_card import PerformanceCard
 from factory.schema import Character, DialogueLine, Episode, Shot
 
 
@@ -63,3 +64,35 @@ def test_seedance_prompt_preserves_h3_structure_without_h3_only_tags() -> None:
     assert "<Subject" not in prompt
     assert "<Picture" not in prompt
     assert "<d>" not in prompt
+
+
+def test_seedance_prompt_uses_shared_visible_speaker_clause() -> None:
+    episode = _episode()
+    card = PerformanceCard(
+        micro_shot_id="micro_001",
+        purpose="speak",
+        speaker_id="doubao",
+        dialogue_id="shot_001.dialogue_01",
+        requires_visible_lipsync=True,
+        entry_anchor_id="living_room_entry",
+        scene_keyframe_id="living_room_keyframe",
+        actor_id="doubao",
+        target_id="mitao",
+        contact_point="",
+        prop_hand="",
+        start_beat="mouth closes before speaking",
+        main_beat="says one short line",
+        end_beat="holds eye contact",
+        negative_constraints=("no_floating",),
+    )
+
+    prompt = compile_seedance_h3_style_prompt(
+        episode,
+        episode.shots[0],
+        character_ids=("doubao", "mitao"),
+        reference_character_ids=("doubao", "mitao"),
+        card=card,
+    )
+
+    assert "named speaker visibly speaks this one short line" in prompt
+    assert "no off-screen narration" in prompt
