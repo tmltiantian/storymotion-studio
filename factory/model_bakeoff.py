@@ -432,6 +432,8 @@ def model_route_capability(
 ) -> Literal["speaking", "action_only", "blocked"]:
     """Return the verified route permission for one reviewed video model."""
     result = _video_result_for(_validate_report(report), model)
+    if result["passed"] is not True:
+        return "blocked"
     trials = result.get("speaking_trials")
     if not isinstance(trials, list):
         return "action_only" if result.get("passed") is True else "blocked"
@@ -553,7 +555,11 @@ def _trial_for_shot(
 def _validate_result_speaking_trials(
     value: Any, shots: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or len(value) != len(shots):
+    if not isinstance(value, list):
+        raise ModelBakeoffError("Report speaking trials must exactly match video shots.")
+    if value == []:
+        return []
+    if len(value) != len(shots):
         raise ModelBakeoffError("Report speaking trials must exactly match video shots.")
     normalized: list[dict[str, Any]] = []
     for trial, shot in zip(value, shots, strict=True):
