@@ -16,6 +16,12 @@ from .prompt_safety import (
     extract_source_time_expressions,
 )
 from .schema import Episode, episode_to_dict
+from .performance_card import (
+    PERFORMANCE_SHEET_SCHEMA,
+    PerformanceCardError,
+    PerformanceSheet,
+    performance_sheet_from_dict,
+)
 from .visual_timeline import (
     CAMERA_MODES,
     CUT_MODES,
@@ -30,6 +36,9 @@ from .visual_timeline import (
 
 class PerformancePlanError(ValueError):
     pass
+
+
+_PERFORMANCE_PLAN_KEYS = frozenset({"visual_timeline", "performance_sheet"})
 
 
 def build_performance_plan_messages(episode: Episode) -> list[dict[str, str]]:
@@ -59,6 +68,23 @@ def build_performance_plan_messages(episode: Episode) -> list[dict[str, str]]:
         "negative_constraints",
         "cadence_fps",
     ]
+    card_keys = [
+        "micro_shot_id",
+        "purpose",
+        "speaker_id",
+        "dialogue_id",
+        "requires_visible_lipsync",
+        "entry_anchor_id",
+        "scene_keyframe_id",
+        "actor_id",
+        "target_id",
+        "contact_point",
+        "prop_hand",
+        "start_beat",
+        "main_beat",
+        "end_beat",
+        "negative_constraints",
+    ]
     example = _performance_plan_example(episode)
     allowed_character_ids = ", ".join(character.id for character in episode.characters)
     example_clause = (
@@ -68,8 +94,8 @@ def build_performance_plan_messages(episode: Episode) -> list[dict[str, str]]:
         else (
             "No populated JSON example is available for this Episode because it cannot "
             "be represented without invalid placeholders. Shape-only type schema: "
-            "root(schema_version:string,project_id:string,micro_shots:array); "
-            "micro_shot(all exact listed keys with documented string,integer,number,array types)."
+            "root(visual_timeline:object,performance_sheet:object); "
+            "visual_timeline(all visual timeline keys); performance_sheet(schema_version,project_id,cards)."
         )
     )
     return [
@@ -78,11 +104,12 @@ def build_performance_plan_messages(episode: Episode) -> list[dict[str, str]]:
             "content": (
                 "You are a motion-comic performance director. Return one JSON object only; "
                 "no Markdown, fences, comments, prose, omitted keys, or extra keys. "
-                f"Use schema_version {VISUAL_TIMELINE_SCHEMA}. Root keys are exactly "
-                '"schema_version", "project_id", "micro_shots". '
-                "Every micro-shot has exactly these keys: "
+                "Root keys are exactly \"visual_timeline\", \"performance_sheet\". "
+                f"visual_timeline schema_version must be {VISUAL_TIMELINE_SCHEMA}; "
+                f"performance_sheet schema_version must be {PERFORMANCE_SHEET_SCHEMA}. "
+                "Every visual_timeline micro-shot has exactly these keys: "
                 + ", ".join(f'"{key}"' for key in micro_keys)
-                + ". schema_version, project_id, and all textual micro-shot fields are strings; "
+                + ". visual_timeline schema_version, project_id, and all textual micro-shot fields are strings; "
                 "micro_shots, character_ids, and negative_constraints are arrays; index, "
                 "emotion_intensity, source_duration_seconds, and cadence_fps are actual integer "
                 "types, not booleans or numeric strings; timeline_duration_seconds is an actual "
@@ -117,6 +144,11 @@ def build_performance_plan_messages(episode: Episode) -> list[dict[str, str]]:
                 + ". Never write free-form action, denial, camera, transition, time-change, "
                 "text, subtitle, watermark, logo, person invention, or instruction-override prose. "
                 "Use self only as action_target, never in gaze, pose, emotion, scene, or time fields. "
+                "performance_sheet cards contain one card per microshot and exactly these keys: "
+                + ", ".join(f'\"{key}\"' for key in card_keys)
+                + ". A visible spoken line maps to one non-narrator source dialogue. "
+                "A microshot has a maximum of two characters. A contact action has one actor "
+                "and one contact point. "
                 + example_clause
             ),
         },
@@ -196,16 +228,45 @@ def _performance_plan_example(episode: Episode) -> dict[str, Any] | None:
                     "cadence_fps": 8,
                 }
             )
-    example = {
+    visual_timeline = {
         "schema_version": VISUAL_TIMELINE_SCHEMA,
         "project_id": episode.project_id,
         "micro_shots": micro_shots,
     }
     try:
-        timeline = visual_timeline_from_dict(example)
+        timeline = visual_timeline_from_dict(visual_timeline)
     except VisualTimelineError:
         return None
-    return None if validate_visual_timeline(timeline, episode) else example
+    if validate_visual_timeline(timeline, episode):
+        return None
+    cards = [
+        {
+            "micro_shot_id": shot["id"],
+            "purpose": shot["purpose"],
+            "speaker_id": "",
+            "dialogue_id": "",
+            "requires_visible_lipsync": False,
+            "entry_anchor_id": "scene_start",
+            "scene_keyframe_id": "scene_keyframe",
+            "actor_id": shot["action_actor_id"],
+            "target_id": shot["action_target"],
+            "contact_point": "",
+            "prop_hand": "",
+            "start_beat": shot["pose_start"],
+            "main_beat": shot["action_code"],
+            "end_beat": shot["pose_end"],
+            "negative_constraints": shot["negative_constraints"],
+        }
+        for shot in micro_shots
+    ]
+    return {
+        "visual_timeline": visual_timeline,
+        "performance_sheet": {
+            "schema_version": PERFORMANCE_SHEET_SCHEMA,
+            "project_id": episode.project_id,
+            "cards": cards,
+        },
+    }
 
 
 def _split_example_duration(duration: Any) -> tuple[int | float, ...] | None:
@@ -242,19 +303,47 @@ def _example_character_ids(episode: Episode, parent: Any) -> tuple[str, ...]:
     return ()
 
 
-def parse_performance_plan(content: str, episode: Episode) -> VisualTimeline:
+def parse_performance_plan(
+    content: str, episode: Episode, timeline: VisualTimeline | None = None
+) -> tuple[VisualTimeline, PerformanceSheet] | VisualTimeline:
     try:
         payload = json.loads(content)
     except (TypeError, json.JSONDecodeError) as exc:
         raise PerformancePlanError("performance plan must be valid JSON.") from exc
+    if isinstance(payload, dict) and "performance_sheet" in payload:
+        missing = _PERFORMANCE_PLAN_KEYS - payload.keys()
+        unexpected = payload.keys() - _PERFORMANCE_PLAN_KEYS
+        if missing:
+            raise PerformancePlanError(
+                f"performance plan missing keys: {', '.join(sorted(missing))}."
+            )
+        if unexpected:
+            raise PerformancePlanError(
+                f"performance plan unexpected keys: {', '.join(sorted(unexpected))}."
+            )
     try:
-        timeline = visual_timeline_from_dict(payload)
+        payload_timeline = payload.get("visual_timeline") if isinstance(payload, dict) else None
+        parsed_timeline = visual_timeline_from_dict(
+            payload_timeline if payload_timeline is not None else payload
+        )
     except VisualTimelineError as exc:
         raise PerformancePlanError(str(exc)) from exc
-    errors = validate_visual_timeline(timeline, episode)
+    errors = validate_visual_timeline(parsed_timeline, episode)
     if errors:
         raise PerformancePlanError("; ".join(errors))
-    return timeline
+    if timeline is None:
+        if not isinstance(payload, dict) or "performance_sheet" not in payload:
+            return parsed_timeline
+        timeline = parsed_timeline
+    if not isinstance(payload, dict) or "performance_sheet" not in payload:
+        raise PerformancePlanError("performance plan missing performance_sheet.")
+    if timeline != parsed_timeline:
+        raise PerformancePlanError("performance plan visual_timeline does not match supplied timeline.")
+    try:
+        sheet = performance_sheet_from_dict(payload["performance_sheet"], episode, timeline)
+    except PerformanceCardError as exc:
+        raise PerformancePlanError(str(exc)) from exc
+    return timeline, sheet
 
 
 def generate_performance_plan(
@@ -268,5 +357,6 @@ def generate_performance_plan(
         response_format={"type": "json_object"},
         allow_network=allow_network,
     )
-    timeline = parse_performance_plan(result.content, episode)
+    parsed = parse_performance_plan(result.content, episode)
+    timeline = parsed[0] if isinstance(parsed, tuple) else parsed
     return timeline, result.to_report()

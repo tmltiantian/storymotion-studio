@@ -18,7 +18,7 @@ from factory.schema import (
     Shot,
     episode_from_dict,
 )
-from factory.visual_timeline import VISUAL_TIMELINE_SCHEMA
+from factory.visual_timeline import VISUAL_TIMELINE_SCHEMA, visual_timeline_from_dict
 
 
 @pytest.fixture
@@ -82,6 +82,65 @@ def performance_payload(episode: Episode) -> dict[str, object]:
             }
         ],
     }
+
+
+def performable_payload(episode: Episode) -> dict[str, object]:
+    return {
+        "visual_timeline": performance_payload(episode),
+        "performance_sheet": {
+            "schema_version": "motion-comic-factory.performance-sheet.v1",
+            "project_id": episode.project_id,
+            "cards": [
+                {
+                    "micro_shot_id": "micro_001",
+                    "purpose": "action",
+                    "speaker_id": "",
+                    "dialogue_id": "",
+                    "requires_visible_lipsync": False,
+                    "entry_anchor_id": "scene_start",
+                    "scene_keyframe_id": "shop_keyframe",
+                    "actor_id": "char_1",
+                    "target_id": "envelope",
+                    "contact_point": "",
+                    "prop_hand": "",
+                    "start_beat": "stands beside the counter",
+                    "main_beat": "reaches toward the envelope",
+                    "end_beat": "holds beside the envelope",
+                    "negative_constraints": ["no_floating"],
+                }
+            ],
+        },
+    }
+
+
+def test_parse_performance_plan_returns_the_supplied_timeline_and_sheet(sample_episode):
+    payload = performable_payload(sample_episode)
+    timeline = visual_timeline_from_dict(payload["visual_timeline"])
+
+    parsed_timeline, sheet = parse_performance_plan(
+        json.dumps(payload), sample_episode, timeline
+    )
+
+    assert parsed_timeline is timeline
+    assert sheet.cards[0].micro_shot_id == "micro_001"
+
+
+def test_parse_performance_plan_rejects_an_unbound_card(sample_episode):
+    payload = performable_payload(sample_episode)
+    payload["performance_sheet"]["cards"][0]["micro_shot_id"] = "micro_999"
+    timeline = visual_timeline_from_dict(payload["visual_timeline"])
+
+    with pytest.raises(PerformancePlanError, match="performance cards must match"):
+        parse_performance_plan(json.dumps(payload), sample_episode, timeline)
+
+
+def test_parse_performance_plan_rejects_extra_wrapper_keys(sample_episode):
+    payload = performable_payload(sample_episode)
+    payload["extra"] = "smuggled"
+    timeline = visual_timeline_from_dict(payload["visual_timeline"])
+
+    with pytest.raises(PerformancePlanError, match="unexpected keys: extra"):
+        parse_performance_plan(json.dumps(payload), sample_episode, timeline)
 
 
 def test_parse_performance_plan_accepts_structured_action(sample_episode):
@@ -678,7 +737,7 @@ def test_build_performance_plan_messages_emits_a_validator_safe_full_example(
     example_text = system.split("Compact JSON example: ", 1)[1]
     example = json.loads(example_text)
 
-    timeline = parse_performance_plan(
+    timeline, _ = parse_performance_plan(
         json.dumps(example, ensure_ascii=False), sample_episode
     )
 
@@ -699,7 +758,7 @@ def test_build_performance_plan_messages_real_example_round_trips_unchanged():
     example_text = system.split("Compact JSON example: ", 1)[1]
     example = json.loads(example_text)
 
-    timeline = parse_performance_plan(example_text, episode)
+    timeline, _ = parse_performance_plan(example_text, episode)
 
     assert {shot.parent_shot_id for shot in timeline.micro_shots} == {
         parent.id for parent in episode.shots
@@ -738,7 +797,7 @@ def test_build_performance_plan_messages_uses_character_free_environment_example
     system = build_performance_plan_messages(episode)[0]["content"]
     example_text = system.split("Compact JSON example: ", 1)[1]
 
-    timeline = parse_performance_plan(example_text, episode)
+    timeline, _ = parse_performance_plan(example_text, episode)
 
     micro = timeline.micro_shots[0]
     assert micro.character_ids == ()
