@@ -5,6 +5,9 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
+from .dialogue_assets import DialogueAudioError, DialogueAudioManifest
+from .file_io import sha256_file
+from .performance_card import dialogue_id_for
 from .schema import Episode, NARRATOR_ID
 
 
@@ -13,9 +16,12 @@ def write_shot_audio_assets(
     voiceover_audio: str | Path,
     output_dir: str | Path,
     *,
+    dialogue_manifest: DialogueAudioManifest | None = None,
     ffmpeg_bin: str = "ffmpeg",
     command_runner: Callable[..., object] = subprocess.run,
 ) -> dict[str, Path]:
+    if dialogue_manifest is not None:
+        return _legacy_aliases_from_dialogue_manifest(episode, dialogue_manifest)
     source = Path(voiceover_audio).expanduser().resolve()
     if source.is_symlink() or not source.is_file():
         raise FileNotFoundError(f"Voiceover audio is missing: {source}")
@@ -65,3 +71,29 @@ def write_shot_audio_assets(
             assets[shot.id] = output
         shot_start += shot.duration_seconds
     return assets
+
+
+def _legacy_aliases_from_dialogue_manifest(
+    episode: Episode, manifest: DialogueAudioManifest
+) -> dict[str, Path]:
+    aliases: dict[str, Path] = {}
+    for shot in episode.shots:
+        dialogue_ids = [
+            dialogue_id_for(shot.id, index)
+            for index, line in enumerate(shot.dialogue, start=1)
+            if line.speaker_id != NARRATOR_ID
+        ]
+        if not dialogue_ids:
+            continue
+        if len(dialogue_ids) != 1:
+            raise DialogueAudioError(
+                f"{shot.id} cannot use one legacy parent-shot alias for multiple dialogue lines"
+            )
+        asset = manifest.by_dialogue_id.get(dialogue_ids[0])
+        if asset is None:
+            raise DialogueAudioError(f"{shot.id} missing final dialogue audio")
+        path = Path(asset.path)
+        if path.is_symlink() or not path.is_file() or sha256_file(path) != asset.sha256:
+            raise DialogueAudioError(f"{shot.id} final dialogue audio is invalid")
+        aliases[shot.id] = path
+    return aliases
