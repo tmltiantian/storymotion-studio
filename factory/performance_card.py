@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .schema import Episode, NARRATOR_ID
-from .visual_timeline import VisualTimeline
+from .visual_timeline import PURPOSES, VisualTimeline
 
 
 PERFORMANCE_SHEET_SCHEMA = "motion-comic-factory.performance-sheet.v1"
@@ -43,6 +43,7 @@ class PerformanceSheet:
 _SHEET_KEYS = frozenset(PerformanceSheet.__dataclass_fields__)
 _CARD_KEYS = frozenset(PerformanceCard.__dataclass_fields__)
 _STRING_CARD_FIELDS = tuple(key for key in _CARD_KEYS if key != "requires_visible_lipsync" and key != "negative_constraints")
+_CONTACT_ACTION_CODES = frozenset({"grasp", "hand_over", "receive"})
 
 
 def dialogue_id_for(parent_shot_id: str, dialogue_index: int) -> str:
@@ -103,6 +104,17 @@ def validate_performance_sheet(
             continue
         if len(shot.character_ids) > 2:
             errors.append(f"{card.micro_shot_id} has more than two characters")
+        if card.purpose not in PURPOSES:
+            errors.append(f"{card.micro_shot_id} purpose must be a canonical enum")
+        elif card.purpose != shot.purpose:
+            errors.append(f"{card.micro_shot_id} purpose does not match microshot")
+        allowed_actor_ids = set(shot.character_ids)
+        if shot.action_actor_id in {"object", "environment"}:
+            allowed_actor_ids.add(shot.action_actor_id)
+        if card.actor_id and card.actor_id not in allowed_actor_ids:
+            errors.append(
+                f"{card.micro_shot_id} actor_id must be an on-screen character or allowed object/environment actor"
+            )
         if card.requires_visible_lipsync and not card.dialogue_id:
             errors.append(f"{card.micro_shot_id} visible speech requires dialogue_id")
         if card.requires_visible_lipsync and not card.speaker_id:
@@ -124,7 +136,7 @@ def validate_performance_sheet(
             errors.append(
                 f"{card.micro_shot_id} dialogue speaker does not match source line"
             )
-        if shot.action_code in {"press", "handoff", "hold"}:
+        if shot.action_code in _CONTACT_ACTION_CODES:
             if not card.actor_id:
                 errors.append(
                     f"{card.micro_shot_id} contact action requires exactly one actor_id"
