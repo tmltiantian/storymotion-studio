@@ -617,6 +617,39 @@ def test_failed_nezha_lipsync_makes_model_action_only(tmp_path):
         require_speaking_capability(report, VIDEO_MODELS[0], "micro_nezha")
 
 
+def test_failed_model_blocks_speaking_even_when_all_lipsync_trials_pass(tmp_path):
+    plan = _build_plan(tmp_path)
+    reviews = _reviews(
+        plan,
+        video_failures={VIDEO_MODELS[0]: ["duplicate_face"]},
+    )
+
+    report = finalize_bakeoff(plan, reviews)
+
+    assert all(
+        trial["passed"] for trial in report["video_results"][0]["speaking_trials"]
+    )
+    assert report["video_results"][0]["passed"] is False
+    assert model_route_capability(report, VIDEO_MODELS[0]) == "blocked"
+    with pytest.raises(ModelBakeoffError, match="not speaking-capable"):
+        require_speaking_capability(report, VIDEO_MODELS[0], "micro_wukong")
+
+
+def test_empty_speaking_trials_explicitly_routes_a_passing_model_action_only(tmp_path):
+    plan = _build_plan(tmp_path)
+    report = finalize_bakeoff(plan, _reviews(plan))
+    report["video_results"][0]["speaking_trials"] = []
+    (tmp_path / "model_bakeoff_report.json").write_text(
+        json.dumps(report), encoding="utf-8"
+    )
+
+    assert model_route_capability(report, VIDEO_MODELS[0]) == "action_only"
+    with pytest.raises(ModelBakeoffError, match="not speaking-capable"):
+        require_speaking_capability(report, VIDEO_MODELS[0], "micro_wukong")
+    with pytest.raises(ModelBakeoffError, match="report"):
+        model_route_capability({"video_results": []}, VIDEO_MODELS[0])
+
+
 def test_finalize_rejects_plan_that_differs_from_plan_artifact(tmp_path):
     plan = _build_plan(tmp_path)
     forged = deepcopy(plan)
@@ -659,7 +692,7 @@ def test_score_exactly_80_passes_and_ties_follow_plan_order(tmp_path):
     assert all(result["passed"] for result in report["still_results"])
 
 
-def test_finalize_rejects_missing_or_duplicate_second_video_review(tmp_path):
+def test_finalize_rejects_missing_or_duplicate_video_review(tmp_path):
     plan = _build_plan(tmp_path)
     reviews = _reviews(plan)
     reviews["video_reviews"][VIDEO_MODELS[0]].pop()
