@@ -8,6 +8,7 @@ from factory.prompt_compiler import (
     compile_video_prompt,
 )
 from factory.prompt_safety import PREVIOUS_SHOT_CONTINUITY
+from factory.performance_card import PerformanceCard
 from factory.schema import Character, DialogueLine, Episode, Shot
 from factory.visual_timeline import MicroShot
 
@@ -70,6 +71,75 @@ def micro_shot(
         negative_constraints=("no_rain",),
         cadence_fps=8,
     )
+
+
+@pytest.fixture
+def run_card() -> PerformanceCard:
+    return PerformanceCard(
+        micro_shot_id="micro_001",
+        purpose="action",
+        speaker_id="",
+        dialogue_id="",
+        requires_visible_lipsync=False,
+        entry_anchor_id="shop_entry",
+        scene_keyframe_id="shop_keyframe",
+        actor_id="char_1",
+        target_id="envelope",
+        contact_point="",
+        prop_hand="",
+        start_beat="foot plants and bears weight",
+        main_beat="center of mass leans forward",
+        end_beat="decelerates into a stable stop",
+        negative_constraints=("no_floating",),
+    )
+
+
+def test_run_card_prompt_requires_weight_transfer_and_no_gliding(
+    sample_episode, run_card
+):
+    prompt = compile_video_prompt(
+        sample_episode, micro_shot(character_ids=("char_1",)), card=run_card
+    )
+
+    assert "foot plants and bears weight" in prompt
+    assert "center of mass leans forward" in prompt
+    assert "decelerates into a stable stop" in prompt
+    assert "no uniform gliding" in prompt
+    assert "slow motion" in prompt
+
+
+def test_prompt_rejects_card_for_different_microshot(
+    sample_episode, run_card
+):
+    with pytest.raises(PromptCompilerError, match="does not belong to"):
+        compile_video_prompt(
+            sample_episode,
+            micro_shot(character_ids=("char_1",)),
+            card=replace(run_card, micro_shot_id="micro_999"),
+        )
+
+
+def test_card_contact_clause_limits_action_to_one_visible_contact(
+    sample_episode, run_card
+):
+    prompt = compile_video_prompt(
+        sample_episode,
+        micro_shot(character_ids=("char_1",)),
+        card=replace(run_card, contact_point="envelope clasp"),
+    )
+
+    assert "one visible contact at envelope clasp; no second contact" in prompt
+
+
+def test_speaking_card_requires_visible_speaker_wording(sample_episode, run_card):
+    prompt = compile_video_prompt(
+        sample_episode,
+        micro_shot(character_ids=("char_1",)),
+        card=replace(run_card, requires_visible_lipsync=True),
+    )
+
+    assert "named speaker visibly speaks this one short line" in prompt
+    assert "no off-screen narration" in prompt
 
 
 def test_compile_video_prompt_uses_exact_characters_once_and_templates_action(

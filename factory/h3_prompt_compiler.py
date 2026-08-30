@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from .performance_card import PerformanceCard
+from .prompt_compiler import render_performance_clauses
 from .schema import Character, Episode, NARRATOR_ID, Shot
 
 
@@ -15,6 +17,7 @@ def compile_h3_shot_prompt(
     *,
     character_ids: Sequence[str],
     reference_character_ids: Sequence[str] = (),
+    card: PerformanceCard | None = None,
 ) -> str:
     characters = {character.id: character for character in episode.characters}
     present = _characters(character_ids, characters, "on-screen")
@@ -38,6 +41,7 @@ def compile_h3_shot_prompt(
         shot,
         present,
         subject_labels=subject_labels,
+        card=card,
     )
     soundscape = _soundscape(shot)
     if not referenced:
@@ -110,6 +114,7 @@ def _shot_description(
     present: Sequence[Character],
     *,
     subject_labels: dict[str, str],
+    card: PerformanceCard | None,
 ) -> str:
     subject_text = "; ".join(
         f"{subject_labels.get(character.id, character.name)}, "
@@ -123,6 +128,7 @@ def _shot_description(
         f"The scene remains in {shot.scene_title}",
         f"The visible subjects are {subject_text}",
         f"The physical action unfolds in this order: {shot.action.strip()}",
+        *render_performance_clauses(card),
         _motion_rhythm_instruction(),
         camera,
         "All paws, hands, limbs, props, contact points, weight shifts, and object "

@@ -11,6 +11,7 @@ from .prompt_safety import (
     render_action,
     video_hard_constraints,
 )
+from .performance_card import PerformanceCard
 from .schema import Episode, Shot
 from .visual_timeline import MicroShot, micro_shot_runtime_errors, validate_micro_shot
 
@@ -19,15 +20,26 @@ class PromptCompilerError(ValueError):
     pass
 
 
+MOTION_REALISM = (
+    "real-time natural acceleration and deceleration",
+    "visible weight transfer and stable ground contact",
+    "no floating, no uniform gliding, no slow motion",
+    "no unexplained camera movement",
+)
+
+
 def compile_video_prompt(
     episode: Episode,
     shot: MicroShot,
     *,
+    card: PerformanceCard | None = None,
     previous_scene_context: str | None = None,
 ) -> str:
     _require_runtime_micro_shot(shot)
     _require_episode_integrity(episode)
     parent = _parent_shot(episode, shot)
+    if card is not None:
+        _require_matching_card(shot, card)
     _require_safe_micro_shot(
         episode, shot, parent, character_free=not shot.character_ids
     )
@@ -56,12 +68,33 @@ def compile_video_prompt(
         "On-screen characters: " + (", ".join(item.name for item in present) or "none"),
         f"Opening composition, expression and pose: {scene}; {shot.emotion_start}; {shot.pose_start}",
         f"Only action: {render_action(episode, shot)}",
+        *render_performance_clauses(card),
         f"Ending expression, gaze and pose: {shot.emotion_end}; {shot.gaze}; {shot.pose_end}",
         camera,
         *optional_negative_phrases(shot.negative_constraints),
         *video_hard_constraints(shot.camera_mode),
     ]
     return _join_prompt_parts(parts)
+
+
+def render_performance_clauses(card: PerformanceCard | None) -> tuple[str, ...]:
+    """Render card-specific motion constraints for every video prompt format."""
+    if card is None:
+        return ()
+    parts = [
+        f"Performance beats: start {card.start_beat}; main {card.main_beat}; end {card.end_beat}",
+        f"Actor and target: {card.actor_id} -> {card.target_id or 'self'}",
+        *MOTION_REALISM,
+    ]
+    if card.contact_point:
+        parts.append(
+            f"one visible contact at {card.contact_point}; no second contact"
+        )
+    if card.requires_visible_lipsync:
+        parts.append(
+            "the named speaker visibly speaks this one short line; no off-screen narration"
+        )
+    return tuple(parts)
 
 
 def compile_still_prompt(
@@ -105,6 +138,15 @@ def _parent_shot(episode: Episode, shot: MicroShot) -> Shot:
         if parent.id == shot.parent_shot_id:
             return parent
     raise PromptCompilerError(f"{shot.id} has unknown parent {shot.parent_shot_id}.")
+
+
+def _require_matching_card(shot: MicroShot, card: PerformanceCard) -> None:
+    if not isinstance(card, PerformanceCard):
+        raise PromptCompilerError("card must be a PerformanceCard instance.")
+    if card.micro_shot_id != shot.id:
+        raise PromptCompilerError(
+            f"performance card {card.micro_shot_id} does not belong to {shot.id}."
+        )
 
 
 def _require_safe_micro_shot(
