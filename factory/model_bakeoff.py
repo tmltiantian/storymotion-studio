@@ -8,14 +8,20 @@ import re
 import stat
 import tempfile
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from PIL import Image, UnidentifiedImageError
 
 from .gateway_video import is_valid_mp4_file
+from .dialogue_assets import (
+    DialogueAudioError,
+    DialogueAudioManifest,
+    require_dialogue_audio,
+)
 from .micro_still_batch import PRODUCTION_STILL_MODELS, _still_eligibility
 from .micro_video_batch import PRODUCTION_VIDEO_MODELS
+from .performance_card import PerformanceSheet, validate_performance_sheet
 from .schema import Episode
 from .visual_timeline import VisualTimeline, validate_visual_timeline
 
@@ -25,14 +31,17 @@ MODEL_BAKEOFF_REVIEW_SCHEMA = "motion-comic-factory.model-bakeoff-review.v1"
 MODEL_BAKEOFF_REPORT_SCHEMA = "motion-comic-factory.model-bakeoff-report.v1"
 
 SCORE_WEIGHTS = {
-    "identity": 25,
-    "expression": 20,
+    "identity": 20,
+    "expression": 15,
     "anatomy": 15,
     "continuity": 15,
     "semantics": 10,
     "motion": 10,
     "clean_frame": 5,
+    "lipsync": 10,
 }
+LIPSYNC_SPEAKERS = frozenset({"wukong", "yangjian", "nezha"})
+LIPSYNC_MINIMUM_SCORE = 3.5
 VIDEO_HARD_FAILURES = frozenset(
     {
         "identity_swap",
@@ -60,6 +69,7 @@ _PLAN_KEYS = frozenset(
         "project_id",
         "run_dir",
         "representative_character_micro_shot_ids",
+        "speaking_trials",
         "requires_still",
         "still_micro_shot_id",
         "video_models",
@@ -72,7 +82,17 @@ _REVIEW_KEYS = frozenset(
     {"schema_version", "project_id", "video_reviews", "still_reviews"}
 )
 _VIDEO_REVIEW_KEYS = frozenset(
-    {"micro_shot_id", "candidate_path", "scores", "hard_failures", "notes"}
+    {
+        "micro_shot_id",
+        "speaker_id",
+        "dialogue_id",
+        "audio_sha256",
+        "candidate_path",
+        "scores",
+        "hard_failures",
+        "notes",
+        "passed",
+    }
 )
 _STILL_REVIEW_KEYS = frozenset(
     {"micro_shot_id", "candidate_path", "score", "hard_failures", "notes"}
@@ -83,6 +103,7 @@ _REPORT_KEYS = frozenset(
         "project_id",
         "run_dir",
         "representative_character_micro_shot_ids",
+        "speaking_trials",
         "requires_still",
         "still_micro_shot_id",
         "minimum_score",
@@ -97,11 +118,21 @@ _REPORT_KEYS = frozenset(
     }
 )
 _VIDEO_RESULT_KEYS = frozenset(
-    {"model", "shots", "aggregate_score", "hard_failures", "passed"}
+    {
+        "model",
+        "shots",
+        "speaking_trials",
+        "aggregate_score",
+        "hard_failures",
+        "passed",
+    }
 )
 _VIDEO_SHOT_RESULT_KEYS = frozenset(
     {
         "micro_shot_id",
+        "speaker_id",
+        "dialogue_id",
+        "audio_sha256",
         "candidate_path",
         "size_bytes",
         "sha256",
@@ -109,8 +140,13 @@ _VIDEO_SHOT_RESULT_KEYS = frozenset(
         "weighted_score",
         "hard_failures",
         "notes",
+        "passed",
     }
 )
+_SPEAKING_TRIAL_KEYS = frozenset(
+    {"micro_shot_id", "speaker_id", "dialogue_id", "audio_sha256"}
+)
+_RESULT_SPEAKING_TRIAL_KEYS = _SPEAKING_TRIAL_KEYS | frozenset({"lipsync", "passed"})
 _STILL_RESULT_KEYS = frozenset(
     {
         "model",
@@ -177,6 +213,8 @@ def build_model_bakeoff_plan(
     representative_character_micro_shot_ids: Sequence[str],
     run_dir: str | Path,
     *,
+    performance_sheet: PerformanceSheet,
+    dialogue_manifest: DialogueAudioManifest,
     still_micro_shot_id: str | None = None,
     video_models: Sequence[str] = _DEFAULT_VIDEO_MODELS,
     still_models: Sequence[str] = _DEFAULT_STILL_MODELS,
@@ -201,22 +239,13 @@ def build_model_bakeoff_plan(
         representative_character_micro_shot_ids,
         "Representative character micro-shot IDs",
     )
-    if len(representative_ids) != 2:
-        raise ModelBakeoffError(
-            "Bakeoff plan requires exactly two representative character micro-shot IDs."
-        )
-    if len(set(representative_ids)) != 2:
-        raise ModelBakeoffError(
-            "Representative character micro-shot IDs must be different."
-        )
-    for shot_id in representative_ids:
-        shot = shot_by_id.get(shot_id)
-        if shot is None:
-            raise ModelBakeoffError(f"Unknown representative micro-shot ID: {shot_id}.")
-        if not shot.character_ids:
-            raise ModelBakeoffError(
-                f"Representative video micro-shot {shot_id} must contain a character."
-            )
+    speaking_trials = _speaking_trials_for_plan(
+        episode,
+        timeline,
+        performance_sheet,
+        dialogue_manifest,
+        representative_ids,
+    )
 
     still_routed = {
         shot_id for shot_id, shot in shot_by_id.items() if _still_eligibility(shot)[0]
@@ -255,6 +284,7 @@ def build_model_bakeoff_plan(
         "project_id": project_id,
         "run_dir": str(root),
         "representative_character_micro_shot_ids": representative_ids,
+        "speaking_trials": speaking_trials,
         "requires_still": requires_still,
         "still_micro_shot_id": normalized_still_id,
         "video_models": normalized_video_models,
@@ -294,6 +324,9 @@ def finalize_bakeoff(
             shots.append(
                 {
                     "micro_shot_id": review["micro_shot_id"],
+                    "speaker_id": review["speaker_id"],
+                    "dialogue_id": review["dialogue_id"],
+                    "audio_sha256": review["audio_sha256"],
                     "candidate_path": review["candidate_path"],
                     "size_bytes": review["size_bytes"],
                     "sha256": review["sha256"],
@@ -301,6 +334,7 @@ def finalize_bakeoff(
                     "weighted_score": score,
                     "hard_failures": list(review["hard_failures"]),
                     "notes": review["notes"],
+                    "passed": review["passed"],
                 }
             )
         aggregate = round(
@@ -311,6 +345,17 @@ def finalize_bakeoff(
             {
                 "model": model,
                 "shots": shots,
+                "speaking_trials": [
+                    {
+                        "micro_shot_id": shot["micro_shot_id"],
+                        "speaker_id": shot["speaker_id"],
+                        "dialogue_id": shot["dialogue_id"],
+                        "audio_sha256": shot["audio_sha256"],
+                        "lipsync": shot["scores"]["lipsync"],
+                        "passed": shot["passed"],
+                    }
+                    for shot in shots
+                ],
                 "aggregate_score": aggregate,
                 "hard_failures": failures,
                 "passed": aggregate >= minimum and not failures,
@@ -352,6 +397,7 @@ def finalize_bakeoff(
         "representative_character_micro_shot_ids": list(
             normalized_plan["representative_character_micro_shot_ids"]
         ),
+        "speaking_trials": list(normalized_plan["speaking_trials"]),
         "requires_still": normalized_plan["requires_still"],
         "still_micro_shot_id": normalized_plan["still_micro_shot_id"],
         "minimum_score": minimum,
@@ -381,6 +427,153 @@ def require_selected_production_model(report: Mapping[str, Any]) -> str:
     return model
 
 
+def model_route_capability(
+    report: Mapping[str, Any], model: str
+) -> Literal["speaking", "action_only", "blocked"]:
+    """Return the verified route permission for one reviewed video model."""
+    result = _video_result_for(_validate_report(report), model)
+    trials = result.get("speaking_trials")
+    if not isinstance(trials, list):
+        return "action_only" if result.get("passed") is True else "blocked"
+    speakers = {
+        trial.get("speaker_id")
+        for trial in trials
+        if isinstance(trial, Mapping)
+    }
+    if (
+        len(trials) == len(LIPSYNC_SPEAKERS)
+        and speakers == LIPSYNC_SPEAKERS
+        and all(isinstance(trial, Mapping) and trial.get("passed") is True for trial in trials)
+    ):
+        return "speaking"
+    return "action_only" if result.get("passed") is True else "blocked"
+
+
+def require_speaking_capability(
+    report: Mapping[str, Any], model: str, micro_shot_id: str
+) -> None:
+    if model_route_capability(report, model) != "speaking":
+        raise ModelBakeoffError(f"{model} is not speaking-capable for {micro_shot_id}")
+
+
+def _video_result_for(report: Mapping[str, Any], model: str) -> Mapping[str, Any]:
+    if not isinstance(report, Mapping) or not isinstance(report.get("video_results"), list):
+        raise ModelBakeoffError("Bakeoff report must contain video results.")
+    matches = [
+        result
+        for result in report["video_results"]
+        if isinstance(result, Mapping) and result.get("model") == model
+    ]
+    if len(matches) != 1:
+        raise ModelBakeoffError(f"Bakeoff report has no video result for {model}.")
+    return matches[0]
+
+
+def _speaking_trials_for_plan(
+    episode: Episode,
+    timeline: VisualTimeline,
+    performance_sheet: PerformanceSheet,
+    dialogue_manifest: DialogueAudioManifest,
+    representative_ids: list[str],
+) -> list[dict[str, str]]:
+    if not isinstance(performance_sheet, PerformanceSheet):
+        raise ModelBakeoffError("Bakeoff planning requires a PerformanceSheet.")
+    sheet_errors = validate_performance_sheet(performance_sheet, episode, timeline)
+    if sheet_errors:
+        raise ModelBakeoffError("Performance sheet is invalid: " + "; ".join(sheet_errors))
+    if not isinstance(dialogue_manifest, DialogueAudioManifest):
+        raise ModelBakeoffError("Bakeoff planning requires a DialogueAudioManifest.")
+    visible_cards = [card for card in performance_sheet.cards if card.requires_visible_lipsync]
+    if (
+        len(representative_ids) != len(LIPSYNC_SPEAKERS)
+        or len(set(representative_ids)) != len(representative_ids)
+        or len(visible_cards) != len(LIPSYNC_SPEAKERS)
+        or set(representative_ids) != {card.micro_shot_id for card in visible_cards}
+        or {card.speaker_id for card in visible_cards} != LIPSYNC_SPEAKERS
+    ):
+        raise ModelBakeoffError(
+            "Bakeoff plan requires exactly three visible-speaking trials, one each for Wukong, Yang Jian, and Nezha."
+        )
+    cards_by_shot = {card.micro_shot_id: card for card in visible_cards}
+    trials: list[dict[str, str]] = []
+    for shot_id in representative_ids:
+        card = cards_by_shot[shot_id]
+        try:
+            asset = require_dialogue_audio(dialogue_manifest, card)
+        except DialogueAudioError as exc:
+            raise ModelBakeoffError(str(exc)) from exc
+        trials.append(
+            {
+                "micro_shot_id": shot_id,
+                "speaker_id": card.speaker_id,
+                "dialogue_id": card.dialogue_id,
+                "audio_sha256": asset.sha256,
+            }
+        )
+    return trials
+
+
+def _validate_speaking_trials(
+    value: Any, representative_ids: list[str], label: str
+) -> list[dict[str, str]]:
+    if not isinstance(value, list) or len(value) != len(LIPSYNC_SPEAKERS):
+        raise ModelBakeoffError(f"{label} must bind exactly three visible-speaking trials.")
+    if len(representative_ids) != len(LIPSYNC_SPEAKERS) or len(set(representative_ids)) != len(representative_ids):
+        raise ModelBakeoffError(f"{label} must bind exactly three different representative character shots.")
+    normalized: list[dict[str, str]] = []
+    for expected_shot_id, trial in zip(representative_ids, value, strict=True):
+        if not isinstance(trial, Mapping):
+            raise ModelBakeoffError(f"{label} speaking trial must be an object.")
+        _require_exact_keys(trial, _SPEAKING_TRIAL_KEYS, f"{label} speaking trial")
+        shot_id = _exact_text(trial["micro_shot_id"], f"{label} trial micro-shot ID")
+        if shot_id != expected_shot_id:
+            raise ModelBakeoffError(f"{label} speaking trials must match representative shot order.")
+        normalized.append(
+            {
+                "micro_shot_id": shot_id,
+                "speaker_id": _exact_text(trial["speaker_id"], f"{label} trial speaker ID"),
+                "dialogue_id": _exact_text(trial["dialogue_id"], f"{label} trial dialogue ID"),
+                "audio_sha256": _audio_sha256(trial["audio_sha256"], f"{label} trial audio_sha256"),
+            }
+        )
+    if {trial["speaker_id"] for trial in normalized} != LIPSYNC_SPEAKERS:
+        raise ModelBakeoffError(f"{label} must include one lipsync trial for each required speaker.")
+    return normalized
+
+
+def _trial_for_shot(
+    trials: Sequence[Mapping[str, Any]], micro_shot_id: str
+) -> Mapping[str, Any]:
+    matches = [trial for trial in trials if trial.get("micro_shot_id") == micro_shot_id]
+    if len(matches) != 1:
+        raise ModelBakeoffError("Speaking trial does not match a representative micro-shot.")
+    return matches[0]
+
+
+def _validate_result_speaking_trials(
+    value: Any, shots: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) != len(shots):
+        raise ModelBakeoffError("Report speaking trials must exactly match video shots.")
+    normalized: list[dict[str, Any]] = []
+    for trial, shot in zip(value, shots, strict=True):
+        if not isinstance(trial, Mapping):
+            raise ModelBakeoffError("Report speaking trial must be an object.")
+        _require_exact_keys(trial, _RESULT_SPEAKING_TRIAL_KEYS, "Report speaking trial")
+        expected = {
+            "micro_shot_id": shot["micro_shot_id"],
+            "speaker_id": shot["speaker_id"],
+            "dialogue_id": shot["dialogue_id"],
+            "audio_sha256": shot["audio_sha256"],
+            "lipsync": shot["scores"]["lipsync"],
+            "passed": shot["passed"],
+        }
+        if dict(trial) != expected:
+            raise ModelBakeoffError("Report speaking trial does not match video shot evidence.")
+        normalized.append(expected)
+    return normalized
+
+
 def require_selected_still_model(report: Mapping[str, Any]) -> str:
     normalized = _validate_report(report)
     if not normalized["requires_still"]:
@@ -405,10 +598,9 @@ def _validate_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
         plan["representative_character_micro_shot_ids"],
         "Representative character micro-shot IDs",
     )
-    if len(representative_ids) != 2 or len(set(representative_ids)) != 2:
-        raise ModelBakeoffError(
-            "Bakeoff plan must contain exactly two different character micro-shot IDs."
-        )
+    speaking_trials = _validate_speaking_trials(
+        plan["speaking_trials"], representative_ids, "Bakeoff plan"
+    )
     if not isinstance(plan["requires_still"], bool):
         raise ModelBakeoffError("Bakeoff plan requires_still must be a boolean.")
     still_id = plan["still_micro_shot_id"]
@@ -443,6 +635,7 @@ def _validate_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
         "project_id": project_id,
         "run_dir": str(root),
         "representative_character_micro_shot_ids": representative_ids,
+        "speaking_trials": speaking_trials,
         "requires_still": plan["requires_still"],
         "still_micro_shot_id": still_id,
         "video_models": video_models,
@@ -473,7 +666,7 @@ def _validate_reviews(
     expected_shots = plan["representative_character_micro_shot_ids"]
     for model in plan["video_models"]:
         entries = reviews["video_reviews"][model]
-        if not isinstance(entries, list) or len(entries) != 2:
+        if not isinstance(entries, list) or len(entries) != 3:
             raise ModelBakeoffError(
                 f"Video model {model} must have exactly one review for each representative shot."
             )
@@ -481,7 +674,7 @@ def _validate_reviews(
             _validate_video_review(plan, model, entry) for entry in entries
         ]
         by_shot = {entry["micro_shot_id"]: entry for entry in normalized_entries}
-        if len(by_shot) != 2 or set(by_shot) != set(expected_shots):
+        if len(by_shot) != 3 or set(by_shot) != set(expected_shots):
             raise ModelBakeoffError(
                 f"Video model {model} must have exactly one review for each representative shot."
             )
@@ -527,6 +720,16 @@ def _validate_video_review(
     shot_id = _exact_text(review["micro_shot_id"], "Video review micro-shot ID")
     if shot_id not in plan["representative_character_micro_shot_ids"]:
         raise ModelBakeoffError(f"Unknown video review micro-shot ID: {shot_id}.")
+    expected_trial = _trial_for_shot(plan["speaking_trials"], shot_id)
+    speaker_id = _exact_text(review["speaker_id"], "Video review speaker ID")
+    dialogue_id = _exact_text(review["dialogue_id"], "Video review dialogue ID")
+    audio_sha256 = _audio_sha256(review["audio_sha256"], "Video review audio_sha256")
+    if (
+        speaker_id != expected_trial["speaker_id"]
+        or dialogue_id != expected_trial["dialogue_id"]
+        or audio_sha256 != expected_trial["audio_sha256"]
+    ):
+        raise ModelBakeoffError("Video review speaking trial does not match the plan.")
     path = _candidate_path(
         plan,
         review["candidate_path"],
@@ -537,18 +740,25 @@ def _validate_video_review(
     evidence = _file_evidence(path)
     scores = dict(review["scores"]) if isinstance(review["scores"], Mapping) else review["scores"]
     weighted_score(scores)
+    passed = scores["lipsync"] >= LIPSYNC_MINIMUM_SCORE
+    if not isinstance(review["passed"], bool) or review["passed"] != passed:
+        raise ModelBakeoffError("Video review lipsync passed state is inconsistent.")
     failures = _hard_failures(
         review["hard_failures"], VIDEO_HARD_FAILURES, "Video hard failure"
     )
     notes = _local_notes(review["notes"])
     return {
         "micro_shot_id": shot_id,
+        "speaker_id": speaker_id,
+        "dialogue_id": dialogue_id,
+        "audio_sha256": audio_sha256,
         "candidate_path": str(path),
         "size_bytes": evidence["size_bytes"],
         "sha256": evidence["sha256"],
         "scores": scores,
         "hard_failures": failures,
         "notes": notes,
+        "passed": passed,
     }
 
 
@@ -613,10 +823,9 @@ def _validate_report_inner(report: Mapping[str, Any]) -> dict[str, Any]:
         report["representative_character_micro_shot_ids"],
         "Report representative character micro-shot IDs",
     )
-    if len(representative_ids) != 2 or len(set(representative_ids)) != 2:
-        raise ModelBakeoffError(
-            "Report must bind exactly two different representative character shots."
-        )
+    speaking_trials = _validate_speaking_trials(
+        report["speaking_trials"], representative_ids, "Report"
+    )
     if not isinstance(report["requires_still"], bool):
         raise ModelBakeoffError("Report requires_still must be a boolean.")
     still_id = report["still_micro_shot_id"]
@@ -660,8 +869,8 @@ def _validate_report_inner(report: Mapping[str, Any]) -> dict[str, Any]:
         if result["model"] != model:
             raise ModelBakeoffError("Report video result model order is invalid.")
         shots = result["shots"]
-        if not isinstance(shots, list) or len(shots) != 2:
-            raise ModelBakeoffError("Report video result must contain exactly two shots.")
+        if not isinstance(shots, list) or len(shots) != 3:
+            raise ModelBakeoffError("Report video result must contain exactly three shots.")
         normalized_shots: list[dict[str, Any]] = []
         failures: set[str] = set()
         shot_ids: list[str] = []
@@ -682,6 +891,16 @@ def _validate_report_inner(report: Mapping[str, Any]) -> dict[str, Any]:
                 kind="video",
             )
             evidence = _stored_evidence(shot, path, "Report video candidate")
+            expected_trial = _trial_for_shot(speaking_trials, shot_id)
+            speaker_id = _exact_text(shot["speaker_id"], "Report speaker ID")
+            dialogue_id = _exact_text(shot["dialogue_id"], "Report dialogue ID")
+            audio_sha256 = _audio_sha256(shot["audio_sha256"], "Report audio_sha256")
+            if (
+                speaker_id != expected_trial["speaker_id"]
+                or dialogue_id != expected_trial["dialogue_id"]
+                or audio_sha256 != expected_trial["audio_sha256"]
+            ):
+                raise ModelBakeoffError("Report video speaking trial does not match the plan.")
             scores = dict(shot["scores"]) if isinstance(shot["scores"], Mapping) else shot["scores"]
             calculated = weighted_score(scores)
             stored = _finite_number(
@@ -692,6 +911,9 @@ def _validate_report_inner(report: Mapping[str, Any]) -> dict[str, Any]:
             )
             if stored != calculated:
                 raise ModelBakeoffError("Report weighted score does not match raw scores.")
+            trial_passed = scores["lipsync"] >= LIPSYNC_MINIMUM_SCORE
+            if not isinstance(shot["passed"], bool) or shot["passed"] != trial_passed:
+                raise ModelBakeoffError("Report video lipsync passed state is inconsistent.")
             shot_failures = _hard_failures(
                 shot["hard_failures"], VIDEO_HARD_FAILURES, "Report video hard failure"
             )
@@ -700,6 +922,9 @@ def _validate_report_inner(report: Mapping[str, Any]) -> dict[str, Any]:
             normalized_shots.append(
                 {
                     "micro_shot_id": shot_id,
+                    "speaker_id": speaker_id,
+                    "dialogue_id": dialogue_id,
+                    "audio_sha256": audio_sha256,
                     "candidate_path": str(path),
                     "size_bytes": evidence["size_bytes"],
                     "sha256": evidence["sha256"],
@@ -707,6 +932,7 @@ def _validate_report_inner(report: Mapping[str, Any]) -> dict[str, Any]:
                     "weighted_score": stored,
                     "hard_failures": shot_failures,
                     "notes": _local_notes(shot["notes"]),
+                    "passed": trial_passed,
                 }
             )
         if shot_ids != representative_ids:
@@ -714,7 +940,7 @@ def _validate_report_inner(report: Mapping[str, Any]) -> dict[str, Any]:
                 "Report video models must review the bound representative shots in order."
             )
         aggregate = round(
-            sum(item["weighted_score"] for item in normalized_shots) / 2, 2
+            sum(item["weighted_score"] for item in normalized_shots) / 3, 2
         )
         stored_aggregate = _finite_number(
             result["aggregate_score"],
@@ -732,10 +958,14 @@ def _validate_report_inner(report: Mapping[str, Any]) -> dict[str, Any]:
         expected_passed = aggregate >= 80 and not failures
         if not isinstance(result["passed"], bool) or result["passed"] != expected_passed:
             raise ModelBakeoffError("Report video passed state is inconsistent.")
+        speaking_result_trials = _validate_result_speaking_trials(
+            result["speaking_trials"], normalized_shots
+        )
         normalized_video_results.append(
             {
                 "model": model,
                 "shots": normalized_shots,
+                "speaking_trials": speaking_result_trials,
                 "aggregate_score": aggregate,
                 "hard_failures": stored_failures,
                 "passed": expected_passed,
@@ -819,6 +1049,7 @@ def _validate_report_inner(report: Mapping[str, Any]) -> dict[str, Any]:
         "project_id": project_id,
         "run_dir": str(root),
         "representative_character_micro_shot_ids": representative_ids,
+        "speaking_trials": speaking_trials,
         "requires_still": report["requires_still"],
         "still_micro_shot_id": still_id,
         "minimum_score": 80,
@@ -845,6 +1076,7 @@ def _validate_bound_artifacts(report: Mapping[str, Any]) -> None:
         "representative_character_micro_shot_ids": report[
             "representative_character_micro_shot_ids"
         ],
+        "speaking_trials": report["speaking_trials"],
         "requires_still": report["requires_still"],
         "still_micro_shot_id": report["still_micro_shot_id"],
         "video_models": report["video_models"],
@@ -881,12 +1113,16 @@ def _review_artifact_from_report(report: Mapping[str, Any]) -> dict[str, Any]:
         video_reviews[result["model"]] = [
             {
                 "micro_shot_id": shot["micro_shot_id"],
+                "speaker_id": shot["speaker_id"],
+                "dialogue_id": shot["dialogue_id"],
+                "audio_sha256": shot["audio_sha256"],
                 "candidate_path": shot["candidate_path"],
                 "size_bytes": shot["size_bytes"],
                 "sha256": shot["sha256"],
                 "scores": shot["scores"],
                 "hard_failures": shot["hard_failures"],
                 "notes": shot["notes"],
+                "passed": shot["passed"],
             }
             for shot in result["shots"]
         ]
@@ -1139,6 +1375,12 @@ def _finite_number(
         raise ModelBakeoffError(
             f"{label} must be a finite score from {minimum:g} to {maximum:g}."
         )
+    return value
+
+
+def _audio_sha256(value: Any, label: str) -> str:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise ModelBakeoffError(f"{label} must be lowercase hexadecimal.")
     return value
 
 
