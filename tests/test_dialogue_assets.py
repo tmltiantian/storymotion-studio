@@ -191,3 +191,46 @@ def test_manifest_rejects_changed_final_audio_evidence(
             provider_report_path=provider_report,
             command_runner=fake_ffmpeg,
         )
+
+
+def test_require_dialogue_audio_rejects_a_tampered_asset_file(
+    tmp_path: Path,
+    episode: Episode,
+    sheet: PerformanceSheet,
+    completed_voiceover: tuple[Path, Path],
+):
+    voiceover, provider_report = completed_voiceover
+    manifest = write_dialogue_audio_manifest(
+        episode,
+        sheet,
+        voiceover,
+        tmp_path / "dialogue_audio",
+        provider_report_path=provider_report,
+        command_runner=fake_ffmpeg,
+    )
+    _write_wav(Path(manifest.assets[0].path), duration_seconds=0.1)
+
+    with pytest.raises(DialogueAudioError, match="final dialogue audio is invalid"):
+        require_dialogue_audio(manifest, sheet.cards[0])
+
+
+def test_manifest_rejects_a_cut_shorter_than_the_completed_cue(
+    tmp_path: Path,
+    episode: Episode,
+    sheet: PerformanceSheet,
+    completed_voiceover: tuple[Path, Path],
+):
+    voiceover, provider_report = completed_voiceover
+
+    def truncated_ffmpeg(command, **_kwargs):
+        _write_wav(Path(command[-1]), duration_seconds=0.1)
+
+    with pytest.raises(DialogueAudioError, match="shorter than completed cue"):
+        write_dialogue_audio_manifest(
+            episode,
+            sheet,
+            voiceover,
+            tmp_path / "dialogue_audio",
+            provider_report_path=provider_report,
+            command_runner=truncated_ffmpeg,
+        )

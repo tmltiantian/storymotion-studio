@@ -78,20 +78,23 @@ def _legacy_aliases_from_dialogue_manifest(
 ) -> dict[str, Path]:
     aliases: dict[str, Path] = {}
     for shot in episode.shots:
-        dialogue_ids = [
-            dialogue_id_for(shot.id, index)
+        dialogue_lines = [
+            (dialogue_id_for(shot.id, index), line)
             for index, line in enumerate(shot.dialogue, start=1)
             if line.speaker_id != NARRATOR_ID
         ]
-        if not dialogue_ids:
+        if not dialogue_lines:
             continue
-        if len(dialogue_ids) != 1:
+        if len(dialogue_lines) != 1:
             raise DialogueAudioError(
                 f"{shot.id} cannot use one legacy parent-shot alias for multiple dialogue lines"
             )
-        asset = manifest.by_dialogue_id.get(dialogue_ids[0])
+        dialogue_id, line = dialogue_lines[0]
+        asset = manifest.by_dialogue_id.get(dialogue_id)
         if asset is None:
             raise DialogueAudioError(f"{shot.id} missing final dialogue audio")
+        if asset.speaker_id != line.speaker_id:
+            raise DialogueAudioError(f"{shot.id} dialogue speaker does not match")
         path = Path(asset.path)
         if path.is_symlink() or not path.is_file() or sha256_file(path) != asset.sha256:
             raise DialogueAudioError(f"{shot.id} final dialogue audio is invalid")

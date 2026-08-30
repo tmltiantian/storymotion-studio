@@ -16,6 +16,8 @@ from .schema import Episode, NARRATOR_ID
 
 
 DIALOGUE_AUDIO_MANIFEST_SCHEMA = "motion-comic-factory.dialogue-audio.v1"
+# ffmpeg/container rounding can lose a few milliseconds; larger loss is truncated audio.
+CUE_DURATION_TOLERANCE_SECONDS = 0.025
 
 
 class DialogueAudioError(RuntimeError):
@@ -125,6 +127,11 @@ def require_dialogue_audio(
         raise DialogueAudioError(
             f"{card.micro_shot_id} dialogue speaker does not match"
         )
+    path = Path(asset.path)
+    if path.is_symlink() or not path.is_file() or sha256_file(path) != asset.sha256:
+        raise DialogueAudioError(
+            f"{card.micro_shot_id} final dialogue audio is invalid"
+        )
     return asset
 
 
@@ -204,6 +211,8 @@ def _cut_cue_wav(
     output = destination / f"{dialogue_id}.wav"
     if output.is_symlink():
         raise DialogueAudioError("dialogue audio output cannot be a symlink")
+    if output.exists():
+        raise DialogueAudioError("refusing to replace immutable dialogue audio")
     temporary = output.with_name(f".{output.stem}.tmp.wav")
     start = _finite_seconds(cue["absolute_start_seconds"])
     duration = _finite_seconds(cue["absolute_end_seconds"]) - start
@@ -234,10 +243,16 @@ def _cut_cue_wav(
         )
         if not temporary.is_file() or temporary.stat().st_size <= 0:
             raise DialogueAudioError("ffmpeg did not create final dialogue audio")
+        _require_duration_covers_cue(temporary, duration)
         os.replace(temporary, output)
     finally:
         temporary.unlink(missing_ok=True)
     return output
+
+
+def _require_duration_covers_cue(path: Path, cue_duration: float) -> None:
+    if _probe_duration(path) + CUE_DURATION_TOLERANCE_SECONDS < cue_duration:
+        raise DialogueAudioError("final dialogue audio is shorter than completed cue")
 
 
 def _probe_duration(path: Path) -> float:
