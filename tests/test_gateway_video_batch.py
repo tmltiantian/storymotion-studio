@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 import fcntl
 import hashlib
 import os
@@ -21,9 +22,11 @@ from factory.gateway_video import (
     GatewayVideoTask,
 )
 from factory.gateway_video_batch import (
+    CLIP_STATE_SCHEMA,
     GatewayVideoBatchError,
     GatewayVideoJob,
     _job_signature,
+    _state_matches_job,
     build_gateway_video_jobs,
     render_gateway_video_batch,
     render_gateway_video_single,
@@ -2115,6 +2118,63 @@ def test_gateway_video_job_signature_changes_with_reference_audio_hash(tmp_path)
     )
 
     assert first != second
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda job: replace(job, reference_audio_sha256="2" * 64),
+        lambda job: replace(job, entry_anchor_id="other-anchor"),
+        lambda job: replace(job, capability="action_only"),
+    ],
+)
+def test_gateway_state_does_not_resume_when_evidence_changes(tmp_path, mutate):
+    """Changing request evidence must make submitted state non-reusable without a provider call."""
+    output = tmp_path / "single.mp4"
+    endpoint = gateway_batch.gateway_endpoint_fingerprint("https://gateway.test/v1")
+    job = GatewayVideoJob(
+        shot_id="single",
+        index=1,
+        prompt="animate one character speaking",
+        images=(),
+        duration=5,
+        ratio="9:16",
+        resolution="720p",
+        output_path=str(output),
+        reference_audio_sha256="1" * 64,
+        entry_anchor_id="anchor-001",
+        capability="speaking",
+    )
+    signature = _job_signature(
+        job,
+        model="doubao-seedance-2-0-fast",
+        generate_audio=False,
+        endpoint_fingerprint=endpoint,
+    )
+    state = {
+        "schema_version": CLIP_STATE_SCHEMA,
+        "signature": signature,
+        "endpoint_fingerprint_sha256": endpoint,
+        "model": "doubao-seedance-2-0-fast",
+        "shot_id": "single",
+        "output_path": str(output.resolve()),
+    }
+    changed = mutate(job)
+    changed_signature = _job_signature(
+        changed,
+        model="doubao-seedance-2-0-fast",
+        generate_audio=False,
+        endpoint_fingerprint=endpoint,
+    )
+
+    assert _state_matches_job(
+        state,
+        job=changed,
+        output=output,
+        signature=changed_signature,
+        endpoint_fingerprint=endpoint,
+        model="doubao-seedance-2-0-fast",
+    ) is False
 
 
 def test_gateway_video_single_state_does_not_persist_signed_video_url(tmp_path):

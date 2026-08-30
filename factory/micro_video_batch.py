@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import hashlib
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -50,6 +51,8 @@ class MicroVideoJob:
     audio_sha256: str = ""
     entry_anchor_id: str = ""
     capability: str = "action_only"
+    capability_provenance: Mapping[str, Any] | None = None
+    capability_provenance_sha256: str = ""
 
 
 def candidate_output_path(
@@ -126,6 +129,8 @@ def build_micro_video_jobs(
         audio_path = ""
         audio_sha256 = ""
         capability = "action_only"
+        capability_provenance: Mapping[str, Any] | None = None
+        capability_provenance_sha256 = ""
         if card.requires_visible_lipsync:
             try:
                 # Imported here to avoid model_bakeoff's production-model import cycle.
@@ -138,6 +143,10 @@ def build_micro_video_jobs(
             audio_path = str(Path(audio.path).resolve())
             audio_sha256 = audio.sha256
             capability = "speaking"
+            capability_provenance = _capability_provenance(capability_report)
+            capability_provenance_sha256 = _capability_provenance_sha256(
+                capability_provenance
+            )
         anchor = _require_evidence_image(
             approved_anchors,
             card.entry_anchor_id,
@@ -203,6 +212,8 @@ def build_micro_video_jobs(
                 audio_sha256=audio_sha256,
                 entry_anchor_id=card.entry_anchor_id,
                 capability=capability,
+                capability_provenance=capability_provenance,
+                capability_provenance_sha256=capability_provenance_sha256,
             )
         )
     return jobs
@@ -289,6 +300,7 @@ def render_micro_video_batch(
                 reference_audio_sha256=job.audio_sha256,
                 entry_anchor_id=job.entry_anchor_id,
                 capability=job.capability,
+                capability_provenance_sha256=job.capability_provenance_sha256,
                 duration=job.duration,
                 ratio="9:16",
                 resolution=job.resolution,
@@ -515,11 +527,7 @@ def _validate_manual_images(
         raise MicroVideoBatchError(
             "Micro-video job images must be a non-empty tuple or list."
         )
-    roles = (
-        ("reference_image",) * len(images)
-        if image_roles in (None, ())
-        else image_roles
-    )
+    roles = _image_roles(images, image_roles)
     if not isinstance(roles, (tuple, list)) or len(roles) != len(images):
         raise MicroVideoBatchError(
             "Micro-video job image roles must exactly match image references."
@@ -555,6 +563,23 @@ def _validate_manual_images(
         seen.add(path)
         normalized.append(str(path))
     return tuple(normalized), tuple(roles)
+
+
+def _image_roles(images: Any, image_roles: Any) -> tuple[str, ...]:
+    if not isinstance(images, (tuple, list)):
+        return ()
+    roles = (
+        ("reference_image",) * len(images)
+        if image_roles in (None, ())
+        else image_roles
+    )
+    if not isinstance(roles, (tuple, list)) or len(roles) != len(images):
+        raise MicroVideoBatchError(
+            "Micro-video job image roles must exactly match image references."
+        )
+    if any(role not in {"last_frame", "first_frame", "reference_image"} for role in roles):
+        raise MicroVideoBatchError("Micro-video job image roles are invalid.")
+    return tuple(roles)
 
 
 def _validated_character_references(
@@ -738,12 +763,23 @@ def _validate_job(job: MicroVideoJob, run_root: Path) -> tuple[int, MicroVideoJo
         )
     _require_path_in_clips_root(output, run_root)
     _require_path_in_clips_root(report_path, run_root)
-    images, image_roles = _validate_manual_images(job.images, job.image_roles, run_root)
     if job.capability not in {"action_only", "speaking"}:
         raise MicroVideoBatchError(
             f"Micro-video job capability is invalid for {job.micro_shot_id}."
         )
     if job.capability == "speaking":
+        image_roles = _image_roles(job.images, job.image_roles)
+        if (
+            len(image_roles) < 3
+            or image_roles[0] != "last_frame"
+            or image_roles[1] != "first_frame"
+            or image_roles.count("last_frame") != 1
+            or image_roles.count("first_frame") != 1
+            or any(role != "reference_image" for role in image_roles[2:])
+        ):
+            raise MicroVideoBatchError(
+                f"Speaking micro-video speaking frame evidence is invalid for {job.micro_shot_id}."
+            )
         if not job.audio_path or not job.audio_sha256 or not job.entry_anchor_id:
             raise MicroVideoBatchError(
                 f"Speaking micro-video job evidence is incomplete for {job.micro_shot_id}."
@@ -754,10 +790,35 @@ def _validate_job(job: MicroVideoJob, run_root: Path) -> tuple[int, MicroVideoJo
             raise MicroVideoBatchError(
                 f"Speaking micro-video audio is invalid for {job.micro_shot_id}."
             )
+        if not isinstance(job.capability_provenance, Mapping):
+            raise MicroVideoBatchError(
+                f"Speaking micro-video speaking capability provenance is missing for {job.micro_shot_id}."
+            )
+        if (
+            not isinstance(job.capability_provenance_sha256, str)
+            or job.capability_provenance_sha256
+            != _capability_provenance_sha256(job.capability_provenance)
+        ):
+            raise MicroVideoBatchError(
+                f"Speaking micro-video speaking capability provenance is invalid for {job.micro_shot_id}."
+            )
+        try:
+            from .model_bakeoff import ModelBakeoffError, require_speaking_capability
+
+            require_speaking_capability(
+                job.capability_provenance,
+                job.model,
+                job.micro_shot_id,
+            )
+        except ModelBakeoffError as exc:
+            raise MicroVideoBatchError(
+                f"Speaking micro-video speaking capability provenance is invalid for {job.micro_shot_id}: {exc}"
+            ) from exc
     elif job.audio_path or job.audio_sha256:
         raise MicroVideoBatchError(
             f"Action-only micro-video job must not include dialogue audio for {job.micro_shot_id}."
         )
+    images, image_roles = _validate_manual_images(job.images, job.image_roles, run_root)
     return candidate_number, replace(
         job,
         output_path=str(output),
@@ -790,6 +851,7 @@ def _safe_job_report(job: MicroVideoJob) -> dict[str, Any]:
         "reference_audio_sha256": job.audio_sha256,
         "entry_anchor_id": job.entry_anchor_id,
         "capability": job.capability,
+        "capability_provenance_sha256": job.capability_provenance_sha256,
         "duration": job.duration,
         "ratio": "9:16",
         "resolution": job.resolution,
@@ -815,6 +877,28 @@ def _sha256_file(path: Path) -> str:
     except OSError as exc:
         raise MicroVideoBatchError("Unable to hash micro-video dialogue audio.") from exc
     return digest.hexdigest()
+
+
+def _capability_provenance(report: Mapping[str, Any]) -> Mapping[str, Any]:
+    try:
+        return json.loads(
+            json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        )
+    except (TypeError, ValueError) as exc:
+        raise MicroVideoBatchError("Capability report cannot be serialized.") from exc
+
+
+def _capability_provenance_sha256(report: Mapping[str, Any]) -> str:
+    try:
+        encoded = json.dumps(
+            report,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise MicroVideoBatchError("Capability report cannot be serialized.") from exc
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _report_count(result: dict[str, Any], key: str) -> int:
