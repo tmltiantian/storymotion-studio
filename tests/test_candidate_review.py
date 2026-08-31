@@ -46,6 +46,26 @@ def _record(path: Path, state: CandidateState = CandidateState.PLANNED) -> Candi
     )
 
 
+def _qc_report(path: Path) -> tuple[Path, dict[str, str]]:
+    frames = {}
+    samples = []
+    for position, label in ((1, "first_frame"), (5, "middle_frame"), (9, "last_frame")):
+        frame = path.parent / f"sample_{position:02d}.png"
+        frame.write_bytes(label.encode())
+        digest = hashlib.sha256(frame.read_bytes()).hexdigest()
+        samples.append({
+            "evidence": {
+                "path": str(frame), "sha256": digest,
+                "size_bytes": frame.stat().st_size,
+                "device": frame.stat().st_dev, "inode": frame.stat().st_ino,
+            }
+        })
+        frames[label] = str(frame)
+    report = path.with_name("visual_qc.json")
+    report.write_text(__import__("json").dumps({"sample_frames": samples}), encoding="utf-8")
+    return report, frames
+
+
 def test_candidate_state_machine_cannot_skip_review(tmp_path):
     candidate = tmp_path / "candidate.mp4"
     candidate.write_bytes(b"candidate")
@@ -57,15 +77,16 @@ def test_candidate_state_machine_cannot_skip_review(tmp_path):
 def test_approved_selection_requires_unchanged_approved_timeline_candidate(tmp_path):
     candidate = tmp_path / "candidate_001.mp4"
     candidate.write_bytes(b"candidate")
-    record = _record(candidate, CandidateState.REVIEW_REQUIRED)
+    report, frames = _qc_report(candidate)
+    record = CandidateRecord(
+        **{**_record(candidate, CandidateState.REVIEW_REQUIRED).__dict__, "visual_qc_report_path": str(report)}
+    )
     reviewed = transition_candidate(
         record,
         CandidateState.APPROVED,
         reason="reviewed",
         evidence={
-            "first_frame": "first.png",
-            "middle_frame": "middle.png",
-            "last_frame": "last.png",
+            **frames,
             "review_note": "approved locally",
         },
     )
@@ -76,3 +97,20 @@ def test_approved_selection_requires_unchanged_approved_timeline_candidate(tmp_p
     assert list(selection["selected_candidates"]) == ["micro_001"]
     assert selection["selected_candidates"]["micro_001"]["candidate_path"] == str(candidate)
 
+
+def test_approved_selection_rejects_caller_supplied_frame_paths(tmp_path):
+    candidate = tmp_path / "candidate_001.mp4"
+    candidate.write_bytes(b"candidate")
+    report, _ = _qc_report(candidate)
+    record = CandidateRecord(
+        **{**_record(candidate, CandidateState.REVIEW_REQUIRED).__dict__, "visual_qc_report_path": str(report)}
+    )
+    with pytest.raises(CandidateReviewError, match="does not match visual QC sample"):
+        transition_candidate(
+            record,
+            CandidateState.APPROVED,
+            evidence={
+                "first_frame": "forged.png", "middle_frame": "forged.png",
+                "last_frame": "forged.png", "review_note": "approved locally",
+            },
+        )

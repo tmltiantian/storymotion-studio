@@ -251,7 +251,7 @@ def _validate_manifest(manifest: CandidateReviewManifest, *, require_existing: b
         if record.micro_shot_id in ids:
             raise CandidateReviewError("Candidate review manifest must not contain duplicate micro-shot ids.")
         ids.add(record.micro_shot_id)
-        if record.state in {CandidateState.REVIEW_REQUIRED, CandidateState.APPROVED}:
+        if record.state is CandidateState.APPROVED:
             _validate_review_evidence(record)
 
 
@@ -293,6 +293,7 @@ def _validate_review_evidence(record: CandidateRecord) -> None:
         raise CandidateReviewError(
             "Candidate review evidence is missing: " + ", ".join(sorted(missing)) + "."
         )
+    _validate_qc_frame_evidence(record)
     if record.audio_sha256:
         missing = _VISIBLE_SPEECH_EVIDENCE - set(record.evidence)
         if missing:
@@ -310,6 +311,54 @@ def _validate_review_evidence(record: CandidateRecord) -> None:
             raise CandidateReviewError("Visible-speaking candidate lipsync_score is invalid.") from exc
         if not 0 <= score <= 5:
             raise CandidateReviewError("Visible-speaking candidate lipsync_score must be 0 to 5.")
+        manual = _visual_qc_manual_review(record)
+        if manual.get("audio_sha256") != record.audio_sha256:
+            raise CandidateReviewError("Candidate review audio does not match visual QC evidence.")
+        if manual.get("entry_anchor_id") != record.entry_anchor_id:
+            raise CandidateReviewError("Candidate review anchor does not match visual QC evidence.")
+
+
+def _validate_qc_frame_evidence(record: CandidateRecord) -> None:
+    try:
+        report = json.loads(Path(record.visual_qc_report_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CandidateReviewError("Candidate review visual QC report is unavailable.") from exc
+    samples = report.get("sample_frames") if isinstance(report, Mapping) else None
+    if not isinstance(samples, list) or len(samples) < 3:
+        raise CandidateReviewError("Candidate review visual QC sample evidence is invalid.")
+    for label, index in (("first_frame", 0), ("middle_frame", len(samples) // 2), ("last_frame", len(samples) - 1)):
+        sample = samples[index]
+        evidence = sample.get("evidence") if isinstance(sample, Mapping) else None
+        if not isinstance(evidence, Mapping):
+            raise CandidateReviewError("Candidate review visual QC sample evidence is invalid.")
+        path = Path(str(evidence.get("path") or ""))
+        if record.evidence[label] != str(path):
+            raise CandidateReviewError(
+                f"Candidate review {label} does not match visual QC sample evidence."
+            )
+        try:
+            stat = path.stat()
+            digest = _sha256(path)
+        except OSError as exc:
+            raise CandidateReviewError("Candidate review visual QC sample evidence is unavailable.") from exc
+        if (
+            evidence.get("sha256") != digest
+            or evidence.get("size_bytes") != stat.st_size
+            or evidence.get("device") != stat.st_dev
+            or evidence.get("inode") != stat.st_ino
+        ):
+            raise CandidateReviewError("Candidate review visual QC sample evidence changed.")
+
+
+def _visual_qc_manual_review(record: CandidateRecord) -> Mapping[str, Any]:
+    try:
+        report = json.loads(Path(record.visual_qc_report_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CandidateReviewError("Candidate review visual QC report is unavailable.") from exc
+    manual = report.get("manual_review") if isinstance(report, Mapping) else None
+    if not isinstance(manual, Mapping):
+        raise CandidateReviewError("Candidate review is missing authoritative visual QC review.")
+    return manual
 
 
 def _validate_hash(value: str, label: str) -> None:

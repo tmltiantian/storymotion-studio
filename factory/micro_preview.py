@@ -147,26 +147,27 @@ def select_micro_sources(
     *,
     run_dir: str | Path,
     bakeoff_report: Mapping[str, Any],
-    candidate_review: CandidateReviewManifest | Mapping[str, Any] | None = None,
+    candidate_review: CandidateReviewManifest | Mapping[str, Any],
 ) -> list[MicroSource]:
     errors = validate_visual_timeline(timeline, episode)
     if errors:
         raise MicroPreviewError("Invalid visual timeline: " + "; ".join(errors))
     root = _canonical_directory(run_dir, "run directory")
-    if candidate_review is not None:
-        try:
-            manifest = (
-                candidate_review
-                if isinstance(candidate_review, CandidateReviewManifest)
-                else candidate_review_manifest_from_dict(candidate_review)
-            )
-            approved_selection = approved_selection_from_manifest(manifest, timeline)
-        except CandidateReviewError as exc:
-            raise MicroPreviewError(f"Candidate review gate failed: {exc}") from exc
-        if selection != approved_selection:
-            raise MicroPreviewError(
-                "Visual selection does not exactly match the approved candidate review."
-            )
+    if candidate_review is None:
+        raise MicroPreviewError("Candidate review manifest is required before editing.")
+    try:
+        manifest = (
+            candidate_review
+            if isinstance(candidate_review, CandidateReviewManifest)
+            else candidate_review_manifest_from_dict(candidate_review)
+        )
+        approved_selection = approved_selection_from_manifest(manifest, timeline)
+    except CandidateReviewError as exc:
+        raise MicroPreviewError(f"Candidate review gate failed: {exc}") from exc
+    if selection != approved_selection:
+        raise MicroPreviewError(
+            "Visual selection does not exactly match the approved candidate review."
+        )
     normalized = _selection(selection, episode, timeline)
     if not isinstance(bakeoff_report, Mapping):
         raise MicroPreviewError("Model bakeoff report must be an object.")
