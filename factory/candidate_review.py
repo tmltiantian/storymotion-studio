@@ -70,6 +70,7 @@ class CandidateRecord:
     first_frame_sha256: str = ""
     middle_frame_sha256: str = ""
     last_frame_sha256: str = ""
+    sample_frame_sha256: Mapping[str, str] = field(default_factory=dict)
     rendered_job_report_path: str = ""
     rendered_job_report_sha256: str = ""
     reason: str = ""
@@ -113,6 +114,7 @@ def transition_candidate(
         first_frame_sha256=record.first_frame_sha256,
         middle_frame_sha256=record.middle_frame_sha256,
         last_frame_sha256=record.last_frame_sha256,
+        sample_frame_sha256=dict(record.sample_frame_sha256),
         rendered_job_report_path=record.rendered_job_report_path,
         rendered_job_report_sha256=record.rendered_job_report_sha256,
         reason=updated_reason,
@@ -161,7 +163,7 @@ def candidate_review_manifest_from_dict(data: Mapping[str, Any]) -> CandidateRev
             "micro_shot_id", "candidate_path", "candidate_sha256", "state",
             "audio_sha256", "entry_anchor_id", "visual_qc_report_path",
             "visual_qc_report_sha256", "first_frame_sha256", "middle_frame_sha256",
-            "last_frame_sha256", "rendered_job_report_path",
+            "last_frame_sha256", "sample_frame_sha256", "rendered_job_report_path",
             "rendered_job_report_sha256", "reason", "evidence",
         }:
             raise CandidateReviewError(
@@ -187,6 +189,7 @@ def candidate_review_manifest_from_dict(data: Mapping[str, Any]) -> CandidateRev
                 first_frame_sha256=item["first_frame_sha256"],
                 middle_frame_sha256=item["middle_frame_sha256"],
                 last_frame_sha256=item["last_frame_sha256"],
+                sample_frame_sha256=dict(item["sample_frame_sha256"]),
                 rendered_job_report_path=item["rendered_job_report_path"],
                 rendered_job_report_sha256=item["rendered_job_report_sha256"],
                 reason=item["reason"],
@@ -300,6 +303,11 @@ def _validate_record(record: CandidateRecord, *, require_existing: bool) -> None
         _validate_hash(record.audio_sha256, "audio SHA-256")
     if not isinstance(record.reason, str):
         raise CandidateReviewError("Candidate review reason must be a string.")
+    if not isinstance(record.sample_frame_sha256, Mapping) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in record.sample_frame_sha256.items()
+    ):
+        raise CandidateReviewError("Candidate review sample frame fingerprints are invalid.")
     if not isinstance(record.evidence, Mapping) or any(
         not isinstance(key, str) or not isinstance(value, str) or not value.strip()
         for key, value in record.evidence.items()
@@ -324,6 +332,7 @@ def _validate_review_evidence(record: CandidateRecord, *, project_id: str = "") 
             "Candidate review evidence is missing: " + ", ".join(sorted(missing)) + "."
         )
     _validate_qc_frame_evidence(record)
+    _validate_task5_job_evidence(record, project_id=project_id)
     if record.audio_sha256:
         missing = _VISIBLE_SPEECH_EVIDENCE - set(record.evidence)
         if missing:
@@ -346,7 +355,6 @@ def _validate_review_evidence(record: CandidateRecord, *, project_id: str = "") 
             raise CandidateReviewError("Candidate review audio does not match visual QC evidence.")
         if manual.get("entry_anchor_id") != record.entry_anchor_id:
             raise CandidateReviewError("Candidate review anchor does not match visual QC evidence.")
-        _validate_task5_job_evidence(record, project_id=project_id)
 
 
 def _validate_qc_frame_evidence(record: CandidateRecord) -> None:
@@ -374,13 +382,19 @@ def _validate_qc_frame_evidence(record: CandidateRecord) -> None:
         "middle_frame": record.middle_frame_sha256,
         "last_frame": record.last_frame_sha256,
     }
-    for label, index in (("first_frame", 0), ("middle_frame", 4), ("last_frame", 8)):
+    expected_sample_keys = {f"sample_{index:02d}" for index in range(1, 10)}
+    if set(record.sample_frame_sha256) != expected_sample_keys:
+        raise CandidateReviewError(
+            "Candidate review must contain fingerprints for every visual QC sample."
+        )
+    for index in range(9):
+        label = {0: "first_frame", 4: "middle_frame", 8: "last_frame"}.get(index)
         sample = samples[index]
         evidence = sample.get("evidence") if isinstance(sample, Mapping) else None
         if not isinstance(evidence, Mapping):
             raise CandidateReviewError("Candidate review visual QC sample evidence is invalid.")
         path = Path(str(evidence.get("path") or ""))
-        if record.evidence[label] != str(path):
+        if label is not None and record.evidence[label] != str(path):
             raise CandidateReviewError(
                 f"Candidate review {label} does not match visual QC sample evidence."
             )
@@ -396,7 +410,12 @@ def _validate_qc_frame_evidence(record: CandidateRecord) -> None:
             or evidence.get("inode") != stat.st_ino
         ):
             raise CandidateReviewError("Candidate review visual QC sample evidence changed.")
-        if digest != fingerprints[label]:
+        sample_key = f"sample_{index + 1:02d}"
+        if digest != record.sample_frame_sha256[sample_key]:
+            raise CandidateReviewError(
+                f"Candidate review {sample_key} changed."
+            )
+        if label is not None and digest != fingerprints[label]:
             raise CandidateReviewError(
                 f"Candidate review {label} fingerprint does not match visual QC evidence."
             )

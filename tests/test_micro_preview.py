@@ -178,7 +178,8 @@ def _install_gate_stubs(monkeypatch, qc: dict) -> None:
 
 
 def _write_approved_candidate_review(run_dir: Path, candidate: Path) -> None:
-    qc_path, frame_paths, frame_hashes = _write_qc_evidence(run_dir, candidate)
+    qc_path, frame_paths, frame_hashes, sample_hashes = _write_qc_evidence(run_dir, candidate)
+    job_report, job_hash = _write_task5_job_evidence(run_dir, candidate)
     selection = {
         "schema_version": "motion-comic-factory.visual-selection.v1",
         "project_id": "sample_episode",
@@ -203,7 +204,8 @@ def _write_approved_candidate_review(run_dir: Path, candidate: Path) -> None:
             "first_frame_sha256": frame_hashes["first_frame"],
             "middle_frame_sha256": frame_hashes["middle_frame"],
             "last_frame_sha256": frame_hashes["last_frame"],
-            "rendered_job_report_path": "", "rendered_job_report_sha256": "",
+            "sample_frame_sha256": sample_hashes,
+            "rendered_job_report_path": str(job_report), "rendered_job_report_sha256": job_hash,
             "reason": "approved", "evidence": {
                 **frame_paths, "review_note": "approved",
             },
@@ -211,9 +213,10 @@ def _write_approved_candidate_review(run_dir: Path, candidate: Path) -> None:
     }), encoding="utf-8")
 
 
-def _write_qc_evidence(run_dir: Path, candidate: Path) -> tuple[Path, dict[str, str], dict[str, str]]:
+def _write_qc_evidence(run_dir: Path, candidate: Path) -> tuple[Path, dict[str, str], dict[str, str], dict[str, str]]:
     frames: dict[str, str] = {}
     hashes: dict[str, str] = {}
+    sample_hashes: dict[str, str] = {}
     samples = []
     for index in range(1, 10):
         label = {1: "first_frame", 5: "middle_frame", 9: "last_frame"}.get(index, "")
@@ -221,6 +224,7 @@ def _write_qc_evidence(run_dir: Path, candidate: Path) -> tuple[Path, dict[str, 
         frame.write_bytes((label or str(index)).encode())
         stat = frame.stat()
         digest = _sha256(frame)
+        sample_hashes[f"sample_{index:02d}"] = digest
         samples.append({"evidence": {"path": str(frame), "sha256": digest, "size_bytes": stat.st_size, "device": stat.st_dev, "inode": stat.st_ino}})
         if label:
             frames[label] = str(frame)
@@ -231,7 +235,22 @@ def _write_qc_evidence(run_dir: Path, candidate: Path) -> tuple[Path, dict[str, 
         "candidate_evidence": {"path": str(candidate), "sha256": _sha256(candidate)},
         "sample_frames": samples, "automatic_passed": True, "manual_review": {},
     }), encoding="utf-8")
-    return qc_path, frames, hashes
+    return qc_path, frames, hashes, sample_hashes
+
+
+def _write_task5_job_evidence(run_dir: Path, candidate: Path) -> tuple[Path, str]:
+    report = run_dir / "micro_video_batch.json"
+    report.write_text(json.dumps({
+        "schema_version": "motion-comic-factory.micro-video-batch.v1",
+        "project_id": "sample_episode", "run_dir": str(run_dir), "success": True,
+        "completed_count": 1,
+        "jobs": [{
+            "micro_shot_id": "micro_001", "output_path": str(candidate),
+            "output_sha256": _sha256(candidate), "reference_audio_sha256": "",
+            "entry_anchor_id": "scene_entry",
+        }],
+    }), encoding="utf-8")
+    return report, _sha256(report)
 
 
 def test_preview_refuses_an_unapproved_mp4(
@@ -260,6 +279,7 @@ def test_preview_refuses_an_unapproved_mp4(
                 "visual_qc_report_path": str(run_dir / "visual_qc.json"), "reason": "",
                 "visual_qc_report_sha256": "", "first_frame_sha256": "",
                 "middle_frame_sha256": "", "last_frame_sha256": "",
+                "sample_frame_sha256": {},
                 "rendered_job_report_path": "", "rendered_job_report_sha256": "",
                 "evidence": {
                     "first_frame": "first.png", "middle_frame": "middle.png",
