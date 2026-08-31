@@ -75,7 +75,28 @@ def _qc_report(path: Path) -> tuple[Path, dict[str, str], dict[str, str]]:
         "first_frame_sha256": hashlib.sha256(Path(frames["first_frame"]).read_bytes()).hexdigest(),
         "middle_frame_sha256": hashlib.sha256(Path(frames["middle_frame"]).read_bytes()).hexdigest(),
         "last_frame_sha256": hashlib.sha256(Path(frames["last_frame"]).read_bytes()).hexdigest(),
+        "sample_frame_sha256": {
+            f"sample_{index:02d}": hashlib.sha256(
+                (path.parent / f"sample_{index:02d}.png").read_bytes()
+            ).hexdigest()
+            for index in range(1, 10)
+        },
     }
+
+
+def _task5_report(root: Path, candidate: Path, *, audio_sha256: str = "", anchor: str = "scene_entry") -> tuple[Path, str]:
+    report = root / "micro_video_batch.json"
+    report.write_text(json.dumps({
+        "schema_version": "motion-comic-factory.micro-video-batch.v1",
+        "project_id": "sample", "run_dir": str(root), "success": True,
+        "completed_count": 1,
+        "jobs": [{
+            "micro_shot_id": "micro_001", "output_path": str(candidate),
+            "output_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+            "reference_audio_sha256": audio_sha256, "entry_anchor_id": anchor,
+        }],
+    }), encoding="utf-8")
+    return report, hashlib.sha256(report.read_bytes()).hexdigest()
 
 
 def test_candidate_state_machine_cannot_skip_review(tmp_path):
@@ -90,8 +111,9 @@ def test_approved_selection_requires_unchanged_approved_timeline_candidate(tmp_p
     candidate = tmp_path / "candidate_001.mp4"
     candidate.write_bytes(b"candidate")
     report, frames, fingerprints = _qc_report(candidate)
+    job_report, job_hash = _task5_report(tmp_path, candidate)
     record = CandidateRecord(
-        **{**_record(candidate, CandidateState.REVIEW_REQUIRED).__dict__, "visual_qc_report_path": str(report), **fingerprints}
+        **{**_record(candidate, CandidateState.REVIEW_REQUIRED).__dict__, "visual_qc_report_path": str(report), **fingerprints, "rendered_job_report_path": str(job_report), "rendered_job_report_sha256": job_hash}
     )
     reviewed = transition_candidate(
         record,
@@ -170,4 +192,50 @@ def test_visible_candidate_rejects_incomplete_task5_job_report(tmp_path):
                 **frames, "review_note": "approved", "audio_sha256": audio_hash,
                 "speaker_visible": "true", "lipsync_score": "5.0",
             },
+        )
+
+
+def test_approved_selection_rejects_tampered_non_reviewed_sample(tmp_path):
+    candidate = tmp_path / "candidate_001.mp4"
+    candidate.write_bytes(b"candidate")
+    report, frames, fingerprints = _qc_report(candidate)
+    record = CandidateRecord(
+        **{
+            **_record(candidate, CandidateState.REVIEW_REQUIRED).__dict__,
+            "visual_qc_report_path": str(report),
+            **fingerprints,
+        }
+    )
+    (tmp_path / "sample_02.png").write_bytes(b"tampered")
+
+    with pytest.raises(CandidateReviewError, match="sample evidence changed"):
+        transition_candidate(
+            record,
+            CandidateState.APPROVED,
+            evidence={**frames, "review_note": "approved"},
+        )
+
+
+def test_action_candidate_rejects_forged_task5_job_report(tmp_path):
+    candidate = tmp_path / "candidate_001.mp4"
+    candidate.write_bytes(b"candidate")
+    report, frames, fingerprints = _qc_report(candidate)
+    job_report, job_hash = _task5_report(tmp_path, candidate)
+    forged = json.loads(job_report.read_text(encoding="utf-8"))
+    forged["jobs"][0]["output_sha256"] = "0" * 64
+    job_report.write_text(json.dumps(forged), encoding="utf-8")
+    record = CandidateRecord(
+        **{
+            **_record(candidate, CandidateState.REVIEW_REQUIRED).__dict__,
+            "visual_qc_report_path": str(report), **fingerprints,
+            "rendered_job_report_path": str(job_report),
+            "rendered_job_report_sha256": job_hash,
+        }
+    )
+
+    with pytest.raises(CandidateReviewError, match="Task 5 job report changed"):
+        transition_candidate(
+            record,
+            CandidateState.APPROVED,
+            evidence={**frames, "review_note": "approved"},
         )
