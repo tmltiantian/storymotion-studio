@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import argparse
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -227,6 +228,10 @@ def test_production_dry_run_plans_all_routes_with_selected_models(
         "factory.quality_production_runner.require_selected_still_model",
         lambda _report: STILL_MODEL,
     )
+    monkeypatch.setattr(
+        "factory.quality_production_runner.build_micro_video_jobs",
+        lambda *_args, **_kwargs: [SimpleNamespace(micro_shot_id="micro_001")],
+    )
 
     def video_renderer(jobs, root, gateway_config, **kwargs):
         video_calls.append(
@@ -321,6 +326,10 @@ def test_production_kind_without_explicit_targets_filters_to_eligible_route(
         "factory.quality_production_runner.require_selected_still_model",
         selected_still,
     )
+    monkeypatch.setattr(
+        "factory.quality_production_runner.build_micro_video_jobs",
+        lambda *_args, **_kwargs: [SimpleNamespace(micro_shot_id="micro_001")],
+    )
 
     def video_renderer(jobs, *_args, **_kwargs):
         if forbidden_renderer == "video":
@@ -360,6 +369,10 @@ def test_production_filters_exact_micro_shots_before_route_execution(
     monkeypatch.setattr(
         "factory.quality_production_runner.require_selected_still_model",
         lambda _report: STILL_MODEL,
+    )
+    monkeypatch.setattr(
+        "factory.quality_production_runner.build_micro_video_jobs",
+        lambda *_args, **_kwargs: [SimpleNamespace(micro_shot_id="micro_001")],
     )
 
     def video_renderer(jobs, *_args, **_kwargs):
@@ -430,7 +443,7 @@ def test_production_rejects_invalid_targeted_micro_shots_before_rendering(
     assert calls == []
 
 
-def test_visual_selection_is_validated_before_atomic_publication(
+def test_visual_selection_rejects_arbitrary_selection_json(
     tmp_path, monkeypatch
 ):
     config, run_dir = _fixture(tmp_path)
@@ -483,15 +496,11 @@ def test_visual_selection_is_validated_before_atomic_publication(
         validate_sources,
     )
 
-    report = write_quality_visual_selection(config, "sample", input_path)
-
-    assert report["success"] is True
-    assert report["selected_count"] == 2
-    assert report["video_count"] == 1
-    assert report["still_count"] == 1
-    assert captured["run_dir"] == run_dir
-    assert captured["bakeoff_report"]["project_id"] == "sample"
-    assert json.loads((run_dir / "visual_selection.json").read_text()) == selection
+    with pytest.raises(
+        QualityProductionRunnerError,
+        match="candidate_review.json",
+    ):
+        write_quality_visual_selection(config, "sample", input_path)
 
 
 def test_visual_selection_rejects_input_outside_project_run(tmp_path):
@@ -501,6 +510,50 @@ def test_visual_selection_rejects_input_outside_project_run(tmp_path):
 
     with pytest.raises(QualityProductionRunnerError, match="inside the project run"):
         write_quality_visual_selection(config, "sample", outside)
+
+
+def test_visual_selection_is_built_from_the_approved_candidate_manifest(
+    tmp_path, monkeypatch
+):
+    config, run_dir = _fixture(tmp_path)
+    candidates = []
+    for micro_shot_id in ("micro_001", "micro_002"):
+        candidate = run_dir / f"{micro_shot_id}.mp4"
+        candidate.write_bytes(micro_shot_id.encode())
+        candidates.append({
+            "micro_shot_id": micro_shot_id,
+            "candidate_path": str(candidate),
+            "candidate_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+            "state": "approved", "audio_sha256": "", "entry_anchor_id": "scene_entry",
+            "visual_qc_report_path": str(run_dir / f"{micro_shot_id}.visual_qc.json"),
+            "reason": "reviewed",
+            "evidence": {
+                "first_frame": "first.png", "middle_frame": "middle.png",
+                "last_frame": "last.png", "review_note": "approved",
+            },
+        })
+    manifest_path = run_dir / "candidate_review.json"
+    manifest_path.write_text(json.dumps({
+        "schema_version": "motion-comic-factory.candidate-review.v1",
+        "project_id": "sample", "candidates": candidates,
+    }), encoding="utf-8")
+    captured = {}
+
+    def validate_sources(_episode, _timeline, selection, **kwargs):
+        captured["selection"] = selection
+        assert kwargs["candidate_review"] is not None
+        return [SimpleNamespace(kind="video"), SimpleNamespace(kind="video")]
+
+    monkeypatch.setattr(
+        "factory.quality_production_runner.select_micro_sources", validate_sources
+    )
+
+    report = write_quality_visual_selection(config, "sample", manifest_path)
+
+    assert report["selected_count"] == 2
+    assert list(captured["selection"]["selected_candidates"]) == [
+        "micro_001", "micro_002"
+    ]
 
 
 def test_quality_production_commands_are_registered():
