@@ -156,6 +156,80 @@ def _install_gate_stubs(monkeypatch, qc: dict) -> None:
     monkeypatch.setattr(micro_preview, "require_passed_visual_qc", require_qc)
 
 
+def _write_approved_candidate_review(run_dir: Path, candidate: Path) -> None:
+    selection = {
+        "schema_version": "motion-comic-factory.visual-selection.v1",
+        "project_id": "sample_episode",
+        "selected_candidates": {
+            "micro_001": {
+                "kind": "video", "candidate_path": str(candidate),
+                "qc_report_path": str(run_dir / "visual_qc.json"),
+                "audio_sha256": "", "entry_anchor_id": "scene_entry",
+            }
+        },
+    }
+    (run_dir / "visual_selection.json").write_text(json.dumps(selection), encoding="utf-8")
+    (run_dir / "candidate_review.json").write_text(json.dumps({
+        "schema_version": "motion-comic-factory.candidate-review.v1",
+        "project_id": "sample_episode",
+        "candidates": [{
+            "micro_shot_id": "micro_001", "candidate_path": str(candidate),
+            "candidate_sha256": _sha256(candidate), "state": "approved",
+            "audio_sha256": "", "entry_anchor_id": "scene_entry",
+            "visual_qc_report_path": str(run_dir / "visual_qc.json"),
+            "reason": "approved", "evidence": {
+                "first_frame": "first.png", "middle_frame": "middle.png",
+                "last_frame": "last.png", "review_note": "approved",
+            },
+        }],
+    }), encoding="utf-8")
+
+
+def test_preview_refuses_an_unapproved_mp4(
+    tmp_path, sample_episode, visual_timeline
+):
+    run_dir = (tmp_path / "runs/sample_episode").resolve()
+    run_dir.mkdir(parents=True)
+    (run_dir / "visual_timeline.json").write_text(
+        json.dumps(visual_timeline_to_dict(visual_timeline)), encoding="utf-8"
+    )
+    (run_dir / "visual_selection.json").write_text(
+        json.dumps({"schema_version": "motion-comic-factory.visual-selection.v1", "project_id": "sample_episode", "selected_candidates": {}}),
+        encoding="utf-8",
+    )
+    (run_dir / "model_bakeoff_report.json").write_text("{}", encoding="utf-8")
+    candidate = run_dir / "candidate_001.mp4"
+    candidate.write_bytes(b"unapproved")
+    (run_dir / "candidate_review.json").write_text(
+        json.dumps({
+            "schema_version": "motion-comic-factory.candidate-review.v1",
+            "project_id": "sample_episode",
+            "candidates": [{
+                "micro_shot_id": "micro_001", "candidate_path": str(candidate),
+                "candidate_sha256": _sha256(candidate), "state": "review_required",
+                "audio_sha256": "", "entry_anchor_id": "scene_entry",
+                "visual_qc_report_path": str(run_dir / "visual_qc.json"), "reason": "",
+                "evidence": {
+                    "first_frame": "first.png", "middle_frame": "middle.png",
+                    "last_frame": "last.png", "review_note": "needs review",
+                },
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MicroPreviewError, match="not approved"):
+        render_micro_preview_video(
+            sample_episode,
+            timeline_path=run_dir / "visual_timeline.json",
+            selection_path=run_dir / "visual_selection.json",
+            bakeoff_report_path=run_dir / "model_bakeoff_report.json",
+            run_dir=run_dir,
+            output_path=run_dir / "preview.mp4",
+            report_path=run_dir / "preview_report.json",
+        )
+
+
 def test_select_micro_sources_uses_exact_video_schema_and_manual_qc_range(
     tmp_path, monkeypatch, sample_episode, visual_timeline
 ):
@@ -750,7 +824,7 @@ def test_render_revalidates_source_and_preserves_last_good_outputs(
         json.dumps(visual_timeline_to_dict(visual_timeline)), encoding="utf-8"
     )
     selection_path = run_dir / "visual_selection.json"
-    selection_path.write_text("{}", encoding="utf-8")
+    _write_approved_candidate_review(run_dir, candidate)
     bakeoff_path = run_dir / "model_bakeoff_report.json"
     bakeoff_path.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
@@ -762,7 +836,7 @@ def test_render_revalidates_source_and_preserves_last_good_outputs(
     report_path.write_bytes(b"last-good-report")
     candidate.write_bytes(b"replaced")
 
-    with pytest.raises(MicroPreviewError, match="changed after selection"):
+    with pytest.raises(MicroPreviewError, match="does not match|changed after selection"):
         render_micro_preview_video(
             sample_episode,
             timeline_path=timeline_path,
@@ -790,7 +864,7 @@ def test_render_is_atomic_and_writes_source_decisions_after_valid_video(
         json.dumps(visual_timeline_to_dict(visual_timeline)), encoding="utf-8"
     )
     selection_path = run_dir / "visual_selection.json"
-    selection_path.write_text("{}", encoding="utf-8")
+    _write_approved_candidate_review(run_dir, candidate)
     bakeoff_path = run_dir / "model_bakeoff_report.json"
     bakeoff_path.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
@@ -833,10 +907,10 @@ def test_render_ffmpeg_failure_preserves_last_good_output_and_report(
     source = _micro_source(candidate, duration=3.0)
     for name, payload in {
         "visual_timeline.json": visual_timeline_to_dict(visual_timeline),
-        "visual_selection.json": {},
         "model_bakeoff_report.json": {},
     }.items():
         (run_dir / name).write_text(json.dumps(payload), encoding="utf-8")
+    _write_approved_candidate_review(run_dir, candidate)
     monkeypatch.setattr(
         micro_preview, "select_micro_sources", lambda *args, **kwargs: [source]
     )
@@ -876,10 +950,10 @@ def test_render_rejects_non_file_report_target_before_replacing_video(
     source = _micro_source(candidate, duration=3.0)
     for name, payload in {
         "visual_timeline.json": visual_timeline_to_dict(visual_timeline),
-        "visual_selection.json": {},
         "model_bakeoff_report.json": {},
     }.items():
         (run_dir / name).write_text(json.dumps(payload), encoding="utf-8")
+    _write_approved_candidate_review(run_dir, candidate)
     monkeypatch.setattr(
         micro_preview, "select_micro_sources", lambda *args, **kwargs: [source]
     )
@@ -915,10 +989,10 @@ def test_render_rejects_same_bytes_replacement_through_symlink(
     source = _micro_source(candidate, duration=3.0)
     for name, payload in {
         "visual_timeline.json": visual_timeline_to_dict(visual_timeline),
-        "visual_selection.json": {},
         "model_bakeoff_report.json": {},
     }.items():
         (run_dir / name).write_text(json.dumps(payload), encoding="utf-8")
+    _write_approved_candidate_review(run_dir, candidate)
     monkeypatch.setattr(
         micro_preview, "select_micro_sources", lambda *args, **kwargs: [source]
     )

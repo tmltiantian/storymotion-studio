@@ -14,7 +14,13 @@ from typing import Any, Callable, Mapping, Sequence
 from PIL import Image, ImageChops, ImageStat, UnidentifiedImageError
 
 from .media_validation import probe_media
-from .model_bakeoff import SCORE_WEIGHTS, VIDEO_HARD_FAILURES, weighted_score
+from .model_bakeoff import (
+    LIPSYNC_MINIMUM_SCORE,
+    SCORE_WEIGHTS,
+    VIDEO_HARD_FAILURES,
+    weighted_score,
+)
+from .performance_card import PerformanceCard
 from .visual_timeline import MicroShot
 
 
@@ -37,7 +43,16 @@ _TEXT_PATTERN = re.compile(
     r"\uff10-\uff19\uff21-\uff3a\uff41-\uff5a]"
 )
 _REVIEW_KEYS = frozenset(
-    {*SCORE_WEIGHTS, "hard_failures", "selected_start_seconds", "selected_end_seconds", "notes"}
+    {
+        *SCORE_WEIGHTS,
+        "hard_failures",
+        "selected_start_seconds",
+        "selected_end_seconds",
+        "notes",
+        "speaker_visible",
+        "lipsync_score",
+        "audio_sha256",
+    }
 )
 _REPORT_KEYS = frozenset(
     {
@@ -79,10 +94,14 @@ class VisualReview:
     semantics: int
     motion: int
     clean_frame: int
+    lipsync: int
     hard_failures: tuple[str, ...]
     selected_start_seconds: float
     selected_end_seconds: float
     notes: str
+    speaker_visible: bool | None = None
+    lipsync_score: float | None = None
+    audio_sha256: str = ""
 
 
 def analyze_visual_candidate(
@@ -121,6 +140,7 @@ def record_visual_review(
     *,
     expected_micro_shot: MicroShot,
     expected_reference_image_labels: Sequence[str] = (),
+    performance_card: PerformanceCard | None = None,
     command_runner: Callable[..., Any] = subprocess.run,
     ocr_runner: Callable[[Path], str] | None = None,
 ) -> dict[str, Any]:
@@ -137,6 +157,7 @@ def record_visual_review(
         report, candidate, output, expected_micro_shot, command_runner, ocr_runner
     )
     manual_review = _normalise_review(review)
+    _validate_visible_speech_review(manual_review, performance_card)
     if not _range_is_valid(manual_review, fresh_duration):
         raise VisualQCError("Manual selected range is invalid.")
     report["manual_review"] = manual_review
@@ -622,10 +643,49 @@ def _normalise_review(review: VisualReview | Mapping[str, Any], *, allow_weighte
     failures = raw["hard_failures"]
     if not isinstance(failures, (tuple, list)) or len(set(failures)) != len(failures) or any(not isinstance(item, str) or item not in VIDEO_HARD_FAILURES for item in failures):
         raise VisualQCError("Manual hard failures must use the video hard-failure set.")
-    result = {**scores, "hard_failures": sorted(failures), "selected_start_seconds": _finite_seconds(raw["selected_start_seconds"], "selected start"), "selected_end_seconds": _finite_seconds(raw["selected_end_seconds"], "selected end"), "notes": _safe_untrusted_text(raw["notes"], "manual review notes"), "weighted_score": weighted_score(scores)}
+    speaker_visible = raw["speaker_visible"]
+    if speaker_visible is not None and not isinstance(speaker_visible, bool):
+        raise VisualQCError("Manual speaker_visible must be a boolean or null.")
+    lipsync_score = raw["lipsync_score"]
+    if lipsync_score is not None:
+        if (
+            isinstance(lipsync_score, bool)
+            or not isinstance(lipsync_score, (int, float))
+            or not 0 <= float(lipsync_score) <= 5
+        ):
+            raise VisualQCError("Manual lipsync_score must be a number from 0 to 5 or null.")
+        lipsync_score = float(lipsync_score)
+    audio_sha256 = raw["audio_sha256"]
+    if audio_sha256:
+        if not isinstance(audio_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", audio_sha256):
+            raise VisualQCError("Manual audio_sha256 must be a lowercase SHA-256 or empty.")
+    elif not isinstance(audio_sha256, str):
+        raise VisualQCError("Manual audio_sha256 must be a lowercase SHA-256 or empty.")
+    result = {**scores, "hard_failures": sorted(failures), "selected_start_seconds": _finite_seconds(raw["selected_start_seconds"], "selected start"), "selected_end_seconds": _finite_seconds(raw["selected_end_seconds"], "selected end"), "notes": _safe_untrusted_text(raw["notes"], "manual review notes"), "speaker_visible": speaker_visible, "lipsync_score": lipsync_score, "audio_sha256": audio_sha256, "weighted_score": weighted_score(scores)}
     if allow_weighted_score and raw["weighted_score"] != result["weighted_score"]:
         raise VisualQCError("Manual review weighted score is invalid.")
     return result
+
+
+def _validate_visible_speech_review(
+    review: Mapping[str, Any], performance_card: PerformanceCard | None
+) -> None:
+    if performance_card is None:
+        return
+    if not isinstance(performance_card, PerformanceCard):
+        raise VisualQCError("performance_card must be a PerformanceCard instance.")
+    if not performance_card.requires_visible_lipsync:
+        return
+    if review["speaker_visible"] is not True or review["lipsync_score"] is None:
+        raise VisualQCError(
+            "visible speech requires speaker_visible and lipsync_score"
+        )
+    if review["lipsync_score"] < LIPSYNC_MINIMUM_SCORE:
+        raise VisualQCError(
+            f"visible speech lipsync_score must be at least {LIPSYNC_MINIMUM_SCORE}."
+        )
+    if not review["audio_sha256"]:
+        raise VisualQCError("visible speech requires audio_sha256.")
 
 
 def _manual_passes(review: Mapping[str, Any], duration: float) -> bool:

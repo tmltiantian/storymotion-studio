@@ -12,6 +12,12 @@ from typing import Any, Callable, Mapping, Sequence
 
 from PIL import Image, UnidentifiedImageError
 
+from .candidate_review import (
+    CandidateReviewError,
+    CandidateReviewManifest,
+    approved_selection_from_manifest,
+    candidate_review_manifest_from_dict,
+)
 from .media_validation import probe_media, temporary_media_path
 from .model_bakeoff import (
     STILL_HARD_FAILURES,
@@ -33,7 +39,12 @@ from .visual_timeline import (
 VISUAL_SELECTION_SCHEMA = "motion-comic-factory.visual-selection.v1"
 MICRO_PREVIEW_REPORT_SCHEMA = "motion-comic-factory.micro-preview.v1"
 _SELECTION_KEYS = frozenset({"schema_version", "project_id", "selected_candidates"})
-_VIDEO_SELECTION_KEYS = frozenset({"kind", "candidate_path", "qc_report_path"})
+_VIDEO_SELECTION_KEYS = frozenset(
+    {"kind", "candidate_path", "qc_report_path", "audio_sha256", "entry_anchor_id"}
+)
+_LEGACY_VIDEO_SELECTION_KEYS = frozenset(
+    {"kind", "candidate_path", "qc_report_path"}
+)
 _STILL_SELECTION_KEYS = frozenset(
     {
         "kind",
@@ -136,11 +147,26 @@ def select_micro_sources(
     *,
     run_dir: str | Path,
     bakeoff_report: Mapping[str, Any],
+    candidate_review: CandidateReviewManifest | Mapping[str, Any] | None = None,
 ) -> list[MicroSource]:
     errors = validate_visual_timeline(timeline, episode)
     if errors:
         raise MicroPreviewError("Invalid visual timeline: " + "; ".join(errors))
     root = _canonical_directory(run_dir, "run directory")
+    if candidate_review is not None:
+        try:
+            manifest = (
+                candidate_review
+                if isinstance(candidate_review, CandidateReviewManifest)
+                else candidate_review_manifest_from_dict(candidate_review)
+            )
+            approved_selection = approved_selection_from_manifest(manifest, timeline)
+        except CandidateReviewError as exc:
+            raise MicroPreviewError(f"Candidate review gate failed: {exc}") from exc
+        if selection != approved_selection:
+            raise MicroPreviewError(
+                "Visual selection does not exactly match the approved candidate review."
+            )
     normalized = _selection(selection, episode, timeline)
     if not isinstance(bakeoff_report, Mapping):
         raise MicroPreviewError("Model bakeoff report must be an object.")
@@ -298,11 +324,12 @@ def render_micro_preview_video(
     root = _canonical_directory(run_dir, "run directory")
     timeline_source = _expected_artifact(timeline_path, root, "visual_timeline.json")
     selection_source = _expected_artifact(selection_path, root, "visual_selection.json")
+    candidate_review_source = _expected_artifact(
+        root / "candidate_review.json", root, "candidate_review.json"
+    )
     bakeoff_source = _expected_artifact(
         bakeoff_report_path, root, "model_bakeoff_report.json"
     )
-    output = _canonical_output(output_path, root, "micro_preview.mp4")
-    destination = _canonical_output(report_path, root, "micro_preview_report.json")
     try:
         timeline = visual_timeline_from_dict(
             _read_json_object(timeline_source, "visual timeline")
@@ -311,13 +338,22 @@ def render_micro_preview_video(
         raise MicroPreviewError(f"Invalid visual timeline: {exc}") from exc
     selection = _read_json_object(selection_source, "visual selection")
     bakeoff_report = _read_json_object(bakeoff_source, "model bakeoff report")
+    try:
+        candidate_review = candidate_review_manifest_from_dict(
+            _read_json_object(candidate_review_source, "candidate review manifest")
+        )
+    except CandidateReviewError as exc:
+        raise MicroPreviewError(f"Candidate review gate failed: {exc}") from exc
     sources = select_micro_sources(
         episode,
         timeline,
         selection,
         run_dir=root,
         bakeoff_report=bakeoff_report,
+        candidate_review=candidate_review,
     )
+    output = _canonical_output(output_path, root, "micro_preview.mp4")
+    destination = _canonical_output(report_path, root, "micro_preview_report.json")
     temporary_output = temporary_media_path(output)
     command = build_micro_preview_ffmpeg_command(
         sources=sources,
@@ -410,7 +446,9 @@ def _selection(
             )
         kind = item.get("kind")
         expected = {
-            "video": _VIDEO_SELECTION_KEYS,
+            "video": _VIDEO_SELECTION_KEYS
+            if "audio_sha256" in item or "entry_anchor_id" in item
+            else _LEGACY_VIDEO_SELECTION_KEYS,
             "still": _STILL_SELECTION_KEYS,
             "editorial_still": _EDITORIAL_STILL_SELECTION_KEYS,
         }.get(kind)

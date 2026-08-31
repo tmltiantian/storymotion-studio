@@ -18,6 +18,7 @@ from factory.visual_qc import (
     require_passed_visual_qc,
 )
 from factory.visual_timeline import MicroShot
+from factory.performance_card import PerformanceCard
 
 
 def micro_shot() -> MicroShot:
@@ -114,6 +115,36 @@ def _review(**changes) -> VisualReview:
         "notes": "local reviewer note",
     }
     return VisualReview(**(values | changes))
+
+
+def _visible_speech_card() -> PerformanceCard:
+    return PerformanceCard(
+        micro_shot_id="micro_001", purpose="action", speaker_id="lead",
+        dialogue_id="shot_001.dialogue_01", requires_visible_lipsync=True,
+        entry_anchor_id="scene_entry", scene_keyframe_id="scene_keyframe",
+        actor_id="lead", target_id="", contact_point="", prop_hand="",
+        start_beat="start", main_beat="speak", end_beat="end",
+        negative_constraints=("no_text",),
+    )
+
+
+def test_visible_speech_review_requires_speaker_and_lipsync_evidence(
+    tmp_path, fake_video, fake_runners
+):
+    _, report_path = _analyze(tmp_path, fake_video, fake_runners)
+
+    with pytest.raises(
+        VisualQCError,
+        match="visible speech requires speaker_visible and lipsync_score",
+    ):
+        record_visual_review(
+            report_path,
+            _review(),
+            expected_micro_shot=micro_shot(),
+            performance_card=_visible_speech_card(),
+            command_runner=fake_runners.command,
+            ocr_runner=lambda _: "",
+        )
 
 
 def _analyze(
@@ -583,7 +614,7 @@ def test_review_validation_score_boundary_and_safe_notes(
     _, path = _analyze(tmp_path, fake_video, fake_runners)
     score_80 = _review(identity=1)
     recorded = _record(path, score_80, fake_runners)
-    assert recorded["manual_review"]["weighted_score"] == 80.0
+    assert recorded["manual_review"]["weighted_score"] == 84.0
     assert recorded["passed"] is True
     for index, notes in enumerate(
         ("password=abc", "passwd: abc", "access key=abc", "Bearer abc")

@@ -5,6 +5,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .candidate_review import (
+    CandidateReviewError,
+    approved_selection_from_manifest,
+    candidate_review_manifest_from_dict,
+)
 from .gateway_image import GatewayImageConfig
 from .gateway_video import GatewayVideoConfig
 from .micro_preview import MicroPreviewError, select_micro_sources
@@ -265,21 +270,32 @@ def write_quality_visual_selection(
     project = _project_id(project_id)
     run_dir = _run_dir(config, project)
     source = _project_file(selection_path, run_dir)
-    selection = _read_json(source)
+    if source.name != "candidate_review.json":
+        raise QualityProductionRunnerError(
+            "Visual selection must be built from candidate_review.json."
+        )
     episode = episode_from_dict(_read_json(run_dir / "episode.json"))
     timeline = visual_timeline_from_dict(
         _read_json(run_dir / "visual_timeline.json")
     )
     bakeoff_report = _read_json(run_dir / "model_bakeoff_report.json")
     try:
+        candidate_review = candidate_review_manifest_from_dict(_read_json(source))
+        selection = approved_selection_from_manifest(candidate_review, timeline)
         sources = select_micro_sources(
             episode,
             timeline,
             selection,
             run_dir=run_dir,
             bakeoff_report=bakeoff_report,
+            candidate_review=candidate_review,
         )
-    except (MicroPreviewError, ModelBakeoffError, ValueError) as exc:
+    except (
+        CandidateReviewError,
+        MicroPreviewError,
+        ModelBakeoffError,
+        ValueError,
+    ) as exc:
         raise QualityProductionRunnerError(
             f"Visual selection validation failed: {exc}"
         ) from exc
