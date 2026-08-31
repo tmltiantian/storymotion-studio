@@ -10,12 +10,13 @@ import pytest
 from PIL import Image
 
 import factory.micro_preview as micro_preview
+from factory.candidate_review import CandidateReviewManifest
 from factory.micro_preview import (
     MicroPreviewError,
     MicroSource,
     build_micro_preview_ffmpeg_command,
     render_micro_preview_video,
-    select_micro_sources,
+    select_micro_sources as _select_micro_sources,
 )
 from factory.media_validation import probe_media
 from factory.schema import Character, Episode, Shot
@@ -29,6 +30,26 @@ from factory.visual_qc import VisualQCError
 
 VIDEO_MODEL = "doubao-seedance-2-0"
 STILL_MODEL = "doubao-seedream-4-5"
+
+
+def select_micro_sources(*args, **kwargs):
+    """Exercise source parsing separately from the mandatory review gate."""
+    if "candidate_review" in kwargs:
+        return _select_micro_sources(*args, **kwargs)
+    selection = args[2]
+    original = micro_preview.approved_selection_from_manifest
+    micro_preview.approved_selection_from_manifest = lambda *_args: selection
+    try:
+        return _select_micro_sources(
+            *args,
+            **kwargs,
+            candidate_review=CandidateReviewManifest(
+                project_id=args[1].project_id,
+                candidates=(),
+            ),
+        )
+    finally:
+        micro_preview.approved_selection_from_manifest = original
 
 
 @pytest.fixture
@@ -157,13 +178,14 @@ def _install_gate_stubs(monkeypatch, qc: dict) -> None:
 
 
 def _write_approved_candidate_review(run_dir: Path, candidate: Path) -> None:
+    qc_path, frame_paths, frame_hashes = _write_qc_evidence(run_dir, candidate)
     selection = {
         "schema_version": "motion-comic-factory.visual-selection.v1",
         "project_id": "sample_episode",
         "selected_candidates": {
             "micro_001": {
                 "kind": "video", "candidate_path": str(candidate),
-                "qc_report_path": str(run_dir / "visual_qc.json"),
+                "qc_report_path": str(qc_path),
                 "audio_sha256": "", "entry_anchor_id": "scene_entry",
             }
         },
@@ -176,13 +198,40 @@ def _write_approved_candidate_review(run_dir: Path, candidate: Path) -> None:
             "micro_shot_id": "micro_001", "candidate_path": str(candidate),
             "candidate_sha256": _sha256(candidate), "state": "approved",
             "audio_sha256": "", "entry_anchor_id": "scene_entry",
-            "visual_qc_report_path": str(run_dir / "visual_qc.json"),
+            "visual_qc_report_path": str(qc_path),
+            "visual_qc_report_sha256": _sha256(qc_path),
+            "first_frame_sha256": frame_hashes["first_frame"],
+            "middle_frame_sha256": frame_hashes["middle_frame"],
+            "last_frame_sha256": frame_hashes["last_frame"],
+            "rendered_job_report_path": "", "rendered_job_report_sha256": "",
             "reason": "approved", "evidence": {
-                "first_frame": "first.png", "middle_frame": "middle.png",
-                "last_frame": "last.png", "review_note": "approved",
+                **frame_paths, "review_note": "approved",
             },
         }],
     }), encoding="utf-8")
+
+
+def _write_qc_evidence(run_dir: Path, candidate: Path) -> tuple[Path, dict[str, str], dict[str, str]]:
+    frames: dict[str, str] = {}
+    hashes: dict[str, str] = {}
+    samples = []
+    for index in range(1, 10):
+        label = {1: "first_frame", 5: "middle_frame", 9: "last_frame"}.get(index, "")
+        frame = run_dir / f"sample_{index:02d}.png"
+        frame.write_bytes((label or str(index)).encode())
+        stat = frame.stat()
+        digest = _sha256(frame)
+        samples.append({"evidence": {"path": str(frame), "sha256": digest, "size_bytes": stat.st_size, "device": stat.st_dev, "inode": stat.st_ino}})
+        if label:
+            frames[label] = str(frame)
+            hashes[label] = digest
+    qc_path = run_dir / "visual_qc.json"
+    qc_path.write_text(json.dumps({
+        "schema_version": "motion-comic-factory.visual-qc.v2",
+        "candidate_evidence": {"path": str(candidate), "sha256": _sha256(candidate)},
+        "sample_frames": samples, "automatic_passed": True, "manual_review": {},
+    }), encoding="utf-8")
+    return qc_path, frames, hashes
 
 
 def test_preview_refuses_an_unapproved_mp4(
@@ -209,6 +258,9 @@ def test_preview_refuses_an_unapproved_mp4(
                 "candidate_sha256": _sha256(candidate), "state": "review_required",
                 "audio_sha256": "", "entry_anchor_id": "scene_entry",
                 "visual_qc_report_path": str(run_dir / "visual_qc.json"), "reason": "",
+                "visual_qc_report_sha256": "", "first_frame_sha256": "",
+                "middle_frame_sha256": "", "last_frame_sha256": "",
+                "rendered_job_report_path": "", "rendered_job_report_sha256": "",
                 "evidence": {
                     "first_frame": "first.png", "middle_frame": "middle.png",
                     "last_frame": "last.png", "review_note": "needs review",
@@ -243,7 +295,7 @@ def test_select_micro_sources_requires_candidate_review_manifest(
     _install_gate_stubs(monkeypatch, {"candidate_evidence": {"path": str(candidate)}, "manual_review": {"selected_start_seconds": 0.0, "selected_end_seconds": 1.0}})
 
     with pytest.raises(MicroPreviewError, match="Candidate review manifest is required"):
-        select_micro_sources(
+        micro_preview.select_micro_sources(
             sample_episode, visual_timeline, _video_selection(run_dir, qc_path),
             run_dir=run_dir,
             bakeoff_report={"project_id": "sample_episode", "run_dir": str(run_dir)},

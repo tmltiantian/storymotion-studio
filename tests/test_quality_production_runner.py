@@ -127,6 +127,29 @@ def _fixture(tmp_path: Path) -> tuple[dict, Path]:
     return {"runsDir": str(tmp_path / "runs")}, run_dir
 
 
+def _candidate_qc_evidence(run_dir: Path, candidate: Path, micro_shot_id: str) -> tuple[Path, dict[str, str], dict[str, str]]:
+    frames: dict[str, str] = {}
+    hashes: dict[str, str] = {}
+    samples = []
+    for index in range(1, 10):
+        label = {1: "first_frame", 5: "middle_frame", 9: "last_frame"}.get(index, "")
+        frame = run_dir / f"{micro_shot_id}.sample_{index:02d}.png"
+        frame.write_bytes((label or str(index)).encode())
+        stat = frame.stat()
+        digest = hashlib.sha256(frame.read_bytes()).hexdigest()
+        samples.append({"evidence": {"path": str(frame), "sha256": digest, "size_bytes": stat.st_size, "device": stat.st_dev, "inode": stat.st_ino}})
+        if label:
+            frames[label] = str(frame)
+            hashes[label] = digest
+    report = run_dir / f"{micro_shot_id}.visual_qc.json"
+    report.write_text(json.dumps({
+        "schema_version": "motion-comic-factory.visual-qc.v2",
+        "candidate_evidence": {"path": str(candidate), "sha256": hashlib.sha256(candidate.read_bytes()).hexdigest()},
+        "sample_frames": samples, "automatic_passed": True, "manual_review": {},
+    }), encoding="utf-8")
+    return report, frames, hashes
+
+
 def _profile():
     capability = SimpleNamespace(
         provider="gateway",
@@ -520,17 +543,20 @@ def test_visual_selection_is_built_from_the_approved_candidate_manifest(
     for micro_shot_id in ("micro_001", "micro_002"):
         candidate = run_dir / f"{micro_shot_id}.mp4"
         candidate.write_bytes(micro_shot_id.encode())
+        qc_report, frames, hashes = _candidate_qc_evidence(run_dir, candidate, micro_shot_id)
         candidates.append({
             "micro_shot_id": micro_shot_id,
             "candidate_path": str(candidate),
             "candidate_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
             "state": "approved", "audio_sha256": "", "entry_anchor_id": "scene_entry",
-            "visual_qc_report_path": str(run_dir / f"{micro_shot_id}.visual_qc.json"),
+            "visual_qc_report_path": str(qc_report),
+            "visual_qc_report_sha256": hashlib.sha256(qc_report.read_bytes()).hexdigest(),
+            "first_frame_sha256": hashes["first_frame"],
+            "middle_frame_sha256": hashes["middle_frame"],
+            "last_frame_sha256": hashes["last_frame"],
+            "rendered_job_report_path": "", "rendered_job_report_sha256": "",
             "reason": "reviewed",
-            "evidence": {
-                "first_frame": "first.png", "middle_frame": "middle.png",
-                "last_frame": "last.png", "review_note": "approved",
-            },
+            "evidence": {**frames, "review_note": "approved"},
         })
     manifest_path = run_dir / "candidate_review.json"
     manifest_path.write_text(json.dumps({

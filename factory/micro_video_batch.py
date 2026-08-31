@@ -264,6 +264,8 @@ def render_micro_video_batch(
     destination = run_root / "micro_video_batch.json"
     report: dict[str, Any] = {
         "schema_version": MICRO_VIDEO_BATCH_SCHEMA,
+        "project_id": run_root.name,
+        "run_dir": str(run_root),
         "provider": "gateway",
         "model": models[0] if len(models) == 1 else "",
         "models": models,
@@ -351,6 +353,10 @@ def render_micro_video_batch(
         and report["blocked_count"] == 0
         and report["failed_count"] == 0
     )
+    for job_report in report["jobs"]:
+        output = Path(str(job_report["output_path"]))
+        if output.is_file():
+            job_report["output_sha256"] = _sha256_file(output)
     safe_report = _safe_data(report, config)
     write_atomic_json(destination, safe_report)
     return safe_report
@@ -856,6 +862,11 @@ def _safe_job_report(job: MicroVideoJob) -> dict[str, Any]:
         "ratio": "9:16",
         "resolution": job.resolution,
         "output_path": job.output_path,
+        "output_sha256": (
+            _sha256_file(Path(job.output_path))
+            if Path(job.output_path).is_file()
+            else ""
+        ),
         "report_path": job.report_path,
     }
 

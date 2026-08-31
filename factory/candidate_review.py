@@ -66,6 +66,12 @@ class CandidateRecord:
     audio_sha256: str
     entry_anchor_id: str
     visual_qc_report_path: str
+    visual_qc_report_sha256: str = ""
+    first_frame_sha256: str = ""
+    middle_frame_sha256: str = ""
+    last_frame_sha256: str = ""
+    rendered_job_report_path: str = ""
+    rendered_job_report_sha256: str = ""
     reason: str = ""
     evidence: Mapping[str, str] = field(default_factory=dict)
 
@@ -103,6 +109,12 @@ def transition_candidate(
         audio_sha256=record.audio_sha256,
         entry_anchor_id=record.entry_anchor_id,
         visual_qc_report_path=record.visual_qc_report_path,
+        visual_qc_report_sha256=record.visual_qc_report_sha256,
+        first_frame_sha256=record.first_frame_sha256,
+        middle_frame_sha256=record.middle_frame_sha256,
+        last_frame_sha256=record.last_frame_sha256,
+        rendered_job_report_path=record.rendered_job_report_path,
+        rendered_job_report_sha256=record.rendered_job_report_sha256,
         reason=updated_reason,
         evidence=updated_evidence,
     )
@@ -147,7 +159,10 @@ def candidate_review_manifest_from_dict(data: Mapping[str, Any]) -> CandidateRev
             raise CandidateReviewError(f"Candidate review record {position} must be an object.")
         if set(item) != {
             "micro_shot_id", "candidate_path", "candidate_sha256", "state",
-            "audio_sha256", "entry_anchor_id", "visual_qc_report_path", "reason", "evidence",
+            "audio_sha256", "entry_anchor_id", "visual_qc_report_path",
+            "visual_qc_report_sha256", "first_frame_sha256", "middle_frame_sha256",
+            "last_frame_sha256", "rendered_job_report_path",
+            "rendered_job_report_sha256", "reason", "evidence",
         }:
             raise CandidateReviewError(
                 f"Candidate review record {position} has an invalid exact-key schema."
@@ -168,6 +183,12 @@ def candidate_review_manifest_from_dict(data: Mapping[str, Any]) -> CandidateRev
                 audio_sha256=item["audio_sha256"],
                 entry_anchor_id=item["entry_anchor_id"],
                 visual_qc_report_path=item["visual_qc_report_path"],
+                visual_qc_report_sha256=item["visual_qc_report_sha256"],
+                first_frame_sha256=item["first_frame_sha256"],
+                middle_frame_sha256=item["middle_frame_sha256"],
+                last_frame_sha256=item["last_frame_sha256"],
+                rendered_job_report_path=item["rendered_job_report_path"],
+                rendered_job_report_sha256=item["rendered_job_report_sha256"],
                 reason=item["reason"],
                 evidence=dict(evidence),
             )
@@ -252,7 +273,7 @@ def _validate_manifest(manifest: CandidateReviewManifest, *, require_existing: b
             raise CandidateReviewError("Candidate review manifest must not contain duplicate micro-shot ids.")
         ids.add(record.micro_shot_id)
         if record.state is CandidateState.APPROVED:
-            _validate_review_evidence(record)
+            _validate_review_evidence(record, project_id=manifest.project_id)
 
 
 def _validate_record(record: CandidateRecord, *, require_existing: bool) -> None:
@@ -266,6 +287,15 @@ def _validate_record(record: CandidateRecord, *, require_existing: bool) -> None
     if not isinstance(record.state, CandidateState):
         raise CandidateReviewError("Candidate review record state is invalid.")
     _validate_hash(record.candidate_sha256, "candidate SHA-256")
+    for value, label in (
+        (record.visual_qc_report_sha256, "visual QC report SHA-256"),
+        (record.first_frame_sha256, "first frame SHA-256"),
+        (record.middle_frame_sha256, "middle frame SHA-256"),
+        (record.last_frame_sha256, "last frame SHA-256"),
+        (record.rendered_job_report_sha256, "rendered job report SHA-256"),
+    ):
+        if value:
+            _validate_hash(value, label)
     if record.audio_sha256:
         _validate_hash(record.audio_sha256, "audio SHA-256")
     if not isinstance(record.reason, str):
@@ -287,7 +317,7 @@ def _validate_record(record: CandidateRecord, *, require_existing: bool) -> None
             )
 
 
-def _validate_review_evidence(record: CandidateRecord) -> None:
+def _validate_review_evidence(record: CandidateRecord, *, project_id: str = "") -> None:
     missing = _REQUIRED_REVIEW_EVIDENCE - set(record.evidence)
     if missing:
         raise CandidateReviewError(
@@ -316,6 +346,7 @@ def _validate_review_evidence(record: CandidateRecord) -> None:
             raise CandidateReviewError("Candidate review audio does not match visual QC evidence.")
         if manual.get("entry_anchor_id") != record.entry_anchor_id:
             raise CandidateReviewError("Candidate review anchor does not match visual QC evidence.")
+        _validate_task5_job_evidence(record, project_id=project_id)
 
 
 def _validate_qc_frame_evidence(record: CandidateRecord) -> None:
@@ -323,10 +354,27 @@ def _validate_qc_frame_evidence(record: CandidateRecord) -> None:
         report = json.loads(Path(record.visual_qc_report_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise CandidateReviewError("Candidate review visual QC report is unavailable.") from exc
-    samples = report.get("sample_frames") if isinstance(report, Mapping) else None
-    if not isinstance(samples, list) or len(samples) < 3:
+    if _sha256(Path(record.visual_qc_report_path)) != record.visual_qc_report_sha256:
+        raise CandidateReviewError("Candidate review visual QC report changed.")
+    if not isinstance(report, Mapping) or report.get("schema_version") != "motion-comic-factory.visual-qc.v2":
+        raise CandidateReviewError("Candidate review visual QC report schema is invalid.")
+    required = {"candidate_evidence", "sample_frames", "automatic_passed", "manual_review"}
+    if not required.issubset(report):
+        raise CandidateReviewError("Candidate review visual QC report provenance is incomplete.")
+    if report["automatic_passed"] is not True:
+        raise CandidateReviewError("Candidate review visual QC automatic provenance did not pass.")
+    candidate_evidence = report["candidate_evidence"]
+    if not isinstance(candidate_evidence, Mapping) or candidate_evidence.get("path") != record.candidate_path or candidate_evidence.get("sha256") != record.candidate_sha256:
+        raise CandidateReviewError("Candidate review visual QC candidate provenance is invalid.")
+    samples = report.get("sample_frames")
+    if not isinstance(samples, list) or len(samples) != 9:
         raise CandidateReviewError("Candidate review visual QC sample evidence is invalid.")
-    for label, index in (("first_frame", 0), ("middle_frame", len(samples) // 2), ("last_frame", len(samples) - 1)):
+    fingerprints = {
+        "first_frame": record.first_frame_sha256,
+        "middle_frame": record.middle_frame_sha256,
+        "last_frame": record.last_frame_sha256,
+    }
+    for label, index in (("first_frame", 0), ("middle_frame", 4), ("last_frame", 8)):
         sample = samples[index]
         evidence = sample.get("evidence") if isinstance(sample, Mapping) else None
         if not isinstance(evidence, Mapping):
@@ -348,6 +396,45 @@ def _validate_qc_frame_evidence(record: CandidateRecord) -> None:
             or evidence.get("inode") != stat.st_ino
         ):
             raise CandidateReviewError("Candidate review visual QC sample evidence changed.")
+        if digest != fingerprints[label]:
+            raise CandidateReviewError(
+                f"Candidate review {label} fingerprint does not match visual QC evidence."
+            )
+
+
+def _validate_task5_job_evidence(record: CandidateRecord, *, project_id: str) -> None:
+    try:
+        report_path = Path(record.rendered_job_report_path)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CandidateReviewError("Candidate review Task 5 job report is unavailable.") from exc
+    if _sha256(report_path) != record.rendered_job_report_sha256:
+        raise CandidateReviewError("Candidate review Task 5 job report changed.")
+    if not isinstance(report, Mapping) or report.get("schema_version") != "motion-comic-factory.micro-video-batch.v1":
+        raise CandidateReviewError("Candidate review Task 5 job report schema is invalid.")
+    if project_id and report.get("project_id") != project_id:
+        raise CandidateReviewError("Candidate review Task 5 job report project_id is invalid.")
+    reported_run = report.get("run_dir")
+    if not isinstance(reported_run, str) or not Path(reported_run).is_dir():
+        raise CandidateReviewError("Candidate review Task 5 job report run_dir is invalid.")
+    if not Path(record.candidate_path).resolve().is_relative_to(Path(reported_run).resolve()):
+        raise CandidateReviewError("Candidate review Task 5 job report does not own the candidate.")
+    if report.get("success") is not True or not isinstance(report.get("completed_count"), int) or report["completed_count"] < 1:
+        raise CandidateReviewError("Candidate review Task 5 job report is not completed successfully.")
+    jobs = report.get("jobs")
+    if not isinstance(jobs, list):
+        raise CandidateReviewError("Candidate review Task 5 job report has no jobs.")
+    matches = [job for job in jobs if isinstance(job, Mapping) and job.get("micro_shot_id") == record.micro_shot_id]
+    if len(matches) != 1:
+        raise CandidateReviewError("Candidate review Task 5 job report has no matching job.")
+    job = matches[0]
+    if (
+        job.get("output_path") != record.candidate_path
+        or job.get("output_sha256") != record.candidate_sha256
+        or job.get("reference_audio_sha256") != record.audio_sha256
+        or job.get("entry_anchor_id") != record.entry_anchor_id
+    ):
+        raise CandidateReviewError("Candidate review Task 5 job evidence does not match candidate bindings.")
 
 
 def _visual_qc_manual_review(record: CandidateRecord) -> Mapping[str, Any]:
