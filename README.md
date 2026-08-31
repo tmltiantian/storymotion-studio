@@ -63,7 +63,7 @@ ENABLE_GATEWAY_VIDEO=1
 .venv/bin/python -c 'from factory.audio_first_preflight import run_audio_first_preflight; import json; print(json.dumps(run_audio_first_preflight("runs/<run-id>", model="doubao-seedance-2-0"), ensure_ascii=False, indent=2))'
 ```
 
-预检只读取并验证本地证据：`episode.json`、`visual_timeline.json`、`performance_sheet.json`、`dialogue_audio_manifest.json`、`model_bakeoff_report.json`、`character_assets.json`、`scene_keyframes.json`、`approved_anchors.json` 和 `candidate_review.json`。它只写入同一运行目录的 `preflight_report.json`，不会创建网关客户端、调用 TTS、生成视频或提交付费请求。
+预检只读取并验证本地证据：`episode.json`、`visual_timeline.json`、`performance_sheet.json`、`dialogue_audio_manifest.json`、`model_bakeoff_report.json`、`character_assets.json`、`scene_keyframes.json` 和 `candidate_review.json`。后续镜头的入场锚点只能从同场景最近一个已批准候选的不可变末帧证据派生，不能由独立路径表指定。预检只写入同一运行目录的 `preflight_report.json`，不会创建网关客户端、调用 TTS、生成视频或提交付费请求。
 
 报告中的 `planned_count` 仅表示可以在后续步骤中提交的本地计划；真正的付费请求必须是单独、明确的后续操作。旧 Episode 1 导出（包括既有 picture cut 与 role-dialogue 文件）永远不是该预检或微镜头计划的输出目标。
 

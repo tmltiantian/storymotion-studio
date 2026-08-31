@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from .candidate_review import candidate_review_manifest_from_dict
+from .candidate_review import CandidateState, candidate_review_manifest_from_dict
 from .dialogue_assets import DialogueAudioAsset, DialogueAudioManifest
 from .file_io import read_json_object, write_json_atomic
 from .micro_video_batch import MicroVideoBatchError, MicroVideoJob, build_micro_video_jobs
@@ -42,8 +42,7 @@ def run_audio_first_preflight(
         capability_report = _read_json(root / "model_bakeoff_report.json")
         character_assets = _read_json(root / "character_assets.json")
         scene_keyframes = _read_json(root / "scene_keyframes.json")
-        approved_anchors = _read_json(root / "approved_anchors.json")
-        candidate_review_manifest_from_dict(
+        candidate_review = candidate_review_manifest_from_dict(
             _read_json(root / "candidate_review.json")
         )
     except _VALIDATION_ERRORS as exc:
@@ -51,8 +50,13 @@ def run_audio_first_preflight(
 
     jobs: list[MicroVideoJob] = []
     errors: list[str] = []
+    approved_ids = {
+        record.micro_shot_id
+        for record in candidate_review.candidates
+        if record.state is CandidateState.APPROVED
+    }
     for micro_shot in timeline.micro_shots:
-        if not micro_shot.character_ids:
+        if not micro_shot.character_ids or micro_shot.id in approved_ids:
             continue
         try:
             jobs.extend(
@@ -67,7 +71,7 @@ def run_audio_first_preflight(
                     dialogue_manifest=manifest,
                     capability_report=capability_report,
                     scene_keyframes=scene_keyframes,
-                    approved_anchors=approved_anchors,
+                    candidate_review=candidate_review,
                     micro_shot_ids=(micro_shot.id,),
                 )
             )

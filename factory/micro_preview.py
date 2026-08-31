@@ -161,7 +161,9 @@ def select_micro_sources(
             if isinstance(candidate_review, CandidateReviewManifest)
             else candidate_review_manifest_from_dict(candidate_review)
         )
-        approved_selection = approved_selection_from_manifest(manifest, timeline)
+        approved_selection = approved_selection_from_manifest(
+            manifest, timeline, bakeoff_report=bakeoff_report
+        )
     except CandidateReviewError as exc:
         raise MicroPreviewError(f"Candidate review gate failed: {exc}") from exc
     if selection != approved_selection:

@@ -94,9 +94,9 @@ def performable_payload(episode: Episode) -> dict[str, object]:
                 {
                     "micro_shot_id": "micro_001",
                     "purpose": "action",
-                    "speaker_id": "",
-                    "dialogue_id": "",
-                    "requires_visible_lipsync": False,
+                    "speaker_id": "char_1",
+                    "dialogue_id": "shot_001.dialogue_01",
+                    "requires_visible_lipsync": True,
                     "entry_anchor_id": "scene_start",
                     "scene_keyframe_id": "shop_keyframe",
                     "actor_id": "char_1",

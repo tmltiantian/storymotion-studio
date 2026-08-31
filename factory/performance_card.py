@@ -92,9 +92,17 @@ def validate_performance_sheet(
 
     shots = {shot.id: shot for shot in timeline.micro_shots}
     cards = {card.micro_shot_id: card for card in sheet.cards if isinstance(card, PerformanceCard)}
-    if len(cards) != len(sheet.cards) or set(cards) != set(shots):
+    cards_match_timeline = len(cards) == len(sheet.cards) and set(cards) == set(shots)
+    if not cards_match_timeline:
         errors.append("performance cards must match visual-timeline microshot ids")
     parent_by_id = {parent.id: parent for parent in episode.shots}
+    source_dialogue_ids = {
+        dialogue_id_for(parent.id, index)
+        for parent in episode.shots
+        for index, line in enumerate(parent.dialogue, start=1)
+        if line.speaker_id != NARRATOR_ID
+    }
+    dialogue_binding_counts = {dialogue_id: 0 for dialogue_id in source_dialogue_ids}
     for position, card in enumerate(sheet.cards, start=1):
         if not isinstance(card, PerformanceCard):
             errors.append(f"performance card {position} must be a PerformanceCard instance")
@@ -119,6 +127,14 @@ def validate_performance_sheet(
             errors.append(f"{card.micro_shot_id} visible speech requires dialogue_id")
         if card.requires_visible_lipsync and not card.speaker_id:
             errors.append(f"{card.micro_shot_id} visible speech requires speaker_id")
+        if (
+            card.requires_visible_lipsync
+            and card.speaker_id
+            and card.speaker_id not in shot.character_ids
+        ):
+            errors.append(
+                f"{card.micro_shot_id} visible speaker must be in microshot character_ids"
+            )
         parent = parent_by_id.get(shot.parent_shot_id)
         source_lines = parent.dialogue if parent is not None else []
         source_matches = [
@@ -136,6 +152,8 @@ def validate_performance_sheet(
             errors.append(
                 f"{card.micro_shot_id} dialogue speaker does not match source line"
             )
+        if card.dialogue_id in dialogue_binding_counts:
+            dialogue_binding_counts[card.dialogue_id] += 1
         if shot.action_code in _CONTACT_ACTION_CODES:
             if not card.actor_id:
                 errors.append(
@@ -144,6 +162,12 @@ def validate_performance_sheet(
             if not card.contact_point:
                 errors.append(
                     f"{card.micro_shot_id} contact action requires exactly one contact_point"
+                )
+    if cards_match_timeline:
+        for dialogue_id, count in dialogue_binding_counts.items():
+            if count != 1:
+                errors.append(
+                    f"source dialogue {dialogue_id} must bind exactly once (found {count})"
                 )
     return errors
 

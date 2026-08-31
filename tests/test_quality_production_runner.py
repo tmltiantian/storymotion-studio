@@ -147,7 +147,8 @@ def _candidate_qc_evidence(run_dir: Path, candidate: Path, micro_shot_id: str) -
     report.write_text(json.dumps({
         "schema_version": "motion-comic-factory.visual-qc.v2",
         "candidate_evidence": {"path": str(candidate), "sha256": hashlib.sha256(candidate.read_bytes()).hexdigest()},
-        "sample_frames": samples, "automatic_passed": True, "manual_review": {},
+        "sample_frames": samples, "automatic_passed": True,
+        "manual_review": {}, "passed": True,
     }), encoding="utf-8")
     return report, frames, hashes, sample_hashes
 
@@ -541,6 +542,11 @@ def test_visual_selection_is_built_from_the_approved_candidate_manifest(
     tmp_path, monkeypatch
 ):
     config, run_dir = _fixture(tmp_path)
+    timeline_payload = json.loads((run_dir / "visual_timeline.json").read_text())
+    timeline_payload["micro_shots"][1]["character_ids"] = ["char_1"]
+    (run_dir / "visual_timeline.json").write_text(
+        json.dumps(timeline_payload), encoding="utf-8"
+    )
     candidates = []
     jobs = []
     for micro_shot_id in ("micro_001", "micro_002"):

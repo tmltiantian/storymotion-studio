@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from factory.candidate_review import (
     CandidateReviewError,
     CandidateReviewManifest,
     CandidateState,
+    approved_anchor_for_micro_shot,
     approved_selection_from_manifest,
     transition_candidate,
 )
@@ -68,7 +70,8 @@ def _qc_report(path: Path) -> tuple[Path, dict[str, str], dict[str, str]]:
     report.write_text(json.dumps({
         "schema_version": "motion-comic-factory.visual-qc.v2",
         "candidate_evidence": {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()},
-        "sample_frames": samples, "automatic_passed": True, "manual_review": {},
+        "sample_frames": samples, "automatic_passed": True,
+        "manual_review": {}, "passed": True,
     }), encoding="utf-8")
     return report, frames, {
         "visual_qc_report_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
@@ -132,6 +135,38 @@ def test_approved_selection_requires_unchanged_approved_timeline_candidate(tmp_p
     assert selection["selected_candidates"]["micro_001"]["candidate_path"] == str(candidate)
 
 
+def test_anchor_comes_from_nearest_prior_approved_same_scene_last_frame(tmp_path):
+    candidate = tmp_path / "candidate_001.mp4"
+    candidate.write_bytes(b"candidate")
+    report, frames, fingerprints = _qc_report(candidate)
+    job_report, job_hash = _task5_report(tmp_path, candidate)
+    approved = transition_candidate(
+        CandidateRecord(
+            **{
+                **_record(candidate, CandidateState.REVIEW_REQUIRED).__dict__,
+                "visual_qc_report_path": str(report),
+                **fingerprints,
+                "rendered_job_report_path": str(job_report),
+                "rendered_job_report_sha256": job_hash,
+            }
+        ),
+        CandidateState.APPROVED,
+        evidence={**frames, "review_note": "approved"},
+    )
+    first = _timeline().micro_shots[0]
+    second = replace(first, id="micro_002", index=2)
+    timeline = VisualTimeline(project_id="sample", micro_shots=(first, second))
+
+    anchor_path, source_id = approved_anchor_for_micro_shot(
+        CandidateReviewManifest(project_id="sample", candidates=(approved,)),
+        timeline,
+        "micro_002",
+    )
+
+    assert anchor_path == frames["last_frame"]
+    assert source_id == "micro_001"
+
+
 def test_approved_selection_rejects_caller_supplied_frame_paths(tmp_path):
     candidate = tmp_path / "candidate_001.mp4"
     candidate.write_bytes(b"candidate")
@@ -159,6 +194,8 @@ def test_visible_candidate_rejects_incomplete_task5_job_report(tmp_path):
     payload["manual_review"] = {
         "audio_sha256": audio_hash,
         "entry_anchor_id": "scene_entry",
+        "speaker_visible": True,
+        "lipsync_score": 5.0,
     }
     report.write_text(json.dumps(payload), encoding="utf-8")
     job_report = tmp_path / "micro_video_batch.json"
@@ -191,6 +228,75 @@ def test_visible_candidate_rejects_incomplete_task5_job_report(tmp_path):
             evidence={
                 **frames, "review_note": "approved", "audio_sha256": audio_hash,
                 "speaker_visible": "true", "lipsync_score": "5.0",
+            },
+        )
+
+
+def test_approval_requires_authoritative_qc_to_have_passed(tmp_path):
+    candidate = tmp_path / "candidate_001.mp4"
+    candidate.write_bytes(b"candidate")
+    report, frames, fingerprints = _qc_report(candidate)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["passed"] = False
+    report.write_text(json.dumps(payload), encoding="utf-8")
+    job_report, job_hash = _task5_report(tmp_path, candidate)
+    record = CandidateRecord(
+        **{
+            **_record(candidate, CandidateState.REVIEW_REQUIRED).__dict__,
+            "visual_qc_report_path": str(report),
+            **fingerprints,
+            "visual_qc_report_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+            "rendered_job_report_path": str(job_report),
+            "rendered_job_report_sha256": job_hash,
+        }
+    )
+
+    with pytest.raises(CandidateReviewError, match="visual QC did not pass"):
+        transition_candidate(
+            record,
+            CandidateState.APPROVED,
+            evidence={**frames, "review_note": "approved"},
+        )
+
+
+def test_speech_approval_cross_checks_lipsync_against_authoritative_qc(tmp_path):
+    candidate = tmp_path / "candidate_001.mp4"
+    candidate.write_bytes(b"candidate")
+    report, frames, fingerprints = _qc_report(candidate)
+    audio_hash = "a" * 64
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["manual_review"] = {
+        "audio_sha256": audio_hash,
+        "entry_anchor_id": "scene_entry",
+        "speaker_visible": True,
+        "lipsync_score": 3.4,
+    }
+    report.write_text(json.dumps(payload), encoding="utf-8")
+    job_report, job_hash = _task5_report(
+        tmp_path, candidate, audio_sha256=audio_hash
+    )
+    record = CandidateRecord(
+        **{
+            **_record(candidate, CandidateState.REVIEW_REQUIRED).__dict__,
+            "audio_sha256": audio_hash,
+            "visual_qc_report_path": str(report),
+            **fingerprints,
+            "visual_qc_report_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+            "rendered_job_report_path": str(job_report),
+            "rendered_job_report_sha256": job_hash,
+        }
+    )
+
+    with pytest.raises(CandidateReviewError, match="at least 3.5"):
+        transition_candidate(
+            record,
+            CandidateState.APPROVED,
+            evidence={
+                **frames,
+                "review_note": "approved",
+                "audio_sha256": audio_hash,
+                "speaker_visible": "true",
+                "lipsync_score": "3.4",
             },
         )
 
