@@ -55,6 +55,18 @@ ENABLE_GATEWAY_VIDEO=1
 
 不配置 Provider 也可以使用本机工作台、运行本地阶段、审核历史作品并执行离线测试。收费生成只有在视频预检、费用确认和显式提交全部完成后才会启动。
 
+## Audio-first microshot preflight
+
+在提交任何付费微镜头请求前，先在目标运行目录执行本地预检：
+
+```bash
+.venv/bin/python -c 'from factory.audio_first_preflight import run_audio_first_preflight; import json; print(json.dumps(run_audio_first_preflight("runs/<run-id>", model="doubao-seedance-2-0"), ensure_ascii=False, indent=2))'
+```
+
+预检只读取并验证本地证据：`episode.json`、`visual_timeline.json`、`performance_sheet.json`、`dialogue_audio_manifest.json`、`model_bakeoff_report.json`、`character_assets.json`、`scene_keyframes.json`、`approved_anchors.json` 和 `candidate_review.json`。它只写入同一运行目录的 `preflight_report.json`，不会创建网关客户端、调用 TTS、生成视频或提交付费请求。
+
+报告中的 `planned_count` 仅表示可以在后续步骤中提交的本地计划；真正的付费请求必须是单独、明确的后续操作。旧 Episode 1 导出（包括既有 picture cut 与 role-dialogue 文件）永远不是该预检或微镜头计划的输出目标。
+
 ## 本机制作工作台
 
 一个命令同时启动 Python 制作 API 和 React 工作台：
