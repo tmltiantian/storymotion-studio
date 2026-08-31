@@ -147,6 +147,29 @@ def test_visible_speech_review_requires_speaker_and_lipsync_evidence(
         )
 
 
+def test_visible_speech_review_rejects_caller_audio_without_authoritative_evidence(
+    tmp_path, fake_video, fake_runners
+):
+    _, report_path = _analyze(tmp_path, fake_video, fake_runners)
+
+    with pytest.raises(
+        VisualQCError,
+        match="visible speech requires dialogue_manifest and rendered_job_report",
+    ):
+        record_visual_review(
+            report_path,
+            _review(
+                speaker_visible=True,
+                lipsync_score=5.0,
+                audio_sha256="a" * 64,
+            ),
+            expected_micro_shot=micro_shot(),
+            performance_card=_visible_speech_card(),
+            command_runner=fake_runners.command,
+            ocr_runner=lambda _: "",
+        )
+
+
 def _analyze(
     tmp_path: Path,
     fake_video: Path,

@@ -230,6 +230,27 @@ def test_preview_refuses_an_unapproved_mp4(
         )
 
 
+def test_select_micro_sources_requires_candidate_review_manifest(
+    tmp_path, monkeypatch, sample_episode, visual_timeline
+):
+    run_dir = (tmp_path / "runs/sample_episode").resolve()
+    run_dir.mkdir(parents=True)
+    candidate = run_dir / "micro_clips/micro_001" / VIDEO_MODEL / "candidate_001.mp4"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"candidate")
+    qc_path = run_dir / "visual_qc.json"
+    qc_path.write_text("{}", encoding="utf-8")
+    _install_gate_stubs(monkeypatch, {"candidate_evidence": {"path": str(candidate)}, "manual_review": {"selected_start_seconds": 0.0, "selected_end_seconds": 1.0}})
+
+    with pytest.raises(MicroPreviewError, match="Candidate review manifest is required"):
+        select_micro_sources(
+            sample_episode, visual_timeline, _video_selection(run_dir, qc_path),
+            run_dir=run_dir,
+            bakeoff_report={"project_id": "sample_episode", "run_dir": str(run_dir)},
+            candidate_review=None,
+        )
+
+
 def test_select_micro_sources_uses_exact_video_schema_and_manual_qc_range(
     tmp_path, monkeypatch, sample_episode, visual_timeline
 ):

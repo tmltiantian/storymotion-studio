@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping, Sequence
 from PIL import Image, ImageChops, ImageStat, UnidentifiedImageError
 
 from .media_validation import probe_media
+from .dialogue_assets import DialogueAudioError, DialogueAudioManifest, require_dialogue_audio
 from .model_bakeoff import (
     LIPSYNC_MINIMUM_SCORE,
     SCORE_WEIGHTS,
@@ -53,6 +54,9 @@ _REVIEW_KEYS = frozenset(
         "lipsync_score",
         "audio_sha256",
     }
+)
+_AUTHORITATIVE_REVIEW_KEYS = frozenset(
+    {"entry_anchor_id", "rendered_job_sha256"}
 )
 _REPORT_KEYS = frozenset(
     {
@@ -141,6 +145,8 @@ def record_visual_review(
     expected_micro_shot: MicroShot,
     expected_reference_image_labels: Sequence[str] = (),
     performance_card: PerformanceCard | None = None,
+    dialogue_manifest: DialogueAudioManifest | None = None,
+    rendered_job_report: Mapping[str, Any] | None = None,
     command_runner: Callable[..., Any] = subprocess.run,
     ocr_runner: Callable[[Path], str] | None = None,
 ) -> dict[str, Any]:
@@ -157,7 +163,15 @@ def record_visual_review(
         report, candidate, output, expected_micro_shot, command_runner, ocr_runner
     )
     manual_review = _normalise_review(review)
-    _validate_visible_speech_review(manual_review, performance_card)
+    manual_review.update(
+        _validate_visible_speech_review(
+            manual_review,
+            performance_card,
+            dialogue_manifest=dialogue_manifest,
+            rendered_job_report=rendered_job_report,
+            candidate_path=candidate,
+        )
+    )
     if not _range_is_valid(manual_review, fresh_duration):
         raise VisualQCError("Manual selected range is invalid.")
     report["manual_review"] = manual_review
@@ -632,7 +646,9 @@ def _micro_shot_payload(shot: MicroShot) -> tuple[dict[str, Any], str]:
 
 def _normalise_review(review: VisualReview | Mapping[str, Any], *, allow_weighted_score: bool = False) -> dict[str, Any]:
     raw = {field: getattr(review, field) for field in _REVIEW_KEYS} if isinstance(review, VisualReview) else dict(review) if isinstance(review, Mapping) else None
-    if raw is None or set(raw) != _REVIEW_KEYS | ({"weighted_score"} if allow_weighted_score else set()):
+    persisted_keys = _REVIEW_KEYS | _AUTHORITATIVE_REVIEW_KEYS | {"weighted_score"}
+    expected_keys = persisted_keys if allow_weighted_score else _REVIEW_KEYS
+    if raw is None or set(raw) != expected_keys:
         raise VisualQCError("Manual review must contain exactly the seven scores and review fields.")
     scores = {}
     for key in SCORE_WEIGHTS:
@@ -661,21 +677,32 @@ def _normalise_review(review: VisualReview | Mapping[str, Any], *, allow_weighte
             raise VisualQCError("Manual audio_sha256 must be a lowercase SHA-256 or empty.")
     elif not isinstance(audio_sha256, str):
         raise VisualQCError("Manual audio_sha256 must be a lowercase SHA-256 or empty.")
-    result = {**scores, "hard_failures": sorted(failures), "selected_start_seconds": _finite_seconds(raw["selected_start_seconds"], "selected start"), "selected_end_seconds": _finite_seconds(raw["selected_end_seconds"], "selected end"), "notes": _safe_untrusted_text(raw["notes"], "manual review notes"), "speaker_visible": speaker_visible, "lipsync_score": lipsync_score, "audio_sha256": audio_sha256, "weighted_score": weighted_score(scores)}
+    result = {**scores, "hard_failures": sorted(failures), "selected_start_seconds": _finite_seconds(raw["selected_start_seconds"], "selected start"), "selected_end_seconds": _finite_seconds(raw["selected_end_seconds"], "selected end"), "notes": _safe_untrusted_text(raw["notes"], "manual review notes"), "speaker_visible": speaker_visible, "lipsync_score": lipsync_score, "audio_sha256": audio_sha256, "entry_anchor_id": "", "rendered_job_sha256": "", "weighted_score": weighted_score(scores)}
     if allow_weighted_score and raw["weighted_score"] != result["weighted_score"]:
         raise VisualQCError("Manual review weighted score is invalid.")
+    if allow_weighted_score:
+        for key in _AUTHORITATIVE_REVIEW_KEYS:
+            value = raw[key]
+            if not isinstance(value, str):
+                raise VisualQCError(f"Manual review {key} is invalid.")
+            result[key] = value
     return result
 
 
 def _validate_visible_speech_review(
-    review: Mapping[str, Any], performance_card: PerformanceCard | None
-) -> None:
+    review: Mapping[str, Any],
+    performance_card: PerformanceCard | None,
+    *,
+    dialogue_manifest: DialogueAudioManifest | None,
+    rendered_job_report: Mapping[str, Any] | None,
+    candidate_path: Path,
+) -> dict[str, str]:
     if performance_card is None:
-        return
+        return {}
     if not isinstance(performance_card, PerformanceCard):
         raise VisualQCError("performance_card must be a PerformanceCard instance.")
     if not performance_card.requires_visible_lipsync:
-        return
+        return {}
     if review["speaker_visible"] is not True or review["lipsync_score"] is None:
         raise VisualQCError(
             "visible speech requires speaker_visible and lipsync_score"
@@ -684,8 +711,60 @@ def _validate_visible_speech_review(
         raise VisualQCError(
             f"visible speech lipsync_score must be at least {LIPSYNC_MINIMUM_SCORE}."
         )
-    if not review["audio_sha256"]:
-        raise VisualQCError("visible speech requires audio_sha256.")
+    if not isinstance(dialogue_manifest, DialogueAudioManifest) or not isinstance(
+        rendered_job_report, Mapping
+    ):
+        raise VisualQCError(
+            "visible speech requires dialogue_manifest and rendered_job_report."
+        )
+    try:
+        audio = require_dialogue_audio(dialogue_manifest, performance_card)
+    except DialogueAudioError as exc:
+        raise VisualQCError(f"visible speech dialogue audio is invalid: {exc}") from exc
+    job = _authoritative_rendered_job(
+        rendered_job_report, performance_card, candidate_path
+    )
+    if review["audio_sha256"] != audio.sha256:
+        raise VisualQCError("visible speech audio_sha256 does not match dialogue manifest.")
+    if job["reference_audio_sha256"] != audio.sha256:
+        raise VisualQCError("visible speech job audio does not match dialogue manifest.")
+    if job["entry_anchor_id"] != performance_card.entry_anchor_id:
+        raise VisualQCError("visible speech job entry anchor does not match performance card.")
+    return {
+        "audio_sha256": audio.sha256,
+        "entry_anchor_id": performance_card.entry_anchor_id,
+        "rendered_job_sha256": _canonical_sha256(job),
+    }
+
+
+def _authoritative_rendered_job(
+    report: Mapping[str, Any], card: PerformanceCard, candidate_path: Path
+) -> dict[str, str]:
+    jobs = report.get("jobs")
+    if not isinstance(jobs, list):
+        raise VisualQCError("visible speech rendered job report has no jobs.")
+    matches = [item for item in jobs if isinstance(item, Mapping) and item.get("micro_shot_id") == card.micro_shot_id]
+    if len(matches) != 1:
+        raise VisualQCError("visible speech rendered job report must contain one matching job.")
+    job = matches[0]
+    required = {"micro_shot_id", "output_path", "reference_audio_sha256", "entry_anchor_id"}
+    if not required.issubset(job):
+        raise VisualQCError("visible speech rendered job evidence is incomplete.")
+    output = Path(str(job["output_path"])).expanduser()
+    if output.resolve() != candidate_path.resolve():
+        raise VisualQCError("visible speech rendered job output does not match visual QC candidate.")
+    result = {key: str(job[key]) for key in required}
+    if not re.fullmatch(r"[0-9a-f]{64}", result["reference_audio_sha256"]):
+        raise VisualQCError("visible speech rendered job audio SHA-256 is invalid.")
+    if not result["entry_anchor_id"]:
+        raise VisualQCError("visible speech rendered job entry anchor is invalid.")
+    return result
+
+
+def _canonical_sha256(value: Mapping[str, str]) -> str:
+    return hashlib.sha256(
+        json.dumps(dict(value), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _manual_passes(review: Mapping[str, Any], duration: float) -> bool:
