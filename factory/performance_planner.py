@@ -15,7 +15,7 @@ from .prompt_safety import (
     extract_source_locations,
     extract_source_time_expressions,
 )
-from .schema import Episode, episode_to_dict
+from .schema import Episode, NARRATOR_ID, episode_to_dict
 from .performance_card import (
     PERFORMANCE_SHEET_SCHEMA,
     PerformanceCardError,
@@ -147,6 +147,8 @@ def build_performance_plan_messages(episode: Episode) -> list[dict[str, str]]:
                 "performance_sheet cards contain one card per microshot and exactly these keys: "
                 + ", ".join(f'\"{key}\"' for key in card_keys)
                 + ". A visible spoken line maps to one non-narrator source dialogue. "
+                "Every non-narrator source dialogue maps exactly once, and its visible "
+                "speaker must be in that microshot's character_ids. "
                 "A microshot has a maximum of two characters. A contact action has one actor "
                 "and one contact point. "
                 + example_clause
@@ -239,13 +241,31 @@ def _performance_plan_example(episode: Episode) -> dict[str, Any] | None:
         return None
     if validate_visual_timeline(timeline, episode):
         return None
-    cards = [
-        {
+    remaining_dialogue = [
+        (parent.id, index, line.speaker_id)
+        for parent in episode.shots
+        for index, line in enumerate(parent.dialogue, start=1)
+        if line.speaker_id != NARRATOR_ID
+    ]
+    cards = []
+    for shot in micro_shots:
+        match = next(
+            (
+                item
+                for item in remaining_dialogue
+                if item[0] == shot["parent_shot_id"]
+                and item[2] in shot["character_ids"]
+            ),
+            None,
+        )
+        if match is not None:
+            remaining_dialogue.remove(match)
+        cards.append({
             "micro_shot_id": shot["id"],
             "purpose": shot["purpose"],
-            "speaker_id": "",
-            "dialogue_id": "",
-            "requires_visible_lipsync": False,
+            "speaker_id": match[2] if match else "",
+            "dialogue_id": f"{match[0]}.dialogue_{match[1]:02d}" if match else "",
+            "requires_visible_lipsync": match is not None,
             "entry_anchor_id": "scene_start",
             "scene_keyframe_id": "scene_keyframe",
             "actor_id": shot["action_actor_id"],
@@ -256,9 +276,9 @@ def _performance_plan_example(episode: Episode) -> dict[str, Any] | None:
             "main_beat": shot["action_code"],
             "end_beat": shot["pose_end"],
             "negative_constraints": shot["negative_constraints"],
-        }
-        for shot in micro_shots
-    ]
+        })
+    if remaining_dialogue:
+        return None
     return {
         "visual_timeline": visual_timeline,
         "performance_sheet": {

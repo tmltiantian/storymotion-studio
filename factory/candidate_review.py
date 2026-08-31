@@ -15,6 +15,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping
 
+from .character_assets import is_supported_image_file
+from .prompt_safety import PREVIOUS_SHOT_CONTINUITY
 from .visual_timeline import VisualTimeline
 
 
@@ -206,7 +208,10 @@ def candidate_review_manifest_from_dict(data: Mapping[str, Any]) -> CandidateRev
 
 
 def approved_selection_from_manifest(
-    manifest: CandidateReviewManifest, timeline: VisualTimeline
+    manifest: CandidateReviewManifest,
+    timeline: VisualTimeline,
+    *,
+    bakeoff_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the only editable selection: all approved timeline candidates in order."""
     _validate_manifest(manifest, require_existing=True)
@@ -216,8 +221,9 @@ def approved_selection_from_manifest(
         raise CandidateReviewError("Candidate review project_id does not match visual timeline.")
     by_micro_shot = {record.micro_shot_id: record for record in manifest.candidates}
     expected_ids = [shot.id for shot in timeline.micro_shots]
-    missing = [micro_shot_id for micro_shot_id in expected_ids if micro_shot_id not in by_micro_shot]
-    extra = sorted(set(by_micro_shot) - set(expected_ids))
+    expected_video_ids = [shot.id for shot in timeline.micro_shots if shot.character_ids]
+    missing = [micro_shot_id for micro_shot_id in expected_video_ids if micro_shot_id not in by_micro_shot]
+    extra = sorted(set(by_micro_shot) - set(expected_video_ids))
     if missing or extra:
         details: list[str] = []
         if missing:
@@ -226,7 +232,13 @@ def approved_selection_from_manifest(
             details.append("unknown candidate slots: " + ", ".join(extra))
         raise CandidateReviewError("Candidate review manifest has " + "; ".join(details) + ".")
     selected: dict[str, dict[str, str]] = {}
+    shots = {shot.id: shot for shot in timeline.micro_shots}
     for micro_shot_id in expected_ids:
+        if not shots[micro_shot_id].character_ids:
+            selected[micro_shot_id] = _approved_still_selection(
+                bakeoff_report, micro_shot_id
+            )
+            continue
         record = by_micro_shot[micro_shot_id]
         if record.state is not CandidateState.APPROVED:
             raise CandidateReviewError(f"Candidate {micro_shot_id} is not approved.")
@@ -242,6 +254,106 @@ def approved_selection_from_manifest(
         "schema_version": "motion-comic-factory.visual-selection.v1",
         "project_id": manifest.project_id,
         "selected_candidates": selected,
+    }
+
+
+def approved_anchor_for_micro_shot(
+    manifest: CandidateReviewManifest,
+    timeline: VisualTimeline,
+    micro_shot_id: str,
+) -> tuple[str, str]:
+    """Return the nearest prior approved same-scene immutable last frame."""
+    _validate_manifest(manifest, require_existing=True)
+    if manifest.project_id != timeline.project_id:
+        raise CandidateReviewError(
+            "Candidate review project_id does not match visual timeline."
+        )
+    ordered = sorted(timeline.micro_shots, key=lambda shot: shot.index)
+    resolved_scenes: dict[str, str] = {}
+    previous_scene = ""
+    target = None
+    for shot in ordered:
+        scene = previous_scene if shot.scene_context == PREVIOUS_SHOT_CONTINUITY else shot.scene_context
+        if not scene:
+            raise CandidateReviewError(
+                f"Candidate {shot.id} has unresolved scene continuity."
+            )
+        resolved_scenes[shot.id] = scene
+        previous_scene = scene
+        if shot.id == micro_shot_id:
+            target = shot
+    if target is None:
+        raise CandidateReviewError(f"Unknown micro-shot ID: {micro_shot_id}.")
+    records = {record.micro_shot_id: record for record in manifest.candidates}
+    eligible = [
+        shot
+        for shot in ordered
+        if shot.index < target.index
+        and resolved_scenes[shot.id] == resolved_scenes[target.id]
+        and shot.id in records
+        and records[shot.id].state is CandidateState.APPROVED
+    ]
+    prior_same_scene = [
+        shot
+        for shot in ordered
+        if shot.index < target.index
+        and resolved_scenes[shot.id] == resolved_scenes[target.id]
+    ]
+    if not prior_same_scene:
+        return "", ""
+    if not eligible:
+        raise CandidateReviewError(f"{micro_shot_id} missing approved entry anchor.")
+    source = eligible[-1]
+    record = records[source.id]
+    anchor = Path(record.evidence["last_frame"])
+    if _sha256(anchor) != record.last_frame_sha256:
+        raise CandidateReviewError(
+            f"Candidate {source.id} approved last frame changed."
+        )
+    return str(anchor), source.id
+
+
+def _approved_still_selection(
+    report: Mapping[str, Any] | None, micro_shot_id: str
+) -> dict[str, Any]:
+    if not isinstance(report, Mapping):
+        raise CandidateReviewError(
+            f"Candidate review manifest is missing approved still slot: {micro_shot_id}."
+        )
+    try:
+        from .model_bakeoff import ModelBakeoffError, require_selected_still_model
+
+        model = require_selected_still_model(report)
+    except ModelBakeoffError as exc:
+        raise CandidateReviewError(f"Approved still gate failed: {exc}") from exc
+    matches = [
+        result
+        for result in report.get("still_results", [])
+        if isinstance(result, Mapping)
+        and result.get("model") == model
+        and result.get("micro_shot_id") == micro_shot_id
+        and result.get("passed") is True
+    ]
+    if len(matches) != 1:
+        raise CandidateReviewError(
+            f"Candidate review manifest is missing approved still slot: {micro_shot_id}."
+        )
+    result = matches[0]
+    candidate = Path(str(result.get("candidate_path") or ""))
+    if (
+        not is_supported_image_file(candidate)
+        or result.get("size_bytes") != candidate.stat().st_size
+        or result.get("sha256") != _sha256(candidate)
+    ):
+        raise CandidateReviewError(f"Approved still {micro_shot_id} changed.")
+    return {
+        "kind": "still",
+        "candidate_path": str(candidate),
+        "size_bytes": result["size_bytes"],
+        "sha256": result["sha256"],
+        "score": result["score"],
+        "hard_failures": list(result["hard_failures"]),
+        "notes": result["notes"],
     }
 
 
@@ -350,11 +462,32 @@ def _validate_review_evidence(record: CandidateRecord, *, project_id: str = "") 
             raise CandidateReviewError("Visible-speaking candidate lipsync_score is invalid.") from exc
         if not 0 <= score <= 5:
             raise CandidateReviewError("Visible-speaking candidate lipsync_score must be 0 to 5.")
+        if score < 3.5:
+            raise CandidateReviewError(
+                "Visible-speaking candidate lipsync_score must be at least 3.5."
+            )
         manual = _visual_qc_manual_review(record)
         if manual.get("audio_sha256") != record.audio_sha256:
             raise CandidateReviewError("Candidate review audio does not match visual QC evidence.")
         if manual.get("entry_anchor_id") != record.entry_anchor_id:
             raise CandidateReviewError("Candidate review anchor does not match visual QC evidence.")
+        if manual.get("speaker_visible") is not True:
+            raise CandidateReviewError(
+                "Candidate review speaker visibility does not match visual QC evidence."
+            )
+        manual_lipsync = manual.get("lipsync_score")
+        if (
+            isinstance(manual_lipsync, bool)
+            or not isinstance(manual_lipsync, (int, float))
+            or float(manual_lipsync) < 3.5
+        ):
+            raise CandidateReviewError(
+                "Visible-speaking authoritative QC lipsync_score must be at least 3.5."
+            )
+        if float(manual_lipsync) != score:
+            raise CandidateReviewError(
+                "Candidate review lipsync_score does not match visual QC evidence."
+            )
 
 
 def _validate_qc_frame_evidence(record: CandidateRecord) -> None:
@@ -371,6 +504,8 @@ def _validate_qc_frame_evidence(record: CandidateRecord) -> None:
         raise CandidateReviewError("Candidate review visual QC report provenance is incomplete.")
     if report["automatic_passed"] is not True:
         raise CandidateReviewError("Candidate review visual QC automatic provenance did not pass.")
+    if report.get("passed") is not True:
+        raise CandidateReviewError("Candidate review visual QC did not pass.")
     candidate_evidence = report["candidate_evidence"]
     if not isinstance(candidate_evidence, Mapping) or candidate_evidence.get("path") != record.candidate_path or candidate_evidence.get("sha256") != record.candidate_sha256:
         raise CandidateReviewError("Candidate review visual QC candidate provenance is invalid.")

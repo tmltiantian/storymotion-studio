@@ -8,6 +8,10 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from factory.candidate_review import (
+    CandidateReviewManifest,
+    approved_selection_from_manifest,
+)
 from factory.micro_still_batch import PRODUCTION_STILL_MODELS
 from factory.micro_video_batch import PRODUCTION_VIDEO_MODELS
 from factory.model_bakeoff import (
@@ -891,6 +895,35 @@ def test_still_gate_rejects_hard_failure_and_no_still_route_returns_empty(tmp_pa
     assert no_still_report["production_ready"] is True
     assert no_still_report["selected_still_model"] == ""
     assert require_selected_still_model(no_still_report) == ""
+
+
+def test_approved_selection_uses_authoritative_still_for_character_free_slot(tmp_path):
+    plan = _build_plan(tmp_path)
+    report = finalize_bakeoff(plan, _reviews(plan))
+    timeline = VisualTimeline(
+        project_id="bakeoff-project",
+        micro_shots=(
+            _micro_shot(
+                "micro_still",
+                1,
+                character_ids=(),
+                purpose="object",
+                camera_mode="object_insert",
+                parent_shot_id="shot_002",
+            ),
+        ),
+    )
+
+    selection = approved_selection_from_manifest(
+        CandidateReviewManifest(project_id="bakeoff-project", candidates=()),
+        timeline,
+        bakeoff_report=report,
+    )
+
+    assert selection["selected_candidates"]["micro_still"]["kind"] == "still"
+    assert selection["selected_candidates"]["micro_still"]["candidate_path"] == (
+        report["still_results"][0]["candidate_path"]
+    )
 
 
 def test_gate_recomputes_results_and_rejects_forged_report(tmp_path):

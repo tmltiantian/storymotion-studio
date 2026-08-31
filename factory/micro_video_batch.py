@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
+from .candidate_review import (
+    CandidateReviewError,
+    CandidateReviewManifest,
+    approved_anchor_for_micro_shot,
+    candidate_review_manifest_from_dict,
+)
 from .character_assets import is_production_asset_source, is_supported_image_file
 from .dialogue_assets import (
     DialogueAudioError,
@@ -85,7 +91,8 @@ def build_micro_video_jobs(
     dialogue_manifest: DialogueAudioManifest,
     capability_report: Mapping[str, Any],
     scene_keyframes: Mapping[str, str],
-    approved_anchors: Mapping[str, str],
+    approved_anchors: Mapping[str, str] | None = None,
+    candidate_review: CandidateReviewManifest | Mapping[str, Any] | None = None,
     micro_shot_ids: Sequence[str] | None = None,
 ) -> list[MicroVideoJob]:
     timeline_errors = validate_visual_timeline(timeline, episode)
@@ -107,8 +114,20 @@ def build_micro_video_jobs(
         raise MicroVideoBatchError("Capability report must be a mapping.")
     if not isinstance(scene_keyframes, Mapping):
         raise MicroVideoBatchError("Scene keyframes must be a mapping.")
-    if not isinstance(approved_anchors, Mapping):
-        raise MicroVideoBatchError("Approved anchors must be a mapping.")
+    if approved_anchors:
+        raise MicroVideoBatchError(
+            "Approved anchors must come from candidate review evidence, not a path map."
+        )
+    try:
+        review_manifest = (
+            candidate_review
+            if isinstance(candidate_review, CandidateReviewManifest)
+            else candidate_review_manifest_from_dict(candidate_review)
+            if isinstance(candidate_review, Mapping)
+            else CandidateReviewManifest(project_id=timeline.project_id, candidates=())
+        )
+    except CandidateReviewError as exc:
+        raise MicroVideoBatchError(str(exc)) from exc
     references = _validated_character_references(episode, character_assets, run_root)
     selected_ids = _selected_micro_shot_ids(timeline, micro_shot_ids)
     resolved_scenes = _resolved_scene_contexts(timeline)
@@ -147,13 +166,12 @@ def build_micro_video_jobs(
             capability_provenance_sha256 = _capability_provenance_sha256(
                 capability_provenance
             )
-        anchor = _require_evidence_image(
-            approved_anchors,
-            card.entry_anchor_id,
-            "approved entry anchor",
-            shot.id,
-            run_root,
-        )
+        try:
+            anchor, _anchor_source_id = approved_anchor_for_micro_shot(
+                review_manifest, timeline, shot.id
+            )
+        except CandidateReviewError as exc:
+            raise MicroVideoBatchError(str(exc)) from exc
         keyframe = _require_evidence_image(
             scene_keyframes,
             card.scene_keyframe_id,
@@ -162,9 +180,8 @@ def build_micro_video_jobs(
             run_root,
         )
         character_images = _references_for_shot(shot, references)
-        images = (anchor, keyframe, *character_images)
-        image_roles = (
-            "last_frame",
+        images = ((anchor,) if anchor else ()) + (keyframe, *character_images)
+        image_roles = (("last_frame",) if anchor else ()) + (
             "first_frame",
             *("reference_image",) * len(character_images),
         )
@@ -210,7 +227,7 @@ def build_micro_video_jobs(
                 image_roles=image_roles,
                 audio_path=audio_path,
                 audio_sha256=audio_sha256,
-                entry_anchor_id=card.entry_anchor_id,
+                entry_anchor_id=card.entry_anchor_id if anchor else "",
                 capability=capability,
                 capability_provenance=capability_provenance,
                 capability_provenance_sha256=capability_provenance_sha256,
@@ -775,18 +792,27 @@ def _validate_job(job: MicroVideoJob, run_root: Path) -> tuple[int, MicroVideoJo
         )
     if job.capability == "speaking":
         image_roles = _image_roles(job.images, job.image_roles)
+        anchored = bool(image_roles and image_roles[0] == "last_frame")
+        first_frame_index = 1 if anchored else 0
         if (
-            len(image_roles) < 3
-            or image_roles[0] != "last_frame"
-            or image_roles[1] != "first_frame"
-            or image_roles.count("last_frame") != 1
+            len(image_roles) < 2
+            or image_roles[first_frame_index] != "first_frame"
+            or image_roles.count("last_frame") != (1 if anchored else 0)
             or image_roles.count("first_frame") != 1
-            or any(role != "reference_image" for role in image_roles[2:])
+            or any(
+                role != "reference_image"
+                for role in image_roles[first_frame_index + 1 :]
+            )
         ):
             raise MicroVideoBatchError(
                 f"Speaking micro-video speaking frame evidence is invalid for {job.micro_shot_id}."
             )
-        if not job.audio_path or not job.audio_sha256 or not job.entry_anchor_id:
+        if (
+            not job.audio_path
+            or not job.audio_sha256
+            or (anchored and not job.entry_anchor_id)
+            or (not anchored and job.entry_anchor_id)
+        ):
             raise MicroVideoBatchError(
                 f"Speaking micro-video job evidence is incomplete for {job.micro_shot_id}."
             )

@@ -248,18 +248,13 @@ def _action_evidence(
 ) -> dict[str, object]:
     cards = []
     scene_keyframes = {}
-    approved_anchors = {}
     for shot in timeline.micro_shots:
         scene_id = f"scene_{shot.index:03d}"
         anchor_id = f"anchor_{shot.index:03d}"
         scene = run_dir / "scene_keyframes" / f"{scene_id}.png"
-        anchor = run_dir / "approved_anchors" / f"{anchor_id}.png"
         scene.parent.mkdir(parents=True, exist_ok=True)
-        anchor.parent.mkdir(parents=True, exist_ok=True)
         scene.write_bytes(b"\x89PNG\r\n\x1a\nscene")
-        anchor.write_bytes(b"\x89PNG\r\n\x1a\nanchor")
         scene_keyframes[scene_id] = str(scene)
-        approved_anchors[anchor_id] = str(anchor)
         cards.append(
             PerformanceCard(
                 micro_shot_id=shot.id,
@@ -291,7 +286,7 @@ def _action_evidence(
         ),
         "capability_report": {},
         "scene_keyframes": scene_keyframes,
-        "approved_anchors": approved_anchors,
+        "approved_anchors": {},
     }
 
 
@@ -305,7 +300,7 @@ def build_micro_video_jobs(
     return _build_micro_video_jobs(episode, timeline, character_assets, **kwargs)
 
 
-def test_visible_speech_job_requires_audio_scene_frame_anchor_and_speaking_capability(
+def test_visible_speech_job_rejects_arbitrary_anchor_path_map(
     tmp_path, monkeypatch
 ):
     """Removing the approved anchor must stop a speaking request before rendering."""
@@ -314,7 +309,9 @@ def test_visible_speech_job_requires_audio_scene_frame_anchor_and_speaking_capab
         "factory.model_bakeoff.require_speaking_capability", lambda *args: None
     )
 
-    with pytest.raises(MicroVideoBatchError, match="micro_001 missing approved entry anchor"):
+    arbitrary = tmp_path / "run/arbitrary.png"
+    arbitrary.write_bytes(b"\x89PNG\r\n\x1a\narbitrary")
+    with pytest.raises(MicroVideoBatchError, match="candidate review evidence"):
         build_micro_video_jobs(
             episode,
             timeline,
@@ -326,7 +323,7 @@ def test_visible_speech_job_requires_audio_scene_frame_anchor_and_speaking_capab
             dialogue_manifest=manifest,
             capability_report={},
             scene_keyframes=scene_keyframes,
-            approved_anchors={},
+            approved_anchors={"anchor_001": str(arbitrary)},
         )
 
 
@@ -347,7 +344,7 @@ def test_visible_speech_job_passes_audio_and_image_roles_to_gateway(tmp_path, mo
         dialogue_manifest=manifest,
         capability_report={},
         scene_keyframes=scene_keyframes,
-        approved_anchors=anchors,
+        approved_anchors={},
     )[0]
     received = {}
 
@@ -374,7 +371,6 @@ def test_visible_speech_job_passes_audio_and_image_roles_to_gateway(tmp_path, mo
 
     assert result["jobs"][0]["reference_audio_sha256"] == speaking_job.audio_sha256
     assert result["jobs"][0]["reference_image_roles"] == [
-        "last_frame",
         "first_frame",
         "reference_image",
     ]
@@ -400,7 +396,7 @@ def _speaking_job(tmp_path, monkeypatch) -> MicroVideoJob:
         dialogue_manifest=manifest,
         capability_report={},
         scene_keyframes=scene_keyframes,
-        approved_anchors=anchors,
+        approved_anchors={},
     )[0]
 
 
@@ -418,14 +414,14 @@ def _speaking_job(tmp_path, monkeypatch) -> MicroVideoJob:
         (
             lambda job: replace(
                 job,
-                image_roles=("last_frame", "reference_image", "reference_image"),
+                image_roles=("last_frame", "reference_image"),
             ),
             "speaking frame evidence",
         ),
         (
             lambda job: replace(
                 job,
-                image_roles=("first_frame", "reference_image", "reference_image"),
+                image_roles=("reference_image", "reference_image"),
             ),
             "speaking frame evidence",
         ),
@@ -467,9 +463,8 @@ def test_build_micro_jobs_routes_only_character_shots_with_exact_ordered_referen
     )
 
     assert [job.micro_shot_id for job in jobs] == ["micro_001"]
-    assert jobs[0].images[2:] == (assets["characters"][0]["reference_image_path"],)
+    assert jobs[0].images[1:] == (assets["characters"][0]["reference_image_path"],)
     assert jobs[0].image_roles == (
-        "last_frame",
         "first_frame",
         "reference_image",
     )
@@ -531,7 +526,7 @@ def test_build_micro_jobs_preserves_multi_character_shot_reference_order(tmp_pat
         candidate_number=1,
     )
 
-    assert jobs[0].images[2:] == (
+    assert jobs[0].images[1:] == (
         assets["characters"][1]["reference_image_path"],
         assets["characters"][0]["reference_image_path"],
     )
@@ -761,6 +756,10 @@ def test_build_micro_jobs_resolves_continuity_before_compiling(tmp_path, monkeyp
         )
 
     monkeypatch.setattr("factory.micro_video_batch.compile_video_prompt", compile_spy)
+    monkeypatch.setattr(
+        "factory.micro_video_batch.approved_anchor_for_micro_shot",
+        lambda *_args: ("", ""),
+    )
     jobs = build_micro_video_jobs(
         episode,
         timeline,

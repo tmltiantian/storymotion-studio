@@ -119,3 +119,35 @@ def test_contact_card_requires_an_actor(episode, timeline):
     assert "micro_001 contact action requires exactly one actor_id" in validate_performance_sheet(
         sheet, episode, timeline
     )
+
+
+def test_visible_speaker_must_be_present_in_the_paired_microshot(episode, timeline):
+    from factory.performance_card import PerformanceSheet, validate_performance_sheet
+
+    sheet = PerformanceSheet(
+        project_id=episode.project_id,
+        cards=(make_card(speaker_id="nezha"),),
+    )
+
+    assert (
+        "micro_001 visible speaker must be in microshot character_ids"
+        in validate_performance_sheet(sheet, episode, timeline)
+    )
+
+
+def test_every_non_narrator_source_dialogue_binds_exactly_once(episode, timeline):
+    from factory.performance_card import PerformanceSheet, validate_performance_sheet
+
+    second_shot = replace(timeline.micro_shots[0], id="micro_002", index=2)
+    duplicated_timeline = replace(
+        timeline, micro_shots=(timeline.micro_shots[0], second_shot)
+    )
+    sheet = PerformanceSheet(
+        project_id=episode.project_id,
+        cards=(make_card(), make_card("micro_002")),
+    )
+
+    assert (
+        "source dialogue scene_001.dialogue_01 must bind exactly once (found 2)"
+        in validate_performance_sheet(sheet, episode, duplicated_timeline)
+    )

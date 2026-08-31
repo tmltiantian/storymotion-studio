@@ -255,10 +255,16 @@ def speaking_fixture(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def delivered_episode_v3(tmp_path: Path) -> Path:
-    export = tmp_path / "episode_01_role_dialogue_v3.mp4"
-    export.write_bytes(b"delivered-episode-v3")
-    return export
+def delivered_episode_exports(tmp_path: Path) -> tuple[Path, ...]:
+    names = (
+        "episode_01_picture_cut_v1.mp4",
+        "episode_01_role_dialogue_v2.mp4",
+        "episode_01_role_dialogue_v3.mp4",
+    )
+    exports = tuple(tmp_path / name for name in names)
+    for export in exports:
+        export.write_bytes(f"delivered-{export.name}".encode())
+    return exports
 
 
 def test_preflight_is_local_and_blocks_visible_speech_without_a_speaking_model(run_fixture, monkeypatch):
@@ -270,21 +276,24 @@ def test_preflight_is_local_and_blocks_visible_speech_without_a_speaking_model(r
     report = run_audio_first_preflight(run_fixture, model=MODEL)
 
     assert report["success"] is False
-    assert report["planned_count"] == 1
-    assert report["blocked_count"] == 3
-    assert all("not speaking-capable" in error for error in report["errors"])
+    assert report["planned_count"] == 0
+    assert report["blocked_count"] == 4
+    assert sum("not speaking-capable" in error for error in report["errors"]) == 3
+    assert any("missing approved entry anchor" in error for error in report["errors"])
     assert json.loads((run_fixture / "preflight_report.json").read_text()) == report
 
 
-def test_preflight_never_overwrites_delivered_episode_v3(delivered_episode_v3, run_fixture):
-    original = delivered_episode_v3.read_bytes()
+def test_preflight_keeps_all_named_episode_1_v1_v2_v3_exports_immutable(
+    delivered_episode_exports, run_fixture
+):
+    original = {path: path.read_bytes() for path in delivered_episode_exports}
 
     run_audio_first_preflight(run_fixture, model=MODEL)
 
-    assert delivered_episode_v3.read_bytes() == original
+    assert {path: path.read_bytes() for path in delivered_episode_exports} == original
 
 
-def test_speaking_capable_fixture_plans_jobs_without_constructing_gateway_client(speaking_fixture, monkeypatch):
+def test_speaking_capable_fixture_requires_prior_approved_same_scene_anchors(speaking_fixture, monkeypatch):
     monkeypatch.setattr(
         "factory.micro_video_batch.GatewayVideoClient",
         lambda *_: pytest.fail("network client created"),
@@ -292,7 +301,25 @@ def test_speaking_capable_fixture_plans_jobs_without_constructing_gateway_client
 
     report = run_audio_first_preflight(speaking_fixture, model=MODEL)
 
-    assert report["success"] is True
-    assert report["planned_count"] == 4
-    assert report["blocked_count"] == 0
-    assert report["errors"] == []
+    assert report["success"] is False
+    assert report["planned_count"] == 1
+    assert report["blocked_count"] == 3
+    assert all("missing approved entry anchor" in error for error in report["errors"])
+
+
+def test_preflight_blocks_missing_final_dialogue_audio_locally(
+    speaking_fixture, monkeypatch
+):
+    monkeypatch.setattr(
+        "factory.micro_video_batch.GatewayVideoClient",
+        lambda *_: pytest.fail("network client created"),
+    )
+    manifest_path = speaking_fixture / "dialogue_audio_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["assets"] = manifest["assets"][1:]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    report = run_audio_first_preflight(speaking_fixture, model=MODEL)
+
+    assert report["success"] is False
+    assert any("missing final dialogue audio" in error for error in report["errors"])

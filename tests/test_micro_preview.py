@@ -38,7 +38,9 @@ def select_micro_sources(*args, **kwargs):
         return _select_micro_sources(*args, **kwargs)
     selection = args[2]
     original = micro_preview.approved_selection_from_manifest
-    micro_preview.approved_selection_from_manifest = lambda *_args: selection
+    micro_preview.approved_selection_from_manifest = (
+        lambda *_args, **_kwargs: selection
+    )
     try:
         return _select_micro_sources(
             *args,
@@ -233,7 +235,8 @@ def _write_qc_evidence(run_dir: Path, candidate: Path) -> tuple[Path, dict[str, 
     qc_path.write_text(json.dumps({
         "schema_version": "motion-comic-factory.visual-qc.v2",
         "candidate_evidence": {"path": str(candidate), "sha256": _sha256(candidate)},
-        "sample_frames": samples, "automatic_passed": True, "manual_review": {},
+        "sample_frames": samples, "automatic_passed": True,
+        "manual_review": {}, "passed": True,
     }), encoding="utf-8")
     return qc_path, frames, hashes, sample_hashes
 

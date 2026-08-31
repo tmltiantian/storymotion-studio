@@ -281,7 +281,9 @@ def write_quality_visual_selection(
     bakeoff_report = _read_json(run_dir / "model_bakeoff_report.json")
     try:
         candidate_review = candidate_review_manifest_from_dict(_read_json(source))
-        selection = approved_selection_from_manifest(candidate_review, timeline)
+        selection = approved_selection_from_manifest(
+            candidate_review, timeline, bakeoff_report=bakeoff_report
+        )
         sources = select_micro_sources(
             episode,
             timeline,
