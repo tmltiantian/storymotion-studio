@@ -99,6 +99,7 @@ function ProjectCard({ project }: { project: ProjectDetail }) {
       </div>
       <ProjectStageMiniRail project={project} />
       <div className="project-action">
+        <span className="project-action-kicker">继续创作</span>
         <span className={`action-state state-${action.tone}`}>
           {actionStateLabels[action.tone]}
         </span>
@@ -189,9 +190,20 @@ export function ProjectListPage({ api }: { api: ProjectListApi }) {
 
   return (
     <div className="page-frame">
+      <section className="creator-dashboard" aria-label="创作工作台概览">
+        <div>
+          <p className="eyebrow">STORYMOTION STUDIO</p>
+          <h1>把灵感推进成一部作品</h1>
+          <p>从剧本、分镜到成片，所有生成、审核与版本都在同一个创作台完成。</p>
+        </div>
+        <div className="creator-dashboard-status">
+          <span>进行中</span>
+          <strong>{state.status === "ready" ? `${visibleProjects.length} 个项目正在创作中` : "正在载入创作项目"}</strong>
+        </div>
+      </section>
       <div className="page-heading">
         <div>
-          <p className="eyebrow">PRODUCTION QUEUE</p>
+          <p className="eyebrow">PROJECT LIBRARY</p>
           <h1>制作项目</h1>
         </div>
         <div className="heading-actions">

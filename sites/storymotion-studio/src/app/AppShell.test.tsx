@@ -94,6 +94,15 @@ describe("production workbench shell", () => {
     expect(screen.getByRole("link", { name: "制作项目" })).toBeVisible();
     expect(screen.getByRole("link", { name: "作品中心" })).toBeVisible();
     expect(screen.getByRole("link", { name: "设置" })).toBeVisible();
+    expect(screen.getByText("创作工作台")).toBeVisible();
+  });
+
+  it("presents project creation as a creator dashboard", async () => {
+    window.history.replaceState({}, "", "/projects");
+    render(<App api={projectsApi()} />);
+
+    expect(await screen.findByText("继续创作")).toBeVisible();
+    expect(screen.getByText("1 个项目正在创作中")).toBeVisible();
   });
 
   it("shows loading and opens project creation from the empty state", async () => {
