@@ -57,10 +57,10 @@ export function AppShell() {
   return (
     <div className="app-shell">
       <header className="masthead">
-        <NavLink className="brand" to="/projects" aria-label="StoryMotion Studio 制作台">
+        <NavLink className="brand" to="/projects" aria-label="StoryMotion 创作工作台">
           <span className="brand-mark" aria-hidden="true">SM</span>
           <span className="brand-name">StoryMotion</span>
-          <span className="brand-role">制作台</span>
+          <span className="brand-role">创作工作台</span>
         </NavLink>
         <PrimaryNavigation />
         {location.pathname === "/projects" ? (

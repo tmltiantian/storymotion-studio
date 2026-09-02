@@ -331,6 +331,14 @@ beforeEach(() => {
 });
 
 describe("project review workspace", () => {
+  it("groups the current stage and review actions in the creator console", async () => {
+    renderWorkspace();
+
+    expect(await screen.findByRole("complementary", { name: "创作控制台" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "分镜成果" })).toBeVisible();
+    expect(screen.getByText("阶段审核", { exact: true })).toBeVisible();
+  });
+
   it("runs a pending stage through the production job contract and reloads its revision", async () => {
     const user = userEvent.setup();
     const pending = stageFixture({

@@ -6,13 +6,13 @@
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   letter-spacing: 0;
-  --canvas: #f4f6f5;
+  --canvas: #f3f5f7;
   --surface: #ffffff;
-  --ink: #17201e;
+  --ink: #17212d;
   --steel: #5f6b68;
   --rule: #d8dedc;
   --rule-strong: #bcc6c2;
-  --operation: #2563eb;
+  --operation: #4868ff;
   --operation-soft: #eaf1ff;
   --passed: #17824b;
   --passed-soft: #e8f5ed;

@@ -542,6 +542,13 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
             });
           }}
         />
+      </div>
+
+      <aside className="creator-console" aria-label="创作控制台">
+        <div className="creator-console-heading">
+          <p className="eyebrow">CREATOR CONSOLE</p>
+          <span>当前阶段 · {stageLabel(stage.stage)}</span>
+        </div>
         {trackedStageJobId ? (
           <section className="stage-run-control" aria-label="阶段执行">
             <div>
@@ -587,9 +594,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
             workspace={state.videoWorkspace}
           />
         ) : null}
-      </div>
-
-      <ReviewPanel
+        <ReviewPanel
         key={`${stage.stage}-${stage.revision}-${stage.review_evidence.map((item) => item.artifact_id).join("-")}`}
         stage={stage}
         pending={mutationPending}
@@ -622,7 +627,8 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
           impactTriggerRef.current = trigger;
           setImpactDraft({ request, issueLabel, description, trigger });
         }}
-      />
+        />
+      </aside>
 
       {impactDraft ? (
         <ImpactDialog
