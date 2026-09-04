@@ -746,6 +746,41 @@ describe("project review workspace", () => {
     expect(api.testVideo).not.toHaveBeenCalled();
   });
 
+  it.each(["queued", "running"] as const)(
+    "reconnects to a persisted %s video job without opening generation settings",
+    async (status) => {
+      const selected = videoStageFixture();
+      const api = workspaceApi(selected, projectFixture(selected));
+      const persisted = videoJob(status);
+      vi.mocked(api.getVideoWorkspace).mockResolvedValue(videoWorkspaceFixture(persisted));
+      vi.mocked(api.getJob).mockImplementation(() => new Promise(() => undefined));
+
+      renderWorkspace(api, "/projects/episode_01/stages/video");
+
+      expect(await screen.findByRole("button", { name: /生成设置/ }))
+        .toHaveAttribute("aria-expanded", "true");
+      expect(await screen.findByText("正在恢复作业状态")).toBeVisible();
+      expect(api.getJob).toHaveBeenCalledWith(persisted.job_id);
+    },
+  );
+
+  it("shows persisted failed-video recovery without opening generation settings", async () => {
+    const selected = videoStageFixture();
+    const api = workspaceApi(selected, projectFixture(selected));
+    const failed = videoJob("failed");
+    vi.mocked(api.getVideoWorkspace).mockResolvedValue(videoWorkspaceFixture(failed, {
+      mode: "poll_only",
+      shot_ids: ["shot_03", "shot_04"],
+    }));
+
+    renderWorkspace(api, "/projects/episode_01/stages/video");
+
+    expect(await screen.findByRole("button", { name: /生成设置/ }))
+      .toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByRole("region", { name: "生成恢复" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "恢复生成" })).toBeEnabled();
+  });
+
   it("opens video settings for a creator recovery task", async () => {
     const selected = videoStageFixture();
     selected.execution_state = "failed";
@@ -800,14 +835,20 @@ describe("project review workspace", () => {
     expect((await screen.findByRole("region", { name: "本次生成确认" }))).toHaveTextContent("1 个镜头 · 5 秒");
   });
 
-  it("reinitializes the generation summary from an authoritative workspace reload", async () => {
+  it("reinitializes generation selection and preflight from an authoritative workspace reload", async () => {
     const selected = videoStageFixture();
     const initialApi = workspaceApi(selected, projectFixture(selected));
     const refreshedApi = workspaceApi(selected, projectFixture(selected));
+    const refreshedPreflight = videoPreflightFixture();
+    refreshedPreflight.shot_ids = ["shot_04"];
+    refreshedPreflight.shots = [{ shot_id: "shot_04", duration: 4, resolution: "768P" }];
+    refreshedPreflight.output_seconds = 4;
+    refreshedPreflight.estimated_cost_yuan = 2;
     vi.mocked(refreshedApi.getVideoWorkspace).mockResolvedValue({
       ...videoWorkspaceFixture(),
       selected_shot_ids: ["shot_04"],
     });
+    vi.mocked(refreshedApi.preflightVideo).mockResolvedValue(refreshedPreflight);
     const user = userEvent.setup();
     const { rerender } = render(
       <WorkspaceTestTree api={initialApi} route="/projects/episode_01/stages/video" />,
@@ -821,6 +862,18 @@ describe("project review workspace", () => {
     rerender(<WorkspaceTestTree api={refreshedApi} route="/projects/episode_01/stages/video" />);
 
     await waitFor(() => expect(generationSettings).toHaveTextContent("1 个镜头 · 4 秒"));
+    const shots = screen.getByRole("group", { name: "生成镜头" });
+    expect(within(shots).getByRole("checkbox", { name: /第 1 镜/ })).not.toBeChecked();
+    expect(within(shots).getByRole("checkbox", { name: /第 2 镜/ })).toBeChecked();
+    await waitFor(() => expect(refreshedApi.preflightVideo).toHaveBeenLastCalledWith(
+      "episode_01",
+      ["shot_04"],
+    ));
+    await user.click(screen.getByRole("button", { name: "检查本次生成" }));
+    expect(await screen.findByRole("region", { name: "本次生成确认" }))
+      .toHaveTextContent("1 个镜头 · 4 秒");
+    await user.click(screen.getByRole("button", { name: "确认并提交生成" }));
+    expect(refreshedApi.confirmVideo).toHaveBeenCalledWith("episode_01", ["shot_04"]);
   });
 
   it.each([
@@ -1324,11 +1377,12 @@ describe("project review workspace", () => {
     expect(await screen.findByText("已退回修改")).toBeVisible();
   });
 
-  it("offers a rerun for a persisted whole-stage change request", async () => {
+  it("foregrounds persisted change feedback before offering a rerun", async () => {
     const changed = {
       ...stageFixture(),
       review_state: "changes_requested" as const,
       review_blocks_progress: true,
+      blocked_reasons: ["[整体成果需调整] 镜头语言需要整体调整。"],
     };
     const api = workspaceApi(changed, projectFixture(changed, {
       required_action: "address_review_changes",
@@ -1336,7 +1390,17 @@ describe("project review workspace", () => {
 
     renderWorkspace(api);
 
-    expect(await screen.findByRole("button", { name: "重新运行分镜阶段" })).toBeEnabled();
+    const feedback = await screen.findByRole("button", { name: /查看修改反馈/ });
+    expect(feedback).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("button", { name: "重新运行分镜阶段" })).not.toBeInTheDocument();
+
+    await userEvent.click(feedback);
+
+    const reason = screen.getByText("[整体成果需调整] 镜头语言需要整体调整。");
+    const rerun = screen.getByRole("button", { name: "重新运行分镜阶段" });
+    expect(reason).toBeVisible();
+    expect(rerun).toBeEnabled();
+    expect(reason.compareDocumentPosition(rerun) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("recovers controls after a failed stage-level mutation", async () => {

@@ -192,8 +192,10 @@ export function ReviewPanel({
 
           {stage.blocked_reasons.length > 0 ? (
             <div className="review-reasons">
-              <strong>下一步</strong>
-              <p>{creatorBlockedMessage(stage)}</p>
+              <strong>{stage.review_state === "changes_requested" ? "修改反馈" : "下一步"}</strong>
+              {stage.review_state === "changes_requested"
+                ? stage.blocked_reasons.map((reason) => <p key={reason}>{reason}</p>)
+                : <p>{creatorBlockedMessage(stage)}</p>}
             </div>
           ) : null}
         </>

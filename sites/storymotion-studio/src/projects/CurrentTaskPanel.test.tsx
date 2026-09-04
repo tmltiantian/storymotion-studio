@@ -63,5 +63,6 @@ describe("CurrentTaskPanel", () => {
 
     expect(screen.getByRole("link", { name: "回到当前任务" }))
       .toHaveAttribute("href", "/projects/episode_01/stages/storyboard");
+    expect(screen.getByText("正在查看剧本；项目当前停在分镜")).toBeVisible();
   });
 });

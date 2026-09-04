@@ -569,6 +569,11 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
     const outputSeconds = selectedShots.reduce((total, shot) => total + shot.duration_seconds, 0);
     return `${selectedShots.length} 个镜头 · ${outputSeconds} 秒`;
   })() : "";
+  const videoWorkspaceIdentity = videoWorkspaceSelectionKey(project, stage, state.videoWorkspace);
+  const persistedVideoJobNeedsAttention = Boolean(
+    state.videoWorkspace?.job
+    && ["queued", "running", "failed"].includes(state.videoWorkspace.job.status),
+  );
 
   async function runSelectedStage() {
     if (!canRunStage || stageRun.status === "submitting" || stageRun.status === "running") return;
@@ -626,6 +631,30 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
     setImpactDraft({ request, issueLabel, description, trigger });
   }
 
+  const stageRunControl = canRunStage ? (
+    <section className="stage-run-control" aria-label="阶段执行">
+      <div>
+        <strong>准备生成本阶段成果</strong>
+        <span>本机执行不会开启收费视频生成。</span>
+      </div>
+      <button
+        className="command-button"
+        type="button"
+        disabled={stageRun.status === "submitting"}
+        onClick={() => void runSelectedStage()}
+      >
+        {stageRun.status === "submitting" ? (
+          <LoaderCircle className="loading-icon" aria-hidden="true" size={16} />
+        ) : (
+          <Play aria-hidden="true" size={16} />
+        )}
+        {stageRun.status === "submitting"
+          ? `正在运行${stageLabel(stage.stage)}`
+          : `${stage.execution_state === "failed" || stage.execution_state === "stale" || stage.review_state === "changes_requested" ? "重新" : ""}运行${stageLabel(stage.stage)}阶段`}
+      </button>
+    </section>
+  ) : null;
+
   let primaryControl: ReactNode = null;
   if (trackedStageJobId) {
     primaryControl = (
@@ -643,15 +672,35 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
         />
       </section>
     );
+  } else if (task.status === "changes" && stage.stage !== "video") {
+    primaryControl = (
+      <ExpandablePanel
+        title="查看修改反馈"
+        summary="先核对反馈，再重新运行"
+        tone="changes"
+      >
+        <ReviewPanel
+          key={`${reviewKey}-primary-feedback`}
+          stage={stage}
+          pending={mutationPending}
+          issueDraft={reviewIssue}
+          mode="details"
+          onApprove={approveCurrentStage}
+          onRequestStageChanges={requestCurrentStageChanges}
+          onOpenImpact={openImpact}
+        />
+        {stageRunControl}
+      </ExpandablePanel>
+    );
   } else if (stage.stage === "video" && state.videoWorkspace) {
     primaryControl = (
       <ExpandablePanel
         title="生成设置"
         summary={videoSettingsSummary}
-        defaultOpen={task.status === "recovery"}
+        defaultOpen={task.status === "recovery" || persistedVideoJobNeedsAttention}
       >
         <VideoGenerationWorkspace
-          key={`${project.project_id}:${state.videoWorkspace.job?.job_id ?? "new"}`}
+          key={videoWorkspaceIdentity}
           api={api}
           projectId={project.project_id}
           workspace={state.videoWorkspace}
@@ -659,30 +708,8 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
         />
       </ExpandablePanel>
     );
-  } else if (canRunStage) {
-    primaryControl = (
-      <section className="stage-run-control" aria-label="阶段执行">
-        <div>
-          <strong>准备生成本阶段成果</strong>
-          <span>本机执行不会开启收费视频生成。</span>
-        </div>
-        <button
-          className="command-button"
-          type="button"
-          disabled={stageRun.status === "submitting"}
-          onClick={() => void runSelectedStage()}
-        >
-          {stageRun.status === "submitting" ? (
-            <LoaderCircle className="loading-icon" aria-hidden="true" size={16} />
-          ) : (
-            <Play aria-hidden="true" size={16} />
-          )}
-          {stageRun.status === "submitting"
-            ? `正在运行${stageLabel(stage.stage)}`
-            : `${stage.execution_state === "failed" || stage.execution_state === "stale" || stage.review_state === "changes_requested" ? "重新" : ""}运行${stageLabel(stage.stage)}阶段`}
-        </button>
-      </section>
-    );
+  } else if (stageRunControl) {
+    primaryControl = stageRunControl;
   } else if (task.status === "review") {
     primaryControl = (
       <ReviewPanel

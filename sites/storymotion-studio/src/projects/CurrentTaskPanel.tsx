@@ -28,6 +28,9 @@ export function CurrentTaskPanel({
     && project.next_stage !== "complete"
     && project.next_stage !== stage.stage
   );
+  const context = showReturnToCurrentTask
+    ? `正在查看${stageLabel(stage.stage)}；项目当前停在${stageLabel(project.next_stage)}`
+    : `${project.title} · ${stageLabel(stage.stage)}`;
 
   return (
     <section
@@ -36,8 +39,8 @@ export function CurrentTaskPanel({
     >
       <header className="current-task-heading">
         <div>
-          <p className="eyebrow">当前任务</p>
-          <p className="current-task-context">{project.title} · {stageLabel(stage.stage)}</p>
+          <p className="eyebrow">{showReturnToCurrentTask ? "正在查看" : "当前任务"}</p>
+          <p className="current-task-context">{context}</p>
         </div>
         {showReturnToCurrentTask ? (
           <Link
