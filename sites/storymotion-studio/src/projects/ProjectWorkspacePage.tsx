@@ -157,10 +157,12 @@ function VideoGenerationWorkspace({
   api,
   projectId,
   workspace,
+  onSelectedShotIdsChange,
 }: {
   api: ProjectWorkspaceApi;
   projectId: string;
   workspace: VideoWorkspace;
+  onSelectedShotIdsChange: (shotIds: string[]) => void;
 }) {
   const [selectedShotIds, setSelectedShotIds] = useState(
     () => workspace.selected_shot_ids,
@@ -181,6 +183,7 @@ function VideoGenerationWorkspace({
       (authoritative) => {
         if (controller.signal.aborted || classificationControllerRef.current !== controller) return;
         setSelectedShotIds(authoritative.selected_shot_ids);
+        onSelectedShotIdsChange(authoritative.selected_shot_ids);
         setFailedRecovery(authoritative.failed_job_recovery);
         setJob(authoritative.job ? {
           job_id: authoritative.job.job_id,
@@ -195,7 +198,7 @@ function VideoGenerationWorkspace({
         }
       },
     );
-  }, [api, projectId]);
+  }, [api, onSelectedShotIdsChange, projectId]);
   useEffect(() => () => classificationControllerRef.current?.abort(), []);
   const updateJob = useCallback((next: JobDetail) => {
     const previous = trackedStatusRef.current;
@@ -221,6 +224,13 @@ function VideoGenerationWorkspace({
         ? "此作业需重新确认后提交"
         : ""
     : "";
+  const recoveryGuidance = failedRecovery?.mode === "poll_only"
+    ? "恢复会继续现有作业，不会重新提交或重复计费。"
+    : failedRecovery?.mode === "new_submission_required"
+      ? "此作业不能恢复；请检查本次生成，完成新的预检和明确确认后再提交。"
+      : failedRecovery?.mode === "historical"
+        ? "历史作业与当前修订不一致；请检查本次生成，完成新的预检和明确确认后再提交。"
+        : "请重新检查当前生成状态，再决定下一步。";
   const resumeFailedJob = async () => {
     if (!job || resumePending || failedRecovery?.mode !== "poll_only") return;
     setResumePending(true);
@@ -252,13 +262,15 @@ function VideoGenerationWorkspace({
             <input
               type="checkbox"
               checked={selectedShotIds.includes(shot.shot_id)}
-              onChange={() => setSelectedShotIds((current) => (
-                current.includes(shot.shot_id)
-                  ? current.filter((item) => item !== shot.shot_id)
+              onChange={() => {
+                const next = selectedShotIds.includes(shot.shot_id)
+                  ? selectedShotIds.filter((item) => item !== shot.shot_id)
                   : workspace.shots
-                    .filter((item) => [...current, shot.shot_id].includes(item.shot_id))
-                    .map((item) => item.shot_id)
-              ))}
+                    .filter((item) => [...selectedShotIds, shot.shot_id].includes(item.shot_id))
+                    .map((item) => item.shot_id);
+                setSelectedShotIds(next);
+                onSelectedShotIdsChange(next);
+              }}
             />
             <span>第 {index + 1} 镜</span>
             <time>{shot.duration_seconds.toFixed(2)} 秒</time>
@@ -278,7 +290,7 @@ function VideoGenerationWorkspace({
           {recoveryLabel ? <p className="job-history-label">{recoveryLabel}</p> : null}
           <section className="video-job-recovery" aria-label="生成恢复">
             <strong>本次生成没有完成</strong>
-            <p>恢复会继续现有作业，不会重新提交或重复计费。</p>
+            <p>{recoveryGuidance}</p>
             {classificationState === "idle" && failedRecovery?.mode === "poll_only" ? (
               <button className="text-button" type="button" disabled={resumePending} onClick={() => void resumeFailedJob()}>
                 <RefreshCw aria-hidden="true" size={15} />{resumePending ? "正在恢复" : "恢复生成"}
@@ -321,6 +333,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
   const [impactDraft, setImpactDraft] = useState<ImpactDraft | null>(null);
   const [reviewIssue, setReviewIssue] = useState<ReviewIssueDraft | null>(null);
   const [stageRun, setStageRun] = useState<StageRunState>({ status: "idle" });
+  const [videoSelectedShotIds, setVideoSelectedShotIds] = useState<string[] | null>(null);
   const impactTriggerRef = useRef<HTMLElement>(null);
   const loadGeneration = useRef(0);
   const loadController = useRef<AbortController | null>(null);
@@ -530,7 +543,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
     selectedRouteStage !== undefined && selectedStage !== project.next_stage
   );
   const videoSettingsSummary = state.videoWorkspace ? (() => {
-    const selectedShotIds = new Set(state.videoWorkspace.selected_shot_ids);
+    const selectedShotIds = new Set(videoSelectedShotIds ?? state.videoWorkspace.selected_shot_ids);
     const selectedShots = state.videoWorkspace.shots.filter((shot) => selectedShotIds.has(shot.shot_id));
     const outputSeconds = selectedShots.reduce((total, shot) => total + shot.duration_seconds, 0);
     return `${selectedShots.length} 个镜头 · ${outputSeconds} 秒`;
@@ -621,6 +634,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
           api={api}
           projectId={project.project_id}
           workspace={state.videoWorkspace}
+          onSelectedShotIdsChange={setVideoSelectedShotIds}
         />
       </ExpandablePanel>
     );

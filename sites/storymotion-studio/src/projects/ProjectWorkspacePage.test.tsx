@@ -758,6 +758,49 @@ describe("project review workspace", () => {
   });
 
   it.each([
+    ["new_submission_required", "此作业不能恢复；请检查本次生成，完成新的预检和明确确认后再提交。"],
+    ["historical", "历史作业与当前修订不一致；请检查本次生成，完成新的预检和明确确认后再提交。"],
+  ] as const)("requires a new preflight and explicit confirmation for %s recovery", async (mode, guidance) => {
+    const selected = videoStageFixture();
+    const api = workspaceApi(selected, projectFixture(selected));
+    vi.mocked(api.getVideoWorkspace).mockResolvedValue(videoWorkspaceFixture(videoJob("failed"), {
+      mode,
+      shot_ids: ["shot_03"],
+    }));
+    renderWorkspace(api, "/projects/episode_01/stages/video");
+
+    await expandWorkspacePanel(/生成设置/);
+    const recovery = await screen.findByRole("region", { name: "生成恢复" });
+    expect(recovery).toHaveTextContent(guidance);
+    expect(recovery).not.toHaveTextContent("不会重新提交或重复计费");
+    expect(await screen.findByText("视频生成预检")).toBeVisible();
+  });
+
+  it("keeps the generation summary aligned with edited shots and the confirmation", async () => {
+    const selected = videoStageFixture();
+    const api = workspaceApi(selected, projectFixture(selected));
+    const oneShotPreflight = videoPreflightFixture();
+    oneShotPreflight.shot_ids = ["shot_03"];
+    oneShotPreflight.shots = [{ shot_id: "shot_03", duration: 5, resolution: "768P" }];
+    oneShotPreflight.output_seconds = 5;
+    oneShotPreflight.estimated_cost_yuan = 2.5;
+    vi.mocked(api.preflightVideo).mockImplementation(async (_projectId, shotIds) => (
+      shotIds.length === 1 ? oneShotPreflight : videoPreflightFixture()
+    ));
+    const user = userEvent.setup();
+    renderWorkspace(api, "/projects/episode_01/stages/video");
+
+    const generationSettings = await screen.findByRole("button", { name: /生成设置/ });
+    expect(generationSettings).toHaveTextContent("2 个镜头 · 9 秒");
+    await user.click(generationSettings);
+    await user.click(screen.getByRole("checkbox", { name: /第 2 镜/ }));
+
+    await waitFor(() => expect(generationSettings).toHaveTextContent("1 个镜头 · 5 秒"));
+    await user.click(screen.getByRole("button", { name: "检查本次生成" }));
+    expect((await screen.findByRole("region", { name: "本次生成确认" }))).toHaveTextContent("1 个镜头 · 5 秒");
+  });
+
+  it.each([
     ["poll_only", "恢复生成"],
     ["new_submission_required", "视频生成预检"],
   ] as const)(
