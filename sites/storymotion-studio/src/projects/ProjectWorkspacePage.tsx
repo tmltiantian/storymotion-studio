@@ -112,6 +112,19 @@ function mutationMessage(error: unknown): WorkspaceMessage {
   return { text: "审核操作未能完成，请检查制作服务后重试。", tone: "error" };
 }
 
+function videoWorkspaceSelectionKey(
+  project: ProjectDetail,
+  stage: StageDetail,
+  workspace: VideoWorkspace | null,
+): string {
+  return workspace ? JSON.stringify({
+    project_id: project.project_id,
+    stage: stage.stage,
+    stage_revision: stage.revision,
+    workspace,
+  }) : "";
+}
+
 function ArtifactWorkspace({
   stage,
   onIssueAtTime,
@@ -334,6 +347,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
   const [reviewIssue, setReviewIssue] = useState<ReviewIssueDraft | null>(null);
   const [stageRun, setStageRun] = useState<StageRunState>({ status: "idle" });
   const [videoSelectedShotIds, setVideoSelectedShotIds] = useState<string[] | null>(null);
+  const videoWorkspaceSelectionKeyRef = useRef("");
   const impactTriggerRef = useRef<HTMLElement>(null);
   const loadGeneration = useRef(0);
   const loadController = useRef<AbortController | null>(null);
@@ -392,6 +406,11 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
       if (videoWorkspace && videoWorkspace.project_id !== project.project_id) {
         throw new Error("Video workspace response mismatch");
       }
+      const nextVideoWorkspaceSelectionKey = videoWorkspaceSelectionKey(project, stage, videoWorkspace);
+      if (videoWorkspaceSelectionKeyRef.current !== nextVideoWorkspaceSelectionKey) {
+        videoWorkspaceSelectionKeyRef.current = nextVideoWorkspaceSelectionKey;
+        setVideoSelectedShotIds(null);
+      }
       setState({ status: "ready", project, stage, videoWorkspace });
     } catch (error) {
       if (!mountedRef.current || generation !== loadGeneration.current) return;
@@ -413,6 +432,8 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
       stageRunGenerationRef.current += 1;
       handledStageRunRef.current = "";
       setStageRun({ status: "idle" });
+      videoWorkspaceSelectionKeyRef.current = "";
+      setVideoSelectedShotIds(null);
       if (!invalidStageRoute) void load(false);
     });
     return () => {

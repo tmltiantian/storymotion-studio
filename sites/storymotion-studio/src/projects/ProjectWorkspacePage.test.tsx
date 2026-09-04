@@ -800,6 +800,29 @@ describe("project review workspace", () => {
     expect((await screen.findByRole("region", { name: "本次生成确认" }))).toHaveTextContent("1 个镜头 · 5 秒");
   });
 
+  it("reinitializes the generation summary from an authoritative workspace reload", async () => {
+    const selected = videoStageFixture();
+    const initialApi = workspaceApi(selected, projectFixture(selected));
+    const refreshedApi = workspaceApi(selected, projectFixture(selected));
+    vi.mocked(refreshedApi.getVideoWorkspace).mockResolvedValue({
+      ...videoWorkspaceFixture(),
+      selected_shot_ids: ["shot_04"],
+    });
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <WorkspaceTestTree api={initialApi} route="/projects/episode_01/stages/video" />,
+    );
+
+    const generationSettings = await screen.findByRole("button", { name: /生成设置/ });
+    await user.click(generationSettings);
+    await user.click(screen.getByRole("checkbox", { name: /第 2 镜/ }));
+    await waitFor(() => expect(generationSettings).toHaveTextContent("1 个镜头 · 5 秒"));
+
+    rerender(<WorkspaceTestTree api={refreshedApi} route="/projects/episode_01/stages/video" />);
+
+    await waitFor(() => expect(generationSettings).toHaveTextContent("1 个镜头 · 4 秒"));
+  });
+
   it.each([
     ["poll_only", "恢复生成"],
     ["new_submission_required", "视频生成预检"],
