@@ -1,9 +1,8 @@
-import { AlertCircle, Check, FlaskConical, LoaderCircle, RefreshCw, Video } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertCircle, FlaskConical, LoaderCircle, RefreshCw, Video } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ApiClient } from "../api/client";
 import type {
-  ConfirmedVideoPreflight,
   JobAccepted,
   VideoGenerationRequest,
   VideoPreflight as VideoPreflightResult,
@@ -58,32 +57,29 @@ export function VideoPreflight({
   const currentSelectionRef = useRef(selectionKey);
   const [reload, setReload] = useState(0);
   const [state, setState] = useState<PreflightState>({ status: "loading", key: selectionKey });
-  const [confirmedIdentity, setConfirmedIdentity] = useState("");
+  const [showConfirmation, setShowConfirmation] = useState(false);
+  const [acceptedSubmission, setAcceptedSubmission] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [submitting, setSubmitting] = useState<SubmissionMode | null>(null);
   const [message, setMessage] = useState("");
   const loadGenerationRef = useRef(0);
   const confirmGenerationRef = useRef(0);
-  const confirmedEnvelopeRef = useRef<ConfirmedVideoPreflight | null>(null);
   const submissionRef = useRef(false);
+  const acceptedSubmissionRef = useRef(false);
 
   useEffect(() => {
     currentSelectionRef.current = selectionKey;
   }, [selectionKey]);
 
-  const clearConfirmation = useCallback(() => {
-    confirmedEnvelopeRef.current = null;
-    setConfirmedIdentity("");
-  }, []);
-
   useEffect(() => {
     const generation = ++loadGenerationRef.current;
     confirmGenerationRef.current += 1;
-    confirmedEnvelopeRef.current = null;
     let active = true;
     queueMicrotask(() => {
       if (!active || currentSelectionRef.current !== selectionKey) return;
-      setConfirmedIdentity("");
+      setShowConfirmation(false);
+      acceptedSubmissionRef.current = false;
+      setAcceptedSubmission(false);
       setConfirming(false);
       setMessage("");
       setState({ status: "loading", key: selectionKey });
@@ -108,21 +104,17 @@ export function VideoPreflight({
       active = false;
       loadGenerationRef.current += 1;
       confirmGenerationRef.current += 1;
-      confirmedEnvelopeRef.current = null;
     };
   }, [api, projectId, reload, selectedShotIds, selectionKey]);
 
   const current = state.key === selectionKey && state.status === "ready" ? state : null;
-  const canConfirm = Boolean(current?.value.ready && !confirming && !submitting);
-  const isConfirmed = Boolean(
-    current &&
-    confirmedIdentity === current.identity,
-  );
+  const canReview = Boolean(current && !confirming && !submitting);
+  const canSubmit = Boolean(current?.value.ready && !current.value.blockers.length && !confirming && !submitting && !acceptedSubmission);
   const testSelectionAllowed = selectedShotIds.length >= 1 && selectedShotIds.length <= 3;
 
-  const confirm = async () => {
-    if (!current || !canConfirm) return;
-    clearConfirmation();
+  const confirmAndSubmit = async (mode: SubmissionMode) => {
+    if (!current || !canSubmit || submissionRef.current || acceptedSubmissionRef.current) return;
+    submissionRef.current = true;
     const generation = ++confirmGenerationRef.current;
     const ownerSelection = selectionKey;
     const ownerIdentity = current.identity;
@@ -135,37 +127,17 @@ export function VideoPreflight({
         currentSelectionRef.current !== ownerSelection ||
         requestIdentity(envelope.generation_request) !== ownerIdentity
       ) return;
-      confirmedEnvelopeRef.current = envelope;
-      setConfirmedIdentity(ownerIdentity);
-    } catch (error) {
-      if (generation !== confirmGenerationRef.current || currentSelectionRef.current !== ownerSelection) return;
-      clearConfirmation();
-      if (errorCode(error) === "stale_confirmation") {
-        setMessage("确认信息已过期，正在重新检查。 ");
-        setReload((value) => value + 1);
-      } else {
-        setMessage(errorCode(error) === "busy" ? "项目正在处理，稍后重新检查。" : "费用确认未能完成，请重试。 ");
-      }
-    } finally {
-      if (generation === confirmGenerationRef.current) setConfirming(false);
-    }
-  };
-
-  const submit = async (mode: SubmissionMode) => {
-    const envelope = confirmedEnvelopeRef.current;
-    if (!current || !isConfirmed || !envelope || submissionRef.current) return;
-    submissionRef.current = true;
-    confirmedEnvelopeRef.current = null;
-    setConfirmedIdentity("");
-    setSubmitting(mode);
-    setMessage("");
-    try {
+      setConfirming(false);
+      setSubmitting(mode);
       const job = mode === "test"
         ? await api.testVideo(projectId, envelope)
         : await api.generateVideo(projectId, envelope);
+      acceptedSubmissionRef.current = true;
+      setAcceptedSubmission(true);
       onJobAccepted?.(job, mode);
       setMessage(mode === "test" ? "试生成作业已提交。" : "批量生成作业已提交。");
     } catch (error) {
+      if (generation !== confirmGenerationRef.current || currentSelectionRef.current !== ownerSelection) return;
       if (errorCode(error) === "stale_confirmation") {
         setMessage("生成输入已变化，请重新检查并确认。 ");
         setReload((value) => value + 1);
@@ -174,7 +146,10 @@ export function VideoPreflight({
       }
     } finally {
       submissionRef.current = false;
-      setSubmitting(null);
+      if (generation === confirmGenerationRef.current) {
+        setConfirming(false);
+        setSubmitting(null);
+      }
     }
   };
 
@@ -211,13 +186,32 @@ export function VideoPreflight({
       <div className="preflight-revisions" aria-label="输入修订">
         <span><strong>输入状态</strong>已核对 {Object.keys(value.revision_hashes).length} 项</span>
       </div>
-      {value.blockers.length ? <div className="preflight-blockers" role="status"><AlertCircle aria-hidden="true" size={15} />生成条件尚未满足，请重新检查当前阶段。</div> : null}
       {message ? <div className="preflight-message" role="status">{message}</div> : null}
       <div className="preflight-actions">
-        <button className="text-button" type="button" disabled={!canConfirm} onClick={() => void confirm()}><Check aria-hidden="true" size={15} />{confirming ? "正在确认" : "确认费用与输入"}</button>
-        <button className="text-button" type="button" title={testSelectionAllowed ? "试生成所选镜头" : "试生成需选择一至三个镜头"} disabled={!isConfirmed || !testSelectionAllowed || Boolean(submitting)} onClick={() => void submit("test")}><FlaskConical aria-hidden="true" size={15} />{submitting === "test" ? "正在提交" : "试生成所选镜头"}</button>
-        <button className="command-button" type="button" disabled={!isConfirmed || Boolean(submitting)} onClick={() => void submit("batch")}><Video aria-hidden="true" size={15} />{submitting === "batch" ? "正在提交" : "批量生成所选镜头"}</button>
+        <button className="command-button" type="button" disabled={!canReview} onClick={() => setShowConfirmation(true)}>检查本次生成</button>
       </div>
+      {showConfirmation ? (
+        <section className="video-confirmation-card" aria-label="本次生成确认">
+          <p className="eyebrow">本次生成确认</p>
+          <strong>{value.shot_ids.length} 个镜头 · {value.output_seconds} 秒</strong>
+          <dl>
+            <div><dt>服务商</dt><dd>{value.provider}</dd></div>
+            <div><dt>模型</dt><dd>{value.model}</dd></div>
+            <div><dt>预计费用</dt><dd>预计 ¥{value.estimated_cost_yuan.toFixed(2)}</dd></div>
+          </dl>
+          {value.blockers.length ? (
+            <div className="preflight-blockers" role="status">
+              <AlertCircle aria-hidden="true" size={15} />
+              <div><strong>暂不能提交生成</strong>{value.blockers.map((blocker) => <span key={blocker}>{blocker}</span>)}</div>
+            </div>
+          ) : (
+            <div className="preflight-actions">
+              <button className="text-button" type="button" title={testSelectionAllowed ? "试生成所选镜头" : "试生成需选择一至三个镜头"} disabled={!canSubmit || !testSelectionAllowed} onClick={() => void confirmAndSubmit("test")}><FlaskConical aria-hidden="true" size={15} />{submitting === "test" || confirming ? "正在提交" : "试生成所选镜头"}</button>
+              <button className="command-button" type="button" disabled={!canSubmit} onClick={() => void confirmAndSubmit("batch")}><Video aria-hidden="true" size={15} />{submitting === "batch" || confirming ? "正在提交" : "确认并提交生成"}</button>
+            </div>
+          )}
+        </section>
+      ) : null}
     </section>
   );
 }

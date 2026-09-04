@@ -168,6 +168,8 @@ function VideoGenerationWorkspace({
   const [job, setJob] = useState<Pick<JobDetail, "job_id" | "status"> | null>(workspace.job);
   const [failedRecovery, setFailedRecovery] = useState(workspace.failed_job_recovery);
   const [classificationState, setClassificationState] = useState<"idle" | "pending" | "error">("idle");
+  const [resumePending, setResumePending] = useState(false);
+  const [resumeMessage, setResumeMessage] = useState("");
   const trackedStatusRef = useRef<JobDetail["status"] | null>(workspace.job?.status ?? null);
   const classificationControllerRef = useRef<AbortController | null>(null);
   const loadAuthoritativeClassification = useCallback(() => {
@@ -219,6 +221,21 @@ function VideoGenerationWorkspace({
         ? "此作业需重新确认后提交"
         : ""
     : "";
+  const resumeFailedJob = async () => {
+    if (!job || resumePending || failedRecovery?.mode !== "poll_only") return;
+    setResumePending(true);
+    setResumeMessage("");
+    try {
+      const accepted = await api.resumeJob(job.job_id);
+      trackedStatusRef.current = accepted.status;
+      setJob(accepted);
+      setFailedRecovery(null);
+    } catch (error) {
+      setResumeMessage(errorCode(error) === "busy" ? "其他进程正在恢复此作业" : "恢复未能完成，请重试。");
+    } finally {
+      setResumePending(false);
+    }
+  };
 
   return (
     <section className="video-generation-workspace" aria-labelledby="video-generation-title">
@@ -248,7 +265,7 @@ function VideoGenerationWorkspace({
           </label>
         ))}
       </fieldset>
-      {job ? (
+      {job?.status === "failed" ? (
         <>
           {classificationState === "pending" ? (
             <p className="job-history-label" role="status">正在确认作业恢复方式</p>
@@ -259,17 +276,27 @@ function VideoGenerationWorkspace({
             </button>
           ) : null}
           {recoveryLabel ? <p className="job-history-label">{recoveryLabel}</p> : null}
-          <JobProgress
-            api={api}
-            jobId={job.job_id}
-            onJobChange={updateJob}
-            allowResume={
-              classificationState === "idle"
-              && failedRecovery?.mode === "poll_only"
-            }
-          />
+          <section className="video-job-recovery" aria-label="生成恢复">
+            <strong>本次生成没有完成</strong>
+            <p>恢复会继续现有作业，不会重新提交或重复计费。</p>
+            {classificationState === "idle" && failedRecovery?.mode === "poll_only" ? (
+              <button className="text-button" type="button" disabled={resumePending} onClick={() => void resumeFailedJob()}>
+                <RefreshCw aria-hidden="true" size={15} />{resumePending ? "正在恢复" : "恢复生成"}
+              </button>
+            ) : null}
+            {resumeMessage ? <p className="job-resume-message" role="alert">{resumeMessage}</p> : null}
+          </section>
         </>
       ) : null}
+      {activeJob ? (
+        <JobProgress
+          api={api}
+          jobId={job!.job_id}
+          onJobChange={updateJob}
+          allowResume={false}
+        />
+      ) : null}
+      {job?.status === "completed" ? <p className="job-history-label">上次生成已完成</p> : null}
       {!generationLocked ? (
         <VideoPreflight
           api={api}
@@ -502,6 +529,12 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
   const isDirectStageRoute = (
     selectedRouteStage !== undefined && selectedStage !== project.next_stage
   );
+  const videoSettingsSummary = state.videoWorkspace ? (() => {
+    const selectedShotIds = new Set(state.videoWorkspace.selected_shot_ids);
+    const selectedShots = state.videoWorkspace.shots.filter((shot) => selectedShotIds.has(shot.shot_id));
+    const outputSeconds = selectedShots.reduce((total, shot) => total + shot.duration_seconds, 0);
+    return `${selectedShots.length} 个镜头 · ${outputSeconds} 秒`;
+  })() : "";
 
   async function runSelectedStage() {
     if (!canRunStage || stageRun.status === "submitting" || stageRun.status === "running") return;
@@ -576,6 +609,21 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
         />
       </section>
     );
+  } else if (stage.stage === "video" && state.videoWorkspace) {
+    primaryControl = (
+      <ExpandablePanel
+        title="生成设置"
+        summary={videoSettingsSummary}
+        defaultOpen={task.status === "recovery"}
+      >
+        <VideoGenerationWorkspace
+          key={`${project.project_id}:${state.videoWorkspace.job?.job_id ?? "new"}`}
+          api={api}
+          projectId={project.project_id}
+          workspace={state.videoWorkspace}
+        />
+      </ExpandablePanel>
+    );
   } else if (canRunStage) {
     primaryControl = (
       <section className="stage-run-control" aria-label="阶段执行">
@@ -599,17 +647,6 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
             : `${stage.execution_state === "failed" || stage.execution_state === "stale" || stage.review_state === "changes_requested" ? "重新" : ""}运行${stageLabel(stage.stage)}阶段`}
         </button>
       </section>
-    );
-  } else if (stage.stage === "video" && state.videoWorkspace) {
-    primaryControl = (
-      <ExpandablePanel title="生成设置" summary="先检查镜头、费用与恢复状态">
-        <VideoGenerationWorkspace
-          key={`${project.project_id}:${state.videoWorkspace.job?.job_id ?? "new"}`}
-          api={api}
-          projectId={project.project_id}
-          workspace={state.videoWorkspace}
-        />
-      </ExpandablePanel>
     );
   } else if (task.status === "review") {
     primaryControl = (

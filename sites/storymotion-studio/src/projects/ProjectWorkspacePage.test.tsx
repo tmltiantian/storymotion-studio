@@ -693,6 +693,9 @@ describe("project review workspace", () => {
     const user = userEvent.setup();
     const first = renderWorkspace(api, "/projects/episode_01/stages/video");
 
+    const generationSettings = await screen.findByRole("button", { name: /生成设置/ });
+    expect(generationSettings).toHaveAttribute("aria-expanded", "false");
+    expect(generationSettings).toHaveTextContent("2 个镜头 · 9 秒");
     await expandWorkspacePanel(/生成设置/);
     expect(await screen.findByText("视频生成预检")).toBeVisible();
     const shots = screen.getByRole("group", { name: "生成镜头" });
@@ -701,8 +704,8 @@ describe("project review workspace", () => {
     expect(document.body).not.toHaveTextContent("shot_03");
     expect(document.body).not.toHaveTextContent("cccccccccc");
     expect(document.querySelector("code")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
-    await user.click(await screen.findByRole("button", { name: "批量生成所选镜头" }));
+    await user.click(screen.getByRole("button", { name: "检查本次生成" }));
+    await user.click(await screen.findByRole("button", { name: "确认并提交生成" }));
 
     expect(api.confirmVideo).toHaveBeenCalledWith("episode_01", ["shot_03", "shot_04"]);
     expect(api.generateVideo).toHaveBeenCalledTimes(1);
@@ -710,12 +713,12 @@ describe("project review workspace", () => {
       generation_token: "memory-only-token",
       generation_request: generationRequest(videoPreflightFixture()),
     });
-    expect(await screen.findByText("生成完成")).toBeVisible();
+    expect(await screen.findByText("上次生成已完成")).toBeVisible();
     first.unmount();
 
     renderWorkspace(api, "/projects/episode_01/stages/video");
     await expandWorkspacePanel(/生成设置/);
-    expect(await screen.findByText("生成完成")).toBeVisible();
+    expect(await screen.findByText("上次生成已完成")).toBeVisible();
     expect(api.getVideoWorkspace).toHaveBeenLastCalledWith("episode_01", expect.any(AbortSignal));
     expect(api.generateVideo).toHaveBeenCalledTimes(1);
   });
@@ -729,7 +732,7 @@ describe("project review workspace", () => {
       mode: "poll_only",
       shot_ids: ["shot_03", "shot_04"],
     }));
-    vi.mocked(api.getJob).mockResolvedValueOnce(failed).mockResolvedValue(running);
+    vi.mocked(api.getJob).mockResolvedValue(running);
     vi.mocked(api.resumeJob).mockResolvedValue({ job_id: failed.job_id, status: "queued" });
     const user = userEvent.setup();
     renderWorkspace(api, "/projects/episode_01/stages/video");
@@ -741,6 +744,17 @@ describe("project review workspace", () => {
     expect(await screen.findByText("生成中")).toBeVisible();
     expect(api.generateVideo).not.toHaveBeenCalled();
     expect(api.testVideo).not.toHaveBeenCalled();
+  });
+
+  it("opens video settings for a creator recovery task", async () => {
+    const selected = videoStageFixture();
+    selected.execution_state = "failed";
+    selected.review_state = "not_ready";
+    renderWorkspace(workspaceApi(selected, projectFixture(selected)), "/projects/episode_01/stages/video");
+
+    const generationSettings = await screen.findByRole("button", { name: /生成设置/ });
+    expect(generationSettings).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByText("视频生成")).toBeVisible();
   });
 
   it.each([
@@ -812,8 +826,8 @@ describe("project review workspace", () => {
     expect(await screen.findByText(historyLabel)).toBeVisible();
     expect(await screen.findByText("视频生成预检")).toBeVisible();
     expect(screen.queryByRole("button", { name: "恢复生成" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
-    await user.click(await screen.findByRole("button", { name: "批量生成所选镜头" }));
+    await user.click(screen.getByRole("button", { name: "检查本次生成" }));
+    await user.click(await screen.findByRole("button", { name: "确认并提交生成" }));
 
     expect(api.generateVideo).toHaveBeenCalledTimes(1);
     expect(api.resumeJob).not.toHaveBeenCalled();

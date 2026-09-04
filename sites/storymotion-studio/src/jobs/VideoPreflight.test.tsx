@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -63,7 +63,44 @@ afterEach(() => {
 });
 
 describe("VideoPreflight paid gate", () => {
-  it("requires a fresh confirmation before batch generation", async () => {
+  it("summarizes model, duration, shots and estimated cost before accepting a paid submission", async () => {
+    const user = userEvent.setup();
+    const client = api(estimate({
+      shot_ids: ["shot_03", "shot_04"],
+      shots: [
+        { shot_id: "shot_03", duration: 5, resolution: "768P" },
+        { shot_id: "shot_04", duration: 4, resolution: "768P" },
+      ],
+      provider: "minimax",
+      model: "MiniMax-H3",
+      output_seconds: 9,
+      estimated_cost_yuan: 4.5,
+    }));
+    render(<VideoPreflight api={client} projectId="episode_01" shotIds={["shot_03", "shot_04"]} onJobAccepted={vi.fn()} />);
+
+    await user.click(await screen.findByRole("button", { name: "检查本次生成" }));
+
+    const card = await screen.findByRole("region", { name: "本次生成确认" });
+    expect(within(card).getByText("2 个镜头 · 9 秒")).toBeVisible();
+    expect(within(card).getByText("MiniMax-H3")).toBeVisible();
+    expect(within(card).getByText("minimax")).toBeVisible();
+    expect(within(card).getByText("预计 ¥4.50")).toBeVisible();
+    expect(within(card).getByRole("button", { name: "确认并提交生成" })).toBeEnabled();
+  });
+
+  it("keeps blocked reasons in the confirmation card without a submit action", async () => {
+    const user = userEvent.setup();
+    const client = api(estimate({ ready: false, blockers: ["分镜修订已变化"] }));
+    render(<VideoPreflight api={client} projectId="episode_01" shotIds={["shot_02", "shot_03"]} />);
+
+    await user.click(await screen.findByRole("button", { name: "检查本次生成" }));
+
+    const card = await screen.findByRole("region", { name: "本次生成确认" });
+    expect(within(card).getByText("分镜修订已变化")).toBeVisible();
+    expect(within(card).queryByRole("button", { name: "确认并提交生成" })).not.toBeInTheDocument();
+  });
+
+  it("requires the visible confirmation step before batch generation", async () => {
     const user = userEvent.setup();
     const client = api();
     render(<VideoPreflight api={client} projectId="episode_01" shotIds={["shot_02", "shot_03"]} />);
@@ -73,11 +110,10 @@ describe("VideoPreflight paid gate", () => {
     expect(document.body).not.toHaveTextContent("shot_02");
     expect(document.body).not.toHaveTextContent("cccccccccc");
     expect(document.querySelector("code")).toBeNull();
-    const batch = screen.getByRole("button", { name: "批量生成所选镜头" });
-    expect(batch).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "确认并提交生成" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
-    expect(await screen.findByRole("button", { name: "批量生成所选镜头" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "检查本次生成" }));
+    expect(await screen.findByRole("button", { name: "确认并提交生成" })).toBeEnabled();
     expect(document.body).not.toHaveTextContent("secret-generation-token");
   });
 
@@ -89,8 +125,8 @@ describe("VideoPreflight paid gate", () => {
     render(<VideoPreflight api={client} projectId="episode_01" shotIds={canonical.shot_ids} />);
 
     await screen.findByText("¥18.14");
-    await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
-    const batch = await screen.findByRole("button", { name: "批量生成所选镜头" });
+    await user.click(screen.getByRole("button", { name: "检查本次生成" }));
+    const batch = await screen.findByRole("button", { name: "确认并提交生成" });
     await user.dblClick(batch);
 
     expect(client.generateVideo).toHaveBeenCalledTimes(1);
@@ -107,14 +143,14 @@ describe("VideoPreflight paid gate", () => {
     render(<VideoPreflight api={client} projectId="episode_01" shotIds={["shot_02", "shot_03"]} />);
 
     await screen.findByText("¥18.60");
-    await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
+    await user.click(screen.getByRole("button", { name: "检查本次生成" }));
     await user.click(screen.getByRole("button", { name: "试生成所选镜头" }));
 
     expect(client.testVideo).toHaveBeenCalledWith("episode_01", {
       generation_token: "secret-generation-token",
       generation_request: request(),
     });
-    expect(screen.getByRole("button", { name: "批量生成所选镜头" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认并提交生成" })).toBeDisabled();
   });
 
   it("keeps test generation disabled when more than three shots are selected", async () => {
@@ -133,21 +169,21 @@ describe("VideoPreflight paid gate", () => {
     render(<VideoPreflight api={client} projectId="episode_01" shotIds={canonical.shot_ids} />);
 
     await screen.findByText("已选择 4 个镜头");
-    await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
+    await user.click(screen.getByRole("button", { name: "检查本次生成" }));
 
     expect(screen.getByRole("button", { name: "试生成所选镜头" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "批量生成所选镜头" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "确认并提交生成" })).toBeEnabled();
   });
 
-  it("invalidates confirmation when selection or preflight identity changes", async () => {
+  it("hides a reviewed confirmation when selection or preflight identity changes", async () => {
     const user = userEvent.setup();
     const client = api();
     const { rerender } = render(
       <VideoPreflight api={client} projectId="episode_01" shotIds={["shot_02", "shot_03"]} />,
     );
     await screen.findByText("¥18.60");
-    await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
-    expect(screen.getByRole("button", { name: "批量生成所选镜头" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "检查本次生成" }));
+    expect(screen.getByRole("button", { name: "确认并提交生成" })).toBeEnabled();
 
     vi.mocked(client.preflightVideo).mockResolvedValueOnce(
       estimate({
@@ -162,7 +198,7 @@ describe("VideoPreflight paid gate", () => {
     rerender(<VideoPreflight api={client} projectId="episode_01" shotIds={["shot_03"]} />);
 
     expect(await screen.findByText("seedance-2-0")).toBeVisible();
-    expect(screen.getByRole("button", { name: "批量生成所选镜头" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "确认并提交生成" })).not.toBeInTheDocument();
     expect(client.preflightVideo).toHaveBeenLastCalledWith("episode_01", ["shot_03"]);
   });
 
@@ -177,7 +213,8 @@ describe("VideoPreflight paid gate", () => {
       <VideoPreflight api={client} projectId="episode_01" shotIds={["shot_02", "shot_03"]} />,
     );
     await screen.findByText("¥18.60");
-    await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
+    await user.click(screen.getByRole("button", { name: "检查本次生成" }));
+    await user.click(screen.getByRole("button", { name: "确认并提交生成" }));
     vi.mocked(client.preflightVideo).mockResolvedValueOnce(
       estimate({ shot_ids: ["shot_03"], shots: [request().shots[1]], output_seconds: 6 }),
     );
@@ -185,10 +222,11 @@ describe("VideoPreflight paid gate", () => {
     await act(async () => resolveConfirm(confirmed()));
 
     await screen.findByText("已选择 1 个镜头");
-    expect(screen.getByRole("button", { name: "批量生成所选镜头" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "确认并提交生成" })).not.toBeInTheDocument();
+    expect(client.generateVideo).not.toHaveBeenCalled();
   });
 
-  it("requires a new preflight after stale confirmation and keeps blockers disabled", async () => {
+  it("requires a new preflight after stale confirmation and keeps blockers from submitting", async () => {
     const user = userEvent.setup();
     const client = api();
     vi.mocked(client.confirmVideo).mockRejectedValueOnce(
@@ -200,12 +238,13 @@ describe("VideoPreflight paid gate", () => {
     render(<VideoPreflight api={client} projectId="episode_01" shotIds={["shot_02", "shot_03"]} />);
 
     await screen.findByText("¥18.60");
-    await user.click(screen.getByRole("button", { name: "确认费用与输入" }));
+    await user.click(screen.getByRole("button", { name: "检查本次生成" }));
+    await user.click(screen.getByRole("button", { name: "确认并提交生成" }));
 
-    expect(await screen.findByText("生成条件尚未满足，请重新检查当前阶段。")).toBeVisible();
-    expect(screen.queryByText("分镜修订已变化")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "确认费用与输入" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "批量生成所选镜头" })).toBeDisabled();
     await waitFor(() => expect(client.preflightVideo).toHaveBeenCalledTimes(2));
+    await user.click(await screen.findByRole("button", { name: "检查本次生成" }));
+    const card = await screen.findByRole("region", { name: "本次生成确认" });
+    expect(within(card).getByText("分镜修订已变化")).toBeVisible();
+    expect(within(card).queryByRole("button", { name: "确认并提交生成" })).not.toBeInTheDocument();
   });
 });
