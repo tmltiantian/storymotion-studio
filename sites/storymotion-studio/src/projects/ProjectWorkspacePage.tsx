@@ -58,7 +58,13 @@ export type ProjectWorkspaceApi = Pick<
 
 type WorkspaceState =
   | { status: "loading" }
-  | { status: "ready"; project: ProjectDetail; stage: StageDetail; videoWorkspace: VideoWorkspace | null }
+  | {
+    status: "ready";
+    project: ProjectDetail;
+    stage: StageDetail;
+    videoWorkspace: VideoWorkspace | null;
+    authoritativeLoad: number;
+  }
   | { status: "busy" }
   | { status: "error" };
 
@@ -110,19 +116,6 @@ function mutationMessage(error: unknown): WorkspaceMessage {
     return { text: "成果修订已变化，已重新载入当前版本。", tone: "neutral" };
   }
   return { text: "审核操作未能完成，请检查制作服务后重试。", tone: "error" };
-}
-
-function videoWorkspaceSelectionKey(
-  project: ProjectDetail,
-  stage: StageDetail,
-  workspace: VideoWorkspace | null,
-): string {
-  return workspace ? JSON.stringify({
-    project_id: project.project_id,
-    stage: stage.stage,
-    stage_revision: stage.revision,
-    workspace,
-  }) : "";
 }
 
 function ArtifactWorkspace({
@@ -347,7 +340,6 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
   const [reviewIssue, setReviewIssue] = useState<ReviewIssueDraft | null>(null);
   const [stageRun, setStageRun] = useState<StageRunState>({ status: "idle" });
   const [videoSelectedShotIds, setVideoSelectedShotIds] = useState<string[] | null>(null);
-  const videoWorkspaceSelectionKeyRef = useRef("");
   const impactTriggerRef = useRef<HTMLElement>(null);
   const loadGeneration = useRef(0);
   const loadController = useRef<AbortController | null>(null);
@@ -406,12 +398,14 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
       if (videoWorkspace && videoWorkspace.project_id !== project.project_id) {
         throw new Error("Video workspace response mismatch");
       }
-      const nextVideoWorkspaceSelectionKey = videoWorkspaceSelectionKey(project, stage, videoWorkspace);
-      if (videoWorkspaceSelectionKeyRef.current !== nextVideoWorkspaceSelectionKey) {
-        videoWorkspaceSelectionKeyRef.current = nextVideoWorkspaceSelectionKey;
-        setVideoSelectedShotIds(null);
-      }
-      setState({ status: "ready", project, stage, videoWorkspace });
+      setVideoSelectedShotIds(null);
+      setState({
+        status: "ready",
+        project,
+        stage,
+        videoWorkspace,
+        authoritativeLoad: generation,
+      });
     } catch (error) {
       if (!mountedRef.current || generation !== loadGeneration.current) return;
       setState({ status: errorCode(error) === "busy" ? "busy" : "error" });
@@ -432,7 +426,6 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
       stageRunGenerationRef.current += 1;
       handledStageRunRef.current = "";
       setStageRun({ status: "idle" });
-      videoWorkspaceSelectionKeyRef.current = "";
       setVideoSelectedShotIds(null);
       if (!invalidStageRoute) void load(false);
     });
@@ -569,7 +562,6 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
     const outputSeconds = selectedShots.reduce((total, shot) => total + shot.duration_seconds, 0);
     return `${selectedShots.length} 个镜头 · ${outputSeconds} 秒`;
   })() : "";
-  const videoWorkspaceIdentity = videoWorkspaceSelectionKey(project, stage, state.videoWorkspace);
   const persistedVideoJobNeedsAttention = Boolean(
     state.videoWorkspace?.job
     && ["queued", "running", "failed"].includes(state.videoWorkspace.job.status),
@@ -700,7 +692,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
         defaultOpen={task.status === "recovery" || persistedVideoJobNeedsAttention}
       >
         <VideoGenerationWorkspace
-          key={videoWorkspaceIdentity}
+          key={`${project.project_id}:${stage.stage}:${state.authoritativeLoad}`}
           api={api}
           projectId={project.project_id}
           workspace={state.videoWorkspace}

@@ -876,6 +876,32 @@ describe("project review workspace", () => {
     expect(refreshedApi.confirmVideo).toHaveBeenCalledWith("episode_01", ["shot_04"]);
   });
 
+  it("discards local video selection when reload returns the same authoritative workspace", async () => {
+    const selected = videoStageFixture();
+    const initialApi = workspaceApi(selected, projectFixture(selected));
+    const refreshedApi = workspaceApi(selected, projectFixture(selected));
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <WorkspaceTestTree api={initialApi} route="/projects/episode_01/stages/video" />,
+    );
+
+    const generationSettings = await screen.findByRole("button", { name: /生成设置/ });
+    await user.click(generationSettings);
+    await user.click(screen.getByRole("checkbox", { name: /第 2 镜/ }));
+    await waitFor(() => expect(generationSettings).toHaveTextContent("1 个镜头 · 5 秒"));
+
+    rerender(<WorkspaceTestTree api={refreshedApi} route="/projects/episode_01/stages/video" />);
+
+    await waitFor(() => expect(generationSettings).toHaveTextContent("2 个镜头 · 9 秒"));
+    const shots = screen.getByRole("group", { name: "生成镜头" });
+    expect(within(shots).getByRole("checkbox", { name: /第 1 镜/ })).toBeChecked();
+    expect(within(shots).getByRole("checkbox", { name: /第 2 镜/ })).toBeChecked();
+    await waitFor(() => expect(refreshedApi.preflightVideo).toHaveBeenLastCalledWith(
+      "episode_01",
+      ["shot_03", "shot_04"],
+    ));
+  });
+
   it.each([
     ["poll_only", "恢复生成"],
     ["new_submission_required", "视频生成预检"],
