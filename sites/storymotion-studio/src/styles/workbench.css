@@ -1589,6 +1589,96 @@
   border-left: 0;
 }
 
+.current-task-panel {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid var(--rule);
+  background: var(--surface);
+}
+
+.current-task-heading {
+  display: grid;
+  gap: 7px;
+}
+
+.current-task-heading > div {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.current-task-heading .eyebrow,
+.current-task-heading h2,
+.current-task-heading p {
+  margin: 0;
+}
+
+.current-task-heading h2 {
+  font-size: 17px;
+}
+
+.current-task-context,
+.current-task-heading > p,
+.current-task-next-step {
+  color: var(--steel);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.current-task-return {
+  justify-self: start;
+  color: var(--operation);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.expandable-panel > button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.expandable-panel > button > span {
+  display: grid;
+  gap: 3px;
+}
+
+.expandable-panel > button small {
+  color: var(--steel);
+  font-size: 10px;
+}
+
+.expandable-panel > button svg {
+  flex: 0 0 auto;
+  color: var(--steel);
+  transition: transform 160ms ease;
+}
+
+.expandable-panel > button[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.expandable-panel > [id] {
+  padding: 14px 0 2px;
+  border-top: 1px solid var(--rule);
+}
+
+.expandable-panel > button:focus-visible,
+.current-task-return:focus-visible {
+  outline: 2px solid var(--operation);
+  outline-offset: 4px;
+}
+
 .workspace-message {
   display: flex;
   min-height: 40px;
@@ -2705,4 +2795,9 @@
   .workspace-stage-nav .stage-dot { display: none; }
 
   .creator-console { border-top: 1px solid var(--rule); }
+
+  .current-task-panel .command-button,
+  .current-task-return {
+    width: 100%;
+  }
 }
