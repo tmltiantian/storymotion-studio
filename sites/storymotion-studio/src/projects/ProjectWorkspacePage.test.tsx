@@ -303,6 +303,14 @@ function renderWorkspace(
   return render(strict ? <StrictMode>{content}</StrictMode> : content);
 }
 
+async function expandWorkspacePanel(name: RegExp) {
+  const trigger = await screen.findByRole("button", { name });
+  if (trigger.getAttribute("aria-expanded") === "false") {
+    await userEvent.click(trigger);
+  }
+  return trigger;
+}
+
 function renderImpactDialog(api: ProjectWorkspaceApi) {
   return render(
     <>
@@ -331,12 +339,22 @@ beforeEach(() => {
 });
 
 describe("project review workspace", () => {
-  it("groups the current stage and review actions in the creator console", async () => {
+  it("puts the current task before the artifact preview and exposes one primary review action", async () => {
+    const user = userEvent.setup();
     renderWorkspace();
 
-    expect(await screen.findByRole("complementary", { name: "创作控制台" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "分镜成果" })).toBeVisible();
-    expect(screen.getByText("阶段审核", { exact: true })).toBeVisible();
+    expect(await screen.findByRole("region", { name: "当前任务" })).toBeVisible();
+    expect(screen.getByText("先检查分镜成果，再决定是否确认通过。")).toBeVisible();
+    expect(screen.getAllByRole("button", { name: /确认通过/ })).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: /审核与修改/ }));
+    expect(screen.getAllByRole("button", { name: /确认通过/ })).toHaveLength(1);
+  });
+
+  it("moves the stage map and review history into expandable controls", async () => {
+    renderWorkspace();
+
+    expect(await screen.findByRole("button", { name: /制作地图/ })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("button", { name: /审核与修改/ })).toBeVisible();
   });
 
   it("runs a pending stage through the production job contract and reloads its revision", async () => {
@@ -397,7 +415,7 @@ describe("project review workspace", () => {
     expect(client.runStage).toHaveBeenCalledWith("episode_01", "concept", { enable_live: false });
     expect(await screen.findByRole("heading", { name: "雨夜来电" })).toBeVisible();
     expect(screen.queryByText("concept.json")).not.toBeInTheDocument();
-    expect(screen.getAllByText("等待确认")[0]).toBeVisible();
+    expect(screen.getByRole("heading", { name: "等你确认" })).toBeVisible();
   });
 
   it("reconnects to an authoritative local-stage job under StrictMode without resubmitting", async () => {
@@ -476,9 +494,11 @@ describe("project review workspace", () => {
 
     renderWorkspace(client, "/projects/episode_01/stages/concept");
     await waitFor(() => expect(client.getJob).toHaveBeenCalledWith(runningJob.job_id));
+    await expandWorkspacePanel(/制作地图/);
     await user.click(screen.getByRole("link", {
       name: "02 剧本：成果已生成；已确认",
     }));
+    await expandWorkspacePanel(/审核与修改/);
     await screen.findByText("修订 2");
     const callsBeforeOldCompletion = vi.mocked(client.getStage).mock.calls.length;
 
@@ -518,6 +538,7 @@ describe("project review workspace", () => {
       resolveStage(selected);
     });
 
+    await expandWorkspacePanel(/审核与修改/);
     expect(await screen.findByText("成果已生成")).toBeVisible();
     expect(screen.getByText("等待确认")).toBeVisible();
     expect(screen.getByText("修订 4")).toBeVisible();
@@ -530,8 +551,10 @@ describe("project review workspace", () => {
     });
     renderWorkspace(workspaceApi(selected, projectFixture(selected)), "/projects/episode_01/stages/script");
 
+    await expandWorkspacePanel(/制作地图/);
+    await expandWorkspacePanel(/审核与修改/);
     await screen.findByText("请确认当前阶段成果后继续制作。");
-    expect(document.querySelector(".workspace-navigation-column")).not.toHaveTextContent("episode_01");
+    expect(document.querySelector(".production-map-panel")).not.toHaveTextContent("episode_01");
     expect(screen.queryByText("Review is required after generic.script.")).not.toBeInTheDocument();
     expect(screen.queryByText("REVIEW", { exact: true })).not.toBeInTheDocument();
     expect(screen.getByText("阶段审核", { exact: true })).toBeVisible();
@@ -542,6 +565,7 @@ describe("project review workspace", () => {
 
     const image = await screen.findByRole("img", { name: "角色或场景参考" });
     const open = screen.getByRole("link", { name: "查看原图" });
+    await expandWorkspacePanel(/审核与修改/);
     const review = screen.getByRole("heading", { name: "审核检查" });
 
     expect(open).toHaveAttribute("href", "/api/media/art_storyboard_preview");
@@ -613,6 +637,7 @@ describe("project review workspace", () => {
     const user = userEvent.setup();
     const first = renderWorkspace(api, "/projects/episode_01/stages/video");
 
+    await expandWorkspacePanel(/生成设置/);
     expect(await screen.findByText("视频生成预检")).toBeVisible();
     const shots = screen.getByRole("group", { name: "生成镜头" });
     expect(within(shots).getByRole("checkbox", { name: /第 1 镜/ })).toBeChecked();
@@ -633,6 +658,7 @@ describe("project review workspace", () => {
     first.unmount();
 
     renderWorkspace(api, "/projects/episode_01/stages/video");
+    await expandWorkspacePanel(/生成设置/);
     expect(await screen.findByText("生成完成")).toBeVisible();
     expect(api.getVideoWorkspace).toHaveBeenLastCalledWith("episode_01", expect.any(AbortSignal));
     expect(api.generateVideo).toHaveBeenCalledTimes(1);
@@ -652,6 +678,7 @@ describe("project review workspace", () => {
     const user = userEvent.setup();
     renderWorkspace(api, "/projects/episode_01/stages/video");
 
+    await expandWorkspacePanel(/生成设置/);
     await user.click(await screen.findByRole("button", { name: "恢复生成" }));
 
     expect(api.resumeJob).toHaveBeenCalledWith(failed.job_id);
@@ -684,6 +711,7 @@ describe("project review workspace", () => {
 
       renderWorkspace(api, "/projects/episode_01/stages/video");
 
+      await expandWorkspacePanel(/生成设置/);
       expect(await screen.findByText("正在确认作业恢复方式")).toBeVisible();
       expect(screen.queryByText("视频生成预检")).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "恢复生成" })).not.toBeInTheDocument();
@@ -724,6 +752,7 @@ describe("project review workspace", () => {
     const user = userEvent.setup();
     renderWorkspace(api, "/projects/episode_01/stages/video");
 
+    await expandWorkspacePanel(/生成设置/);
     expect(await screen.findByText(historyLabel)).toBeVisible();
     expect(await screen.findByText("视频生成预检")).toBeVisible();
     expect(screen.queryByRole("button", { name: "恢复生成" })).not.toBeInTheDocument();
@@ -747,6 +776,7 @@ describe("project review workspace", () => {
     const video = await screen.findByTestId("stage-video") as HTMLVideoElement;
     video.currentTime = 2.375;
 
+    await expandWorkspacePanel(/审核与修改/);
     await user.click(screen.getByRole("button", { name: "退回修改" }));
     const description = screen.getByRole("textbox", { name: "问题说明" });
     await user.type(description, "角色动作断裂。");
@@ -778,6 +808,7 @@ describe("project review workspace", () => {
   it("exposes all nine stages as stable links with textual current semantics", async () => {
     renderWorkspace();
 
+    await expandWorkspacePanel(/制作地图/);
     const rail = await screen.findByRole("navigation", { name: "项目阶段" });
     expect(within(rail).getAllByRole("link")).toHaveLength(9);
     expect(
@@ -821,6 +852,7 @@ describe("project review workspace", () => {
     );
     expect(api.getProject).toHaveBeenCalledTimes(2);
     expect(api.getStage).toHaveBeenCalledTimes(2);
+    await expandWorkspacePanel(/审核与修改/);
     expect(await screen.findByText("已确认")).toBeVisible();
   });
 
@@ -891,6 +923,7 @@ describe("project review workspace", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("成果修订已变化");
     expect(screen.getByRole("alert")).toHaveClass("message-neutral");
+    await expandWorkspacePanel(/审核与修改/);
     expect(screen.getByText("修订 5")).toBeVisible();
     expect(screen.getByRole("button", { name: "确认通过" })).toBeDisabled();
   });
@@ -900,6 +933,7 @@ describe("project review workspace", () => {
     const user = userEvent.setup();
     renderWorkspace(api);
 
+    await expandWorkspacePanel(/审核与修改/);
     await user.click(await screen.findByRole("button", { name: "退回修改" }));
     expect(screen.getByLabelText("动作不连贯（当前没有可选项目）")).toBeDisabled();
     expect(screen.getByLabelText("对白内容有误（当前没有可选项目）")).toBeDisabled();
@@ -1134,6 +1168,7 @@ describe("project review workspace", () => {
     const user = userEvent.setup();
     renderWorkspace(api);
 
+    await expandWorkspacePanel(/审核与修改/);
     await user.click(await screen.findByRole("button", { name: "退回修改" }));
     await user.click(screen.getByLabelText("整体成果需调整"));
     const submit = screen.getByRole("button", { name: "退回整阶段" });
@@ -1179,6 +1214,7 @@ describe("project review workspace", () => {
     const user = userEvent.setup();
     renderWorkspace(api);
 
+    await expandWorkspacePanel(/审核与修改/);
     await user.click(await screen.findByRole("button", { name: "退回修改" }));
     await user.click(screen.getByLabelText("整体成果需调整"));
     await user.type(screen.getByRole("textbox", { name: "问题说明" }), "整体重新梳理。" );
@@ -1310,9 +1346,11 @@ describe("project review workspace", () => {
 
     await user.type(await screen.findByRole("textbox", { name: "确认说明" }), "确认分镜。" );
     await user.click(screen.getByRole("button", { name: "确认通过" }));
+    await expandWorkspacePanel(/制作地图/);
     await user.click(screen.getByRole("link", {
       name: "04 资产：待开始；审核尚未开始",
     }));
+    await expandWorkspacePanel(/审核与修改/);
     await screen.findByText("修订 6");
     await user.type(screen.getByRole("textbox", { name: "确认说明" }), "确认资产。" );
     const newApproval = screen.getByRole("button", { name: "确认通过" });

@@ -9,6 +9,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { Link, Navigate, useParams } from "react-router";
 
@@ -29,6 +30,9 @@ import { JobProgress } from "../jobs/JobProgress";
 import { VideoPreflight } from "../jobs/VideoPreflight";
 import { StagePresentationView } from "../stages/StagePresentation";
 import { StageViewer } from "../stages/StageViewer";
+import { CurrentTaskPanel } from "./CurrentTaskPanel";
+import { deriveCreatorTask } from "./creatorTask";
+import { ExpandablePanel } from "./ExpandablePanel";
 import { ImpactDialog } from "./ImpactDialog";
 import { ReviewPanel, type ReviewIssueDraft } from "./ReviewPanel";
 import { StageRail, stageLabel } from "./StageRail";
@@ -494,6 +498,10 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
   const trackedStageJobId = stage.active_run_job?.job_id ?? (
     stageRun.status === "running" ? stageRun.jobId : ""
   );
+  const task = deriveCreatorTask(project, stage);
+  const isDirectStageRoute = (
+    selectedRouteStage !== undefined && selectedStage !== project.next_stage
+  );
 
   async function runSelectedStage() {
     if (!canRunStage || stageRun.status === "submitting" || stageRun.status === "running") return;
@@ -512,123 +520,170 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
     }
   }
 
+  const reviewKey = `${stage.stage}-${stage.revision}-${stage.review_evidence.map((item) => item.artifact_id).join("-")}`;
+  function approveCurrentStage(request: ApproveStageRequest) {
+    void runMutation(async (signal) => {
+      const result = await api.approveStage(
+        project.project_id,
+        stage.stage,
+        request,
+        signal,
+      );
+      if (result.revision !== request.revision) {
+        throw Object.assign(new Error("Approval revision changed"), {
+          code: "stale_confirmation",
+        });
+      }
+      return result;
+    });
+  }
+
+  async function requestCurrentStageChanges(request: RequestChangesRequest) {
+    const issue = reviewIssue;
+    const success = await runMutation((signal) =>
+      api.requestStageChanges(project.project_id, stage.stage, request, signal));
+    if (success && issue) {
+      setReviewIssue(null);
+      setMessage({ text: "问题已提交到当前修订。", tone: "neutral" });
+    }
+    return success;
+  }
+
+  function openImpact(
+    request: ImpactRequest,
+    issueLabel: string,
+    description: string,
+    trigger: HTMLButtonElement,
+  ) {
+    impactTriggerRef.current = trigger;
+    setImpactDraft({ request, issueLabel, description, trigger });
+  }
+
+  let primaryControl: ReactNode = null;
+  if (trackedStageJobId) {
+    primaryControl = (
+      <section className="stage-run-control" aria-label="阶段执行">
+        <div>
+          <strong>阶段正在本机运行</strong>
+          <span>页面会连接持久化作业，不会重复提交。</span>
+        </div>
+        <JobProgress
+          key={`${stage.stage}:${trackedStageJobId}`}
+          api={api}
+          jobId={trackedStageJobId}
+          allowResume={false}
+          onJobChange={handleStageRunJob}
+        />
+      </section>
+    );
+  } else if (canRunStage) {
+    primaryControl = (
+      <section className="stage-run-control" aria-label="阶段执行">
+        <div>
+          <strong>准备生成本阶段成果</strong>
+          <span>本机执行不会开启收费视频生成。</span>
+        </div>
+        <button
+          className="command-button"
+          type="button"
+          disabled={stageRun.status === "submitting"}
+          onClick={() => void runSelectedStage()}
+        >
+          {stageRun.status === "submitting" ? (
+            <LoaderCircle className="loading-icon" aria-hidden="true" size={16} />
+          ) : (
+            <Play aria-hidden="true" size={16} />
+          )}
+          {stageRun.status === "submitting"
+            ? `正在运行${stageLabel(stage.stage)}`
+            : `${stage.execution_state === "failed" || stage.execution_state === "stale" || stage.review_state === "changes_requested" ? "重新" : ""}运行${stageLabel(stage.stage)}阶段`}
+        </button>
+      </section>
+    );
+  } else if (stage.stage === "video" && state.videoWorkspace) {
+    primaryControl = (
+      <ExpandablePanel title="生成设置" summary="先检查镜头、费用与恢复状态">
+        <VideoGenerationWorkspace
+          key={`${project.project_id}:${state.videoWorkspace.job?.job_id ?? "new"}`}
+          api={api}
+          projectId={project.project_id}
+          workspace={state.videoWorkspace}
+        />
+      </ExpandablePanel>
+    );
+  } else if (task.status === "review") {
+    primaryControl = (
+      <ReviewPanel
+        key={`${reviewKey}-primary`}
+        stage={stage}
+        pending={mutationPending}
+        issueDraft={reviewIssue}
+        mode="primary"
+        onApprove={approveCurrentStage}
+        onRequestStageChanges={requestCurrentStageChanges}
+        onOpenImpact={openImpact}
+      />
+    );
+  }
+
   return (
     <div className="workspace-page">
-      <aside className="workspace-navigation-column">
-        <Link className="workspace-project-back" to="/projects">制作项目</Link>
-        <div className="workspace-project-identity">
-          <strong>{project.title}</strong>
-        </div>
-        <StageRail project={project} selectedStage={selectedStage} />
-      </aside>
-
-      <div className="workspace-artifact-column">
+      <main className="workspace-content">
         {message ? (
           <div className={`workspace-message message-${message.tone}`} role="alert">
             <AlertCircle aria-hidden="true" size={16} />
             <span>{message.text}</span>
           </div>
         ) : null}
-        <ArtifactWorkspace
-          stage={stage}
-          onIssueAtTime={(time, artifact) => {
-            const shotId = artifact.viewer?.shot_id?.trim();
-            if (!shotId) return;
-            setReviewIssue({
-              key: `${artifact.artifact_id}:${time}`,
-              shotId,
-              artifactId: artifact.artifact_id,
-              timeSeconds: time,
-            });
-          }}
-        />
-      </div>
-
-      <aside className="creator-console" aria-label="创作控制台">
-        <div className="creator-console-heading">
-          <p className="eyebrow">CREATOR CONSOLE</p>
-          <span>当前阶段 · {stageLabel(stage.stage)}</span>
-        </div>
-        {trackedStageJobId ? (
-          <section className="stage-run-control" aria-label="阶段执行">
-            <div>
-              <strong>阶段正在本机运行</strong>
-              <span>页面会连接持久化作业，不会重复提交。</span>
-            </div>
-            <JobProgress
-              key={`${stage.stage}:${trackedStageJobId}`}
-              api={api}
-              jobId={trackedStageJobId}
-              allowResume={false}
-              onJobChange={handleStageRunJob}
+        <section className="workspace-current-task" aria-label="当前任务">
+          <CurrentTaskPanel
+            project={project}
+            stage={stage}
+            task={task}
+            isDirectStageRoute={isDirectStageRoute}
+            primaryControl={primaryControl}
+          >
+            <ArtifactWorkspace
+              stage={stage}
+              onIssueAtTime={(time, artifact) => {
+                const shotId = artifact.viewer?.shot_id?.trim();
+                if (!shotId) return;
+                setReviewIssue({
+                  key: `${artifact.artifact_id}:${time}`,
+                  shotId,
+                  artifactId: artifact.artifact_id,
+                  timeSeconds: time,
+                });
+              }}
             />
-          </section>
-        ) : canRunStage ? (
-          <section className="stage-run-control" aria-label="阶段执行">
-            <div>
-              <strong>准备生成本阶段成果</strong>
-              <span>本机执行不会开启收费视频生成。</span>
-            </div>
-            <button
-              className="command-button"
-              type="button"
-              disabled={stageRun.status === "submitting"}
-              onClick={() => void runSelectedStage()}
-            >
-              {stageRun.status === "submitting" ? (
-                <LoaderCircle className="loading-icon" aria-hidden="true" size={16} />
-              ) : (
-                <Play aria-hidden="true" size={16} />
-              )}
-              {stageRun.status === "submitting"
-                ? `正在运行${stageLabel(stage.stage)}`
-                : `${stage.execution_state === "failed" || stage.execution_state === "stale" || stage.review_state === "changes_requested" ? "重新" : ""}运行${stageLabel(stage.stage)}阶段`}
-            </button>
-          </section>
-        ) : null}
-        {stage.stage === "video" && state.videoWorkspace ? (
-          <VideoGenerationWorkspace
-            key={`${project.project_id}:${state.videoWorkspace.job?.job_id ?? "new"}`}
-            api={api}
-            projectId={project.project_id}
-            workspace={state.videoWorkspace}
-          />
-        ) : null}
-        <ReviewPanel
-        key={`${stage.stage}-${stage.revision}-${stage.review_evidence.map((item) => item.artifact_id).join("-")}`}
-        stage={stage}
-        pending={mutationPending}
-        issueDraft={reviewIssue}
-        onApprove={(request: ApproveStageRequest) => void runMutation(async (signal) => {
-          const result = await api.approveStage(
-            project.project_id,
-            stage.stage,
-            request,
-            signal,
-          );
-          if (result.revision !== request.revision) {
-            throw Object.assign(new Error("Approval revision changed"), {
-              code: "stale_confirmation",
-            });
-          }
-          return result;
-        })}
-        onRequestStageChanges={async (request: RequestChangesRequest) => {
-          const issue = reviewIssue;
-          const success = await runMutation((signal) =>
-            api.requestStageChanges(project.project_id, stage.stage, request, signal));
-          if (success && issue) {
-            setReviewIssue(null);
-            setMessage({ text: "问题已提交到当前修订。", tone: "neutral" });
-          }
-          return success;
-        }}
-        onOpenImpact={(request, issueLabel, description, trigger) => {
-          impactTriggerRef.current = trigger;
-          setImpactDraft({ request, issueLabel, description, trigger });
-        }}
-        />
-      </aside>
+          </CurrentTaskPanel>
+        </section>
+
+        <div className="workspace-auxiliary-panels">
+          <div className="production-map-panel">
+            <ExpandablePanel title="制作地图" summary="查看全部九个制作阶段">
+              <div className="workspace-project-identity">
+                <Link className="workspace-project-back" to="/projects">制作项目</Link>
+                <strong>{project.title}</strong>
+              </div>
+              <StageRail project={project} selectedStage={selectedStage} />
+            </ExpandablePanel>
+          </div>
+
+          <ExpandablePanel title="审核与修改" summary="查看反馈与返修范围" tone={task.tone}>
+            <ReviewPanel
+              key={`${reviewKey}-details`}
+              stage={stage}
+              pending={mutationPending}
+              issueDraft={reviewIssue}
+              mode={task.status === "review" && stage.stage !== "video" ? "details" : undefined}
+              onApprove={approveCurrentStage}
+              onRequestStageChanges={requestCurrentStageChanges}
+              onOpenImpact={openImpact}
+            />
+          </ExpandablePanel>
+        </div>
+      </main>
 
       {impactDraft ? (
         <ImpactDialog
