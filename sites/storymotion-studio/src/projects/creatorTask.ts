@@ -29,6 +29,13 @@ export function deriveCreatorTask(project: ProjectDetail, stage: StageDetail): C
   if (stage.execution_state === "running" || stage.active_run_job) return runningTask(stage);
   if (stage.review_state === "awaiting_review") return reviewTask(stage);
   if (stage.execution_state === "passed" && project.next_stage === "complete") return completeTask(stage);
+  if (
+    stage.execution_state === "passed"
+    && stage.review_state === "approved"
+    && project.next_stage !== stage.stage
+  ) {
+    return historicalTask(stage);
+  }
   return startTask(stage);
 }
 
@@ -100,6 +107,18 @@ function completeTask(stage: StageDetail): CreatorTask {
     summary: `${label}已完成，所有阶段都已准备就绪。`,
     primaryLabel: "查看成果",
     afterAction: "下一阶段已准备好。",
+    tone: "complete",
+  };
+}
+
+function historicalTask(stage: StageDetail): CreatorTask {
+  const label = stageLabel(stage.stage);
+  return {
+    status: "complete",
+    title: "本阶段已完成",
+    summary: `${label}已确认，项目已继续到后续阶段。`,
+    primaryLabel: "回到当前任务",
+    afterAction: "返回当前任务可继续制作。",
     tone: "complete",
   };
 }

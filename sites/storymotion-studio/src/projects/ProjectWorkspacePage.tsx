@@ -628,7 +628,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
 
   return (
     <div className="workspace-page">
-      <main className="workspace-content">
+      <div className="workspace-content">
         {message ? (
           <div className={`workspace-message message-${message.tone}`} role="alert">
             <AlertCircle aria-hidden="true" size={16} />
@@ -683,7 +683,7 @@ export function ProjectWorkspacePage({ api }: { api: ProjectWorkspaceApi }) {
             />
           </ExpandablePanel>
         </div>
-      </main>
+      </div>
 
       {impactDraft ? (
         <ImpactDialog

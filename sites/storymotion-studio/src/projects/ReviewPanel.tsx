@@ -162,9 +162,13 @@ export function ReviewPanel({
 
   const showApproval = mode !== "details";
   const showDetails = mode !== "primary";
+  const Panel = mode === "primary" ? "div" : "aside";
 
   return (
-    <aside className={`review-panel${mode ? ` review-panel-${mode}` : ""}`} aria-label="审核检查">
+    <Panel
+      className={`review-panel${mode ? ` review-panel-${mode}` : ""}`}
+      aria-label={mode === "primary" ? undefined : "审核检查"}
+    >
       {showDetails ? (
         <>
           <div className="review-heading">
@@ -339,6 +343,6 @@ export function ReviewPanel({
           </div>
         ) : null}
       </div> : null}
-    </aside>
+    </Panel>
   );
 }

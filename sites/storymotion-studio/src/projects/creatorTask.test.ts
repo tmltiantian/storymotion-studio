@@ -55,4 +55,19 @@ describe("creator task adapter", () => {
   it("chooses the first unfinished project supplied by the API as the resume target", () => {
     expect(selectResumeProject([completedProject, activeProject])).toBe(activeProject);
   });
+
+  it("treats an approved stage behind the project next stage as completed history", () => {
+    const historical = stageFixture({
+      execution_state: "passed",
+      review_state: "approved",
+    });
+    const project = projectFixture(historical);
+    project.next_stage = "storyboard";
+
+    expect(deriveCreatorTask(project, historical)).toMatchObject({
+      status: "complete",
+      title: "本阶段已完成",
+      primaryLabel: "回到当前任务",
+    });
+  });
 });

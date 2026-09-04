@@ -23,6 +23,7 @@ import type {
   VideoPreflight,
   VideoWorkspace,
 } from "../api/types";
+import { AppShell } from "../app/AppShell";
 import {
   ProjectWorkspacePage,
   type ProjectWorkspaceApi,
@@ -303,6 +304,28 @@ function renderWorkspace(
   return render(strict ? <StrictMode>{content}</StrictMode> : content);
 }
 
+function renderWorkspaceInAppShell(
+  api: ProjectWorkspaceApi = workspaceApi(),
+  route = "/projects/episode_01/stages/storyboard",
+) {
+  return render(
+    <MemoryRouter initialEntries={[route]}>
+      <Routes>
+        <Route element={<AppShell />}>
+          <Route
+            path="/projects/:id"
+            element={<ProjectWorkspacePage api={api} />}
+          />
+          <Route
+            path="/projects/:id/stages/:stage"
+            element={<ProjectWorkspacePage api={api} />}
+          />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
 async function expandWorkspacePanel(name: RegExp) {
   const trigger = await screen.findByRole("button", { name });
   if (trigger.getAttribute("aria-expanded") === "false") {
@@ -348,6 +371,7 @@ describe("project review workspace", () => {
     expect(screen.getAllByRole("button", { name: /确认通过/ })).toHaveLength(1);
     await user.click(screen.getByRole("button", { name: /审核与修改/ }));
     expect(screen.getAllByRole("button", { name: /确认通过/ })).toHaveLength(1);
+    expect(screen.getAllByRole("complementary", { name: "审核检查" })).toHaveLength(1);
   });
 
   it("moves the stage map and review history into expandable controls", async () => {
@@ -355,6 +379,38 @@ describe("project review workspace", () => {
 
     expect(await screen.findByRole("button", { name: /制作地图/ })).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByRole("button", { name: /审核与修改/ })).toBeVisible();
+  });
+
+  it("keeps AppShell as the workspace route's only main landmark", async () => {
+    renderWorkspaceInAppShell();
+
+    await screen.findByRole("region", { name: "当前任务" });
+    expect(screen.getAllByRole("main")).toHaveLength(1);
+  });
+
+  it("shows an approved historical stage with one clear return to the current task", async () => {
+    const historical = stageFixture({
+      stage: "script",
+      execution_state: "passed",
+      review_state: "approved",
+      review_blocks_progress: false,
+      revision: 2,
+    });
+    const project = projectFixture(historical, {
+      next_stage: "storyboard",
+      required_action: "approve_review_evidence",
+    });
+
+    renderWorkspaceInAppShell(
+      workspaceApi(historical, project),
+      "/projects/episode_01/stages/script",
+    );
+
+    expect(await screen.findByRole("heading", { name: "本阶段已完成" })).toBeVisible();
+    const returnActions = screen.getAllByRole("link", { name: "回到当前任务" });
+    expect(returnActions).toHaveLength(1);
+    expect(returnActions[0]).toHaveAttribute("href", "/projects/episode_01/stages/storyboard");
+    expect(screen.queryByRole("button", { name: "运行剧本阶段" })).not.toBeInTheDocument();
   });
 
   it("runs a pending stage through the production job contract and reloads its revision", async () => {
