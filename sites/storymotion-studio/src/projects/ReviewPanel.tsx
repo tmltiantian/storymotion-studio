@@ -7,7 +7,7 @@ import type {
   RequestChangesRequest,
   StageDetail,
 } from "../api/types";
-import { executionLabels, reviewLabels } from "./StageRail";
+import { executionLabels, reviewLabels, stageLabel } from "./StageRail";
 
 type IssueCategory =
   | "dialogue"
@@ -79,6 +79,7 @@ export function ReviewPanel({
   onRequestStageChanges,
   onOpenImpact,
   issueDraft,
+  mode,
 }: {
   stage: StageDetail;
   pending: boolean;
@@ -93,6 +94,7 @@ export function ReviewPanel({
     trigger: HTMLButtonElement,
   ) => void;
   issueDraft?: ReviewIssueDraft | null;
+  mode?: "primary" | "details";
 }) {
   const [approvalNote, setApprovalNote] = useState("");
   const [selectedEvidence, setSelectedEvidence] = useState<string[]>(
@@ -104,7 +106,7 @@ export function ReviewPanel({
   const descriptionRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    if (!issueDraft) return;
+    if (mode === "primary" || !issueDraft) return;
     let active = true;
     queueMicrotask(() => {
       if (!active) return;
@@ -129,7 +131,7 @@ export function ReviewPanel({
     return () => {
       active = false;
     };
-  }, [issueDraft]);
+  }, [issueDraft, mode]);
 
   const reviewable =
     stage.execution_state === "passed" &&
@@ -158,35 +160,53 @@ export function ReviewPanel({
     );
   }
 
+  const showApproval = mode !== "details";
+  const showDetails = mode !== "primary";
+  const Panel = mode === "primary" ? "div" : "aside";
+
   return (
-    <aside className="review-panel" aria-labelledby="review-panel-title">
-      <div className="review-heading">
-        <div>
-          <p className="eyebrow">阶段审核</p>
-          <h2 id="review-panel-title">审核检查</h2>
-        </div>
-        <span className="review-revision">修订 {stage.revision || "-"}</span>
-      </div>
+    <Panel
+      className={`review-panel${mode ? ` review-panel-${mode}` : ""}`}
+      aria-label={mode === "primary" ? undefined : "审核检查"}
+    >
+      {showDetails ? (
+        <>
+          <div className="review-heading">
+            <div>
+              <p className="eyebrow">阶段审核</p>
+              <h2>审核检查</h2>
+            </div>
+            <span className="review-revision">修订 {stage.revision || "-"}</span>
+          </div>
 
-      <dl className="stage-state-pair">
-        <div className={`execution-state state-${stage.execution_state}`}>
-          <dt>执行状态</dt>
-          <dd>{executionLabels[stage.execution_state]}</dd>
-        </div>
-        <div className={`review-state state-${stage.review_state}`}>
-          <dt>审核状态</dt>
-          <dd>{reviewLabels[stage.review_state]}</dd>
-        </div>
-      </dl>
+          <dl className="stage-state-pair">
+            <div className={`execution-state state-${stage.execution_state}`}>
+              <dt>执行状态</dt>
+              <dd>{executionLabels[stage.execution_state]}</dd>
+            </div>
+            <div className={`review-state state-${stage.review_state}`}>
+              <dt>审核状态</dt>
+              <dd>{reviewLabels[stage.review_state]}</dd>
+            </div>
+          </dl>
 
-      {stage.blocked_reasons.length > 0 ? (
-        <div className="review-reasons">
-          <strong>下一步</strong>
-          <p>{creatorBlockedMessage(stage)}</p>
-        </div>
+          {stage.blocked_reasons.length > 0 ? (
+            <div className="review-reasons">
+              <strong>{stage.review_state === "changes_requested" ? "修改反馈" : "下一步"}</strong>
+              {stage.review_state === "changes_requested"
+                ? stage.blocked_reasons.map((reason) => <p key={reason}>{reason}</p>)
+                : <p>{creatorBlockedMessage(stage)}</p>}
+            </div>
+          ) : null}
+        </>
       ) : null}
 
-      <div className="approval-form">
+      {showApproval ? <div className="approval-form">
+        {mode === "primary" ? (
+          <p className="review-primary-guidance">
+            先检查{stageLabel(stage.stage)}成果，再决定是否确认通过。
+          </p>
+        ) : null}
         <label>
           <span>确认说明</span>
           <textarea
@@ -223,9 +243,9 @@ export function ReviewPanel({
           {pending ? <LoaderCircle className="loading-icon" aria-hidden="true" size={16} /> : <Check aria-hidden="true" size={16} />}
           确认通过
         </button>
-      </div>
+      </div> : null}
 
-      <div className="changes-section">
+      {showDetails ? <div className="changes-section">
         <button
           className="changes-toggle"
           type="button"
@@ -324,7 +344,7 @@ export function ReviewPanel({
             )}
           </div>
         ) : null}
-      </div>
-    </aside>
+      </div> : null}
+    </Panel>
   );
 }
