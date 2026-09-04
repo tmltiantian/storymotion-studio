@@ -13,8 +13,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 
 import type { ApiClient } from "../api/client";
-import type { ProjectDetail } from "../api/types";
+import type { ProjectDetail, StageDetail } from "../api/types";
 import { CreateProjectDialog } from "../app/CreateProjectDialog";
+import { deriveCreatorTask, selectResumeProject } from "./creatorTask";
+import { ResumeProjectCard } from "./ResumeProjectCard";
 import {
   ProjectStageMiniRail,
   stageLabel,
@@ -111,6 +113,36 @@ function ProjectCard({ project }: { project: ProjectDetail }) {
   );
 }
 
+function isNextTask(stage: StageDetail): boolean {
+  return (
+    stage.review_state === "awaiting_review" ||
+    stage.review_state === "changes_requested" ||
+    ["failed", "stale", "running"].includes(stage.execution_state)
+  );
+}
+
+function NextTaskRow({
+  project,
+  stage,
+}: {
+  project: ProjectDetail;
+  stage: StageDetail;
+}) {
+  const task = deriveCreatorTask(project, stage);
+  return (
+    <article className={`next-task-row tone-${task.tone}`}>
+      <div>
+        <p>待处理制作任务</p>
+        <strong>《{project.title}》·{stageLabel(stage.stage)}</strong>
+        <span>{task.summary}</span>
+      </div>
+      <Link to={`/projects/${project.project_id}/stages/${stage.stage}`}>
+        {task.primaryLabel}
+      </Link>
+    </article>
+  );
+}
+
 function LoadingProjects() {
   return (
     <div className="state-row" role="status" aria-label="正在加载项目">
@@ -172,6 +204,8 @@ export function ProjectListPage({ api }: { api: ProjectListApi }) {
   }, [api]);
 
   const projects = state.status === "ready" ? state.projects : [];
+  const resumeProject =
+    state.status === "ready" ? selectResumeProject(projects) : null;
   const normalizedFilter = filter.trim().toLocaleLowerCase("zh-CN");
   const visibleProjects = normalizedFilter
     ? projects.filter((project) =>
@@ -187,24 +221,25 @@ export function ProjectListPage({ api }: { api: ProjectListApi }) {
       )
       .map((stage) => ({ project, stage })),
   );
+  const nextTasks = projects
+    .filter((project) => project.next_stage !== "complete")
+    .flatMap((project) =>
+      project.stages
+        .filter(isNextTask)
+        .map((stage) => ({ project, stage })),
+    )
+    .slice(0, 3);
 
   return (
     <div className="page-frame">
-      <section className="creator-dashboard" aria-label="创作工作台概览">
-        <div>
-          <p className="eyebrow">STORYMOTION STUDIO</p>
-          <h1>把灵感推进成一部作品</h1>
-          <p>从剧本、分镜到成片，所有生成、审核与版本都在同一个创作台完成。</p>
-        </div>
-        <div className="creator-dashboard-status">
-          <span>进行中</span>
-          <strong>{state.status === "ready" ? `${visibleProjects.length} 个项目正在创作中` : "正在载入创作项目"}</strong>
-        </div>
-      </section>
       <div className="page-heading">
         <div>
           <p className="eyebrow">PROJECT LIBRARY</p>
-          <h1>制作项目</h1>
+          <span className="project-library-status">
+            {state.status === "ready"
+              ? `${visibleProjects.length} 个项目正在创作中`
+              : "正在载入创作项目"}
+          </span>
         </div>
         <div className="heading-actions">
           <button
@@ -269,9 +304,43 @@ export function ProjectListPage({ api }: { api: ProjectListApi }) {
         </div>
       ) : null}
 
+      {state.status === "ready" ? (
+        resumeProject ? (
+          <>
+            <ResumeProjectCard project={resumeProject} />
+            {nextTasks.length > 0 ? (
+              <div className="next-task-list" aria-label="需要处理的制作任务">
+                {nextTasks.map(({ project, stage }) => (
+                  <NextTaskRow
+                    key={`${project.project_id}-${stage.stage}`}
+                    project={project}
+                    stage={stage}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <section className="resume-project-invitation" aria-label="继续制作">
+            <p className="eyebrow">继续制作</p>
+            <h1>从一个新灵感开始制作</h1>
+            <p>新建项目后，剧本、分镜和成片制作都会从这里继续。</p>
+            <button
+              className="command-button"
+              type="button"
+              aria-label="从新灵感开始制作"
+              onClick={() => setCreateOpen(true)}
+            >
+              <Plus aria-hidden="true" size={17} />
+              新建项目
+            </button>
+          </section>
+        )
+      ) : null}
+
       <section className="project-section" aria-labelledby="active-projects-title">
         <div className="section-heading">
-          <h2 id="active-projects-title">进行中的项目</h2>
+          <h2 id="active-projects-title">全部项目</h2>
           {state.status === "ready" ? <span>{visibleProjects.length} 个</span> : null}
         </div>
         {state.status === "loading" ? <LoadingProjects /> : null}

@@ -275,12 +275,103 @@
   margin-bottom: 20px;
 }
 
-.page-heading h1 {
+.page-heading h1,
+.page-heading h2 {
   margin: 3px 0 0;
   font-size: 21px;
   font-weight: 690;
   line-height: 1.25;
 }
+
+.project-library-status {
+  color: var(--steel);
+  font-size: 11px;
+}
+
+.resume-project-card,
+.resume-project-invitation {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: clamp(24px, 4vw, 42px);
+  border: 1px solid var(--rule-strong);
+  border-radius: 18px;
+  background: var(--surface);
+}
+
+.resume-project-card h1,
+.resume-project-invitation h1 {
+  margin: 0;
+  font-size: clamp(24px, 3vw, 34px);
+  letter-spacing: -0.035em;
+  line-height: 1.15;
+}
+
+.resume-project-card > p:not(.eyebrow),
+.resume-project-invitation > p:not(.eyebrow) {
+  max-width: 640px;
+  margin: 0;
+  color: var(--steel);
+  line-height: 1.7;
+}
+
+.resume-project-card .command-button,
+.resume-project-invitation .command-button {
+  width: max-content;
+}
+
+.resume-project-card small {
+  color: var(--steel);
+}
+
+.resume-project-card.tone-review { border-color: var(--review); }
+.resume-project-card.tone-changes { border-color: #65726e; }
+.resume-project-card.tone-failed { border-color: var(--failed); }
+.resume-project-card.tone-complete { border-color: var(--passed); }
+
+.next-task-list {
+  display: grid;
+  gap: 8px;
+  margin: 20px 0 32px;
+}
+
+.next-task-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--rule);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.next-task-row > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.next-task-row p,
+.next-task-row strong,
+.next-task-row span {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.next-task-row p {
+  color: var(--steel);
+  font-family: var(--utility-font);
+  font-size: 10px;
+}
+
+.next-task-row span { color: var(--steel); font-size: 11px; }
+.next-task-row > a { color: var(--operation); font-size: 12px; font-weight: 650; }
+.next-task-row.tone-review { border-left-color: var(--review); }
+.next-task-row.tone-changes { border-left-color: #65726e; }
+.next-task-row.tone-failed { border-left-color: var(--failed); }
+.next-task-row.tone-complete { border-left-color: var(--passed); }
 
 .eyebrow {
   margin: 0;
