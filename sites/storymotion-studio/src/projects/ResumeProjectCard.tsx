@@ -15,7 +15,7 @@ export function ResumeProjectCard({ project }: { project: ProjectDetail }) {
       <p>{task.summary}</p>
       <Link
         className="command-button"
-        to={`/projects/${project.project_id}/stages/${stage.stage}`}
+        to={`/projects/${project.project_id}`}
       >
         {task.primaryLabel}
       </Link>

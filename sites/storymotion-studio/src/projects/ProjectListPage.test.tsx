@@ -66,7 +66,7 @@ describe("ProjectListPage", () => {
 
     const resume = await screen.findByRole("region", { name: "继续制作" });
     expect(within(resume).getByRole("link", { name: "查看成果并确认" }))
-      .toHaveAttribute("href", "/projects/active-project/stages/storyboard");
+      .toHaveAttribute("href", "/projects/active-project");
     expect(screen.getByRole("heading", { name: "全部项目" })).toBeVisible();
   });
 

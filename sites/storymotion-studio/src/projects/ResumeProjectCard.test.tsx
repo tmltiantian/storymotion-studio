@@ -51,7 +51,7 @@ describe("ResumeProjectCard", () => {
     expect(screen.getByRole("region", { name: "继续制作" })).toBeVisible();
     expect(screen.getByRole("link", { name: "查看成果并确认" })).toHaveAttribute(
       "href",
-      "/projects/active-project/stages/storyboard",
+      "/projects/active-project",
     );
   });
 });

@@ -324,6 +324,7 @@
   color: var(--steel);
 }
 
+.resume-project-card.tone-operation { border-color: var(--operation); }
 .resume-project-card.tone-review { border-color: var(--review); }
 .resume-project-card.tone-changes { border-color: #65726e; }
 .resume-project-card.tone-failed { border-color: var(--failed); }
@@ -368,6 +369,7 @@
 
 .next-task-row span { color: var(--steel); font-size: 11px; }
 .next-task-row > a { color: var(--operation); font-size: 12px; font-weight: 650; }
+.next-task-row.tone-operation { border-left-color: var(--operation); }
 .next-task-row.tone-review { border-left-color: var(--review); }
 .next-task-row.tone-changes { border-left-color: #65726e; }
 .next-task-row.tone-failed { border-left-color: var(--failed); }
